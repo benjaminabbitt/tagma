@@ -1,4 +1,13 @@
-//! tagma-core: the tagma engine.
-//!
-//! Empty scaffold for Phase 0 — parsing, atoms, infix/postfix compilation,
-//! and the index land in Phase 2 (see PLAN.md §7).
+//! tagma-core: the tagma engine — tag parsing, atom/infix/postfix query
+//! compilation and evaluation over an in-memory index (SPEC.md, PLAN.md §7).
+
+pub mod atom;
+pub mod index;
+pub mod infix;
+pub mod postfix;
+pub mod tag;
+pub mod token;
+
+pub use atom::{Atom, Op, Pos};
+pub use index::Index;
+pub use tag::Tag;
