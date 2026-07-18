@@ -195,7 +195,11 @@ fn find_operator(s: &str) -> Option<(usize, Op, usize)> {
 /// Parses a value under the v1 numeric grammar `-?[0-9]+(\.[0-9]+)?`
 /// (SPEC.md §6), returning `None` for anything outside it (no exponents,
 /// hex, or leading `+`).
-fn parse_numeral(s: &str) -> Option<f64> {
+///
+/// `pub(crate)`: also used by the inverted index (`index.rs`) to evaluate
+/// numeric-range operators over distinct-value posting lists without
+/// duplicating the numeral grammar.
+pub(crate) fn parse_numeral(s: &str) -> Option<f64> {
     let bytes = s.as_bytes();
     let mut i = 0;
     if i < bytes.len() && bytes[i] == b'-' {
@@ -227,7 +231,10 @@ fn parse_numeral(s: &str) -> Option<f64> {
 /// Anchored full-value match: pattern char `.` matches any single
 /// character, every other pattern char must match itself; lengths (in
 /// chars) must be equal (SPEC.md §6).
-fn anchored_match(value: &str, pattern: &str) -> bool {
+///
+/// `pub(crate)`: also used by the inverted index (`index.rs`), see
+/// [`parse_numeral`].
+pub(crate) fn anchored_match(value: &str, pattern: &str) -> bool {
     let vchars: Vec<char> = value.chars().collect();
     let pchars: Vec<char> = pattern.chars().collect();
     if vchars.len() != pchars.len() {
