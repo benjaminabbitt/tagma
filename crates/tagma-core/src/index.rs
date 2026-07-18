@@ -32,21 +32,38 @@
 //! `*:*=5`-style queries). Every other combination — including
 //! `*:*=5`-style equality, which resolves to direct point lookups — stays
 //! index-driven.
+//!
+//! PLAN.md §9/P4: posting lists, match sets, and the postfix VM's stack all
+//! operate on interned `u32` item ids rather than `String` ids, so the
+//! query path never clones or hashes a `String` per match. `id_table`
+//! (`u32 -> String`) and `id_lookup` (`String -> u32`) are the only place a
+//! `String` id exists once an item is added; every registry below and
+//! [`Index::matching_ids_u32`]/[`postfix::eval`] work in `u32` and
+//! `Vec<u32>` (kept sorted, so unions/intersections/differences are linear
+//! merges) until the very last step, where ids are mapped back to strings
+//! and — since intern order is first-seen order, not string order —
+//! explicitly re-sorted lexicographically to preserve the public API's
+//! "sorted matching ids" contract.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::atom::{anchored_match, parse_numeral, Atom, Op, Pos};
 use crate::infix;
 use crate::postfix;
 use crate::tag::Tag;
 
-/// An id-set posting list.
-type PostingList = BTreeSet<String>;
+/// An id-set posting list: sorted, deduplicated interned item ids.
+type PostingList = Vec<u32>;
 
 /// An in-memory tag index: item id -> tags, queryable via infix or postfix.
 #[derive(Debug, Clone, Default)]
 pub struct Index {
-    items: BTreeMap<String, Vec<Tag>>,
+    /// `u32 -> String`: the interned id table, indexed by the id itself.
+    id_table: Vec<String>,
+    /// `String -> u32`: the reverse lookup used to intern/re-intern ids.
+    id_lookup: HashMap<String, u32>,
+    /// `u32 -> tags`, parallel to `id_table`.
+    tags_by_id: Vec<Vec<Tag>>,
     /// Every namespace ever observed, including `None` for the null
     /// namespace; drives `*`/`+` namespace-quantifier expansion.
     namespaces: BTreeSet<Option<String>>,
@@ -74,24 +91,31 @@ impl Index {
     /// once per `(ns, key[, value])` regardless of how many times it was
     /// inserted.
     pub fn add_item(&mut self, id: &str, tags: Vec<Tag>) {
+        let (iid, is_new_id) = self.intern(id);
         for tag in &tags {
             self.namespaces.insert(tag.namespace.clone());
             self.keys_by_ns
                 .entry(tag.namespace.clone())
                 .or_default()
                 .insert(tag.key.clone());
-            self.by_ns_key
-                .entry((tag.namespace.clone(), tag.key.clone()))
-                .or_default()
-                .insert(id.to_string());
+            push_id(
+                self.by_ns_key
+                    .entry((tag.namespace.clone(), tag.key.clone()))
+                    .or_default(),
+                iid,
+                is_new_id,
+            );
             if let Some(value) = &tag.value {
-                self.by_ns_key_value
-                    .entry((tag.namespace.clone(), tag.key.clone(), value.clone()))
-                    .or_default()
-                    .insert(id.to_string());
+                push_id(
+                    self.by_ns_key_value
+                        .entry((tag.namespace.clone(), tag.key.clone(), value.clone()))
+                        .or_default(),
+                    iid,
+                    is_new_id,
+                );
             }
         }
-        self.items.entry(id.to_string()).or_default().extend(tags);
+        self.tags_by_id[iid as usize].extend(tags);
     }
 
     /// Parses and adds a `<id> <tag> <tag>...` line (ARCHITECTURE.md bulk
@@ -115,7 +139,7 @@ impl Index {
 
     /// All item ids currently in the index, in sorted order.
     pub fn all_ids(&self) -> BTreeSet<String> {
-        self.items.keys().cloned().collect()
+        self.id_table.iter().cloned().collect()
     }
 
     /// The ids of items matching `atom`.
@@ -125,11 +149,10 @@ impl Index {
     /// with an operator needing per-distinct-value iteration — which falls
     /// back to the per-item scan (PLAN.md §9).
     pub fn matching_ids(&self, atom: &Atom) -> BTreeSet<String> {
-        if self.should_scan(atom) {
-            self.scan_matching_ids(atom)
-        } else {
-            self.indexed_matching_ids(atom)
-        }
+        self.matching_ids_u32(atom)
+            .into_iter()
+            .map(|iid| self.id_table[iid as usize].clone())
+            .collect()
     }
 
     /// Compiles `query` (infix) to postfix and evaluates it, returning
@@ -153,6 +176,52 @@ impl Index {
         postfix::eval(postfix_query, self)
     }
 
+    /// Interns `id`, returning `(interned id, was this string new)`. A
+    /// fresh id is always strictly greater than every previously-interned
+    /// id, which [`push_id`] relies on to append (rather than
+    /// binary-search-insert) into posting lists in the common case.
+    fn intern(&mut self, id: &str) -> (u32, bool) {
+        if let Some(&existing) = self.id_lookup.get(id) {
+            return (existing, false);
+        }
+        let iid = self.id_table.len() as u32;
+        self.id_table.push(id.to_string());
+        self.id_lookup.insert(id.to_string(), iid);
+        self.tags_by_id.push(Vec::new());
+        (iid, true)
+    }
+
+    /// Every interned id, as a sorted `Vec<u32>` — the query-path universe.
+    /// Ids are assigned sequentially with no gaps or removals, so this is
+    /// just the contiguous range `0..id_table.len()`.
+    pub(crate) fn all_ids_u32(&self) -> Vec<u32> {
+        (0..self.id_table.len() as u32).collect()
+    }
+
+    /// Maps interned ids back to their string ids, sorted
+    /// **lexicographically by string** — intern order is first-seen order,
+    /// not string order, so this is not simply "in `ids` order" or "in
+    /// numeric `u32` order".
+    pub(crate) fn strings_for(&self, ids: &[u32]) -> Vec<String> {
+        let mut out: Vec<String> = ids
+            .iter()
+            .map(|&i| self.id_table[i as usize].clone())
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// The interned ids of items matching `atom` — the engine-internal
+    /// counterpart of [`Self::matching_ids`], used by the postfix VM so the
+    /// query path stays in `u32` until the final result.
+    pub(crate) fn matching_ids_u32(&self, atom: &Atom) -> Vec<u32> {
+        if self.should_scan(atom) {
+            self.scan_matching_ids_u32(atom)
+        } else {
+            self.indexed_matching_ids_u32(atom)
+        }
+    }
+
     /// `true` iff `atom` has the one shape the inverted index doesn't serve
     /// directly: namespace *and* key both quantified (`*`/`+`), combined
     /// with an operator that needs per-distinct-value iteration (`!=`, a
@@ -174,24 +243,32 @@ impl Index {
 
     /// The naive per-item scan (PLAN.md §7.5): the original evaluator, kept
     /// as the fallback for the shape identified by [`Self::should_scan`].
-    fn scan_matching_ids(&self, atom: &Atom) -> BTreeSet<String> {
-        self.items
+    /// `tags_by_id` is iterated in id order, so the result is already a
+    /// sorted `Vec<u32>`.
+    fn scan_matching_ids_u32(&self, atom: &Atom) -> Vec<u32> {
+        self.tags_by_id
             .iter()
+            .enumerate()
             .filter(|(_, tags)| atom.matches(tags))
-            .map(|(id, _)| id.clone())
+            .map(|(iid, _)| iid as u32)
             .collect()
     }
 
     /// Resolves `atom` via the posting-list registries: expands the
-    /// namespace and key clauses to concrete candidates, then unions the
-    /// postings each `(ns, key)` pair contributes under the value clause.
-    fn indexed_matching_ids(&self, atom: &Atom) -> BTreeSet<String> {
-        let mut result = BTreeSet::new();
+    /// namespace and key clauses to concrete candidates, collects every
+    /// posting each `(ns, key)` pair contributes under the value clause
+    /// (union-heavy atoms like `!=` can touch hundreds of value buckets),
+    /// then sorts and dedups once at the end — a single collect-and-sort
+    /// rather than hundreds of pairwise linear merges.
+    fn indexed_matching_ids_u32(&self, atom: &Atom) -> Vec<u32> {
+        let mut result: Vec<u32> = Vec::new();
         for ns in self.ns_candidates(&atom.ns) {
             for key in self.key_candidates(&ns, &atom.key) {
                 self.collect_ns_key(&ns, &key, &atom.value, &mut result);
             }
         }
+        result.sort_unstable();
+        result.dedup();
         result
     }
 
@@ -236,14 +313,14 @@ impl Index {
         &'a self,
         ns: &Option<String>,
         key: &str,
-    ) -> impl Iterator<Item = (&'a str, &'a PostingList)> {
+    ) -> impl Iterator<Item = (&'a str, &'a [u32])> {
         let ns_owned = ns.clone();
         let key_owned = key.to_string();
         let start = (ns.clone(), key.to_string(), String::new());
         self.by_ns_key_value
             .range(start..)
             .take_while(move |((n, k, _), _)| *n == ns_owned && *k == key_owned)
-            .map(|((_, _, v), ids)| (v.as_str(), ids))
+            .map(|((_, _, v), ids)| (v.as_str(), ids.as_slice()))
     }
 
     /// Adds the ids `(ns, key)` contributes under `value` (an atom's value
@@ -256,17 +333,17 @@ impl Index {
         ns: &Option<String>,
         key: &str,
         value: &Option<(Op, Pos)>,
-        out: &mut BTreeSet<String>,
+        out: &mut Vec<u32>,
     ) {
         match value {
             None | Some((_, Pos::Any)) => {
                 if let Some(ids) = self.by_ns_key.get(&(ns.clone(), key.to_string())) {
-                    out.extend(ids.iter().cloned());
+                    out.extend_from_slice(ids);
                 }
             }
             Some((_, Pos::Present)) => {
                 for (_, ids) in self.value_entries(ns, key) {
-                    out.extend(ids.iter().cloned());
+                    out.extend_from_slice(ids);
                 }
             }
             Some((Op::Eq, Pos::Tok(v))) => {
@@ -274,13 +351,13 @@ impl Index {
                     self.by_ns_key_value
                         .get(&(ns.clone(), key.to_string(), v.clone()))
                 {
-                    out.extend(ids.iter().cloned());
+                    out.extend_from_slice(ids);
                 }
             }
             Some((Op::Ne, Pos::Tok(v))) => {
                 for (val, ids) in self.value_entries(ns, key) {
                     if val != v {
-                        out.extend(ids.iter().cloned());
+                        out.extend_from_slice(ids);
                     }
                 }
             }
@@ -300,18 +377,40 @@ impl Index {
                         _ => unreachable!(),
                     };
                     if matches {
-                        out.extend(ids.iter().cloned());
+                        out.extend_from_slice(ids);
                     }
                 }
             }
             Some((Op::Match, Pos::Tok(v))) => {
                 for (val, ids) in self.value_entries(ns, key) {
                     if anchored_match(val, v) {
-                        out.extend(ids.iter().cloned());
+                        out.extend_from_slice(ids);
                     }
                 }
             }
         }
+    }
+}
+
+/// Pushes `id` into posting list `v` (kept sorted and deduplicated).
+///
+/// When `id` was just freshly interned (`is_new_id`), it is guaranteed
+/// strictly greater than every id that could already be in `v` (interning
+/// hands out ids in increasing order, and a brand-new id cannot yet appear
+/// in any registry), so appending preserves sortedness in O(1) amortized —
+/// the common case for bulk loading. The only intra-call duplicate this
+/// must still guard is the *same* tag repeated within one `add_item` call
+/// (e.g. `"a urgent urgent"`), caught by comparing against the last-pushed
+/// id. When `id` is not fresh (the item already existed — `add_item` called
+/// again for the same string id), it may belong anywhere in `v`, so a
+/// binary-search insert is used instead.
+fn push_id(v: &mut Vec<u32>, id: u32, is_new_id: bool) {
+    if is_new_id {
+        if v.last() != Some(&id) {
+            v.push(id);
+        }
+    } else if let Err(pos) = v.binary_search(&id) {
+        v.insert(pos, id);
     }
 }
 
@@ -511,11 +610,87 @@ mod tests {
         ];
         for a in atoms {
             let atom = Atom::parse(a).unwrap();
-            let mut indexed: Vec<_> = idx.matching_ids(&atom).into_iter().collect();
-            let mut scanned: Vec<_> = idx.scan_matching_ids(&atom).into_iter().collect();
-            indexed.sort();
-            scanned.sort();
+            let mut indexed = idx.matching_ids_u32(&atom);
+            let mut scanned = idx.scan_matching_ids_u32(&atom);
+            indexed.sort_unstable();
+            scanned.sort_unstable();
             assert_eq!(indexed, scanned, "mismatch for atom {a:?}");
         }
+    }
+
+    // --- P4: id interning coverage ----------------------------------------
+
+    #[test]
+    fn intern_round_trips_and_dedups_ids() {
+        let mut idx = Index::new();
+        let (id_a1, new_a1) = idx.intern("a");
+        assert!(new_a1);
+        let (id_a2, new_a2) = idx.intern("a");
+        assert!(!new_a2, "re-interning an existing id must not be 'new'");
+        assert_eq!(
+            id_a1, id_a2,
+            "the same string must always intern to the same id"
+        );
+
+        let (id_b, new_b) = idx.intern("b");
+        assert!(new_b);
+        assert_ne!(id_a1, id_b, "distinct strings must intern to distinct ids");
+
+        assert_eq!(idx.id_table[id_a1 as usize], "a");
+        assert_eq!(idx.id_table[id_b as usize], "b");
+    }
+
+    #[test]
+    fn query_results_are_sorted_lexicographically_by_string_id_not_intern_order() {
+        let mut idx = Index::new();
+        // Intern order is deliberately not lexicographic: b10 (id 0),
+        // b2 (id 1), a1 (id 2). If results were returned in intern/numeric
+        // order instead of re-sorted by string, this would come back as
+        // ["b10", "b2", "a1"].
+        idx.add_line("b10 x").unwrap();
+        idx.add_line("b2 x").unwrap();
+        idx.add_line("a1 x").unwrap();
+
+        let got = idx.query("x").unwrap();
+        // Lexicographic string order: "a1" < "b10" < "b2" (comparing
+        // "b10" vs "b2" char-by-char, '1' < '2').
+        assert_eq!(got, vec!["a1", "b10", "b2"]);
+
+        // matching_ids (BTreeSet<String>) and query_postfix must agree.
+        let mut via_matching_ids: Vec<_> = idx
+            .matching_ids(&Atom::parse("x").unwrap())
+            .into_iter()
+            .collect();
+        via_matching_ids.sort();
+        assert_eq!(via_matching_ids, vec!["a1", "b10", "b2"]);
+
+        let postfix_result = idx.query_postfix("x/not/not").unwrap();
+        assert_eq!(postfix_result, vec!["a1", "b10", "b2"]);
+    }
+
+    #[test]
+    fn fresh_id_push_and_reinsert_paths_agree_with_scan() {
+        // Exercises both push_id branches: fresh ids appended in increasing
+        // intern order (the common bulk-load path), then an existing id
+        // re-added (forcing the binary-search-insert path) for a key it
+        // didn't previously carry, and out of "new max" order relative to
+        // ids interned after it.
+        let mut idx = Index::new();
+        idx.add_line("a k=1").unwrap();
+        idx.add_line("b k=1").unwrap();
+        idx.add_line("c k=1").unwrap();
+        // "a" (id 0) already exists; re-adding it must insert into the
+        // middle of k=1's posting list ([0,1,2] already has ids > 0... in
+        // this case 0 is already present, so this also covers the dedup
+        // side of the binary-search path), not just append.
+        idx.add_item("a", vec![Tag::parse("k=1").unwrap()]);
+
+        let atom = Atom::parse("k=1").unwrap();
+        let mut indexed = idx.matching_ids_u32(&atom);
+        let mut scanned = idx.scan_matching_ids_u32(&atom);
+        indexed.sort_unstable();
+        scanned.sort_unstable();
+        assert_eq!(indexed, scanned);
+        assert_eq!(indexed, vec![0, 1, 2]);
     }
 }
