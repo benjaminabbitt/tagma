@@ -1,0 +1,16 @@
+{
+  "name": "tagma",
+  "image": "mcr.microsoft.com/devcontainers/base:bookworm",
+  "features": {
+    "ghcr.io/devcontainers/features/rust:1": {},
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "lts"
+    },
+    "ghcr.io/devcontainers/features/python:1": {
+      "version": "3.12"
+    },
+    "ghcr.io/devcontainers/features/go:1": {},
+    "ghcr.io/guiyomh/features/just:0": {}
+  },
+  "postCreateCommand": "just setup"
+}
