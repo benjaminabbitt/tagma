@@ -20,7 +20,22 @@ setup:
 
 # Phase-gated toolchain installs (not yet built).
 setup-js:
-    @echo "not yet built: setup-js"
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if command -v rustup >/dev/null 2>&1; then
+        rustup target add wasm32-unknown-unknown
+    else
+        echo "rustup not found; assuming wasm32-unknown-unknown is already installed"
+    fi
+    if ! command -v wasm-pack >/dev/null 2>&1; then
+        echo "setup-js: wasm-pack not on PATH; installing"
+        cargo install wasm-pack --locked
+    fi
+    if [ -d bindings/js ]; then
+        cd bindings/js
+        npm ci || npm install
+    fi
+    echo "setup-js: toolchain ready"
 
 setup-py:
     #!/usr/bin/env bash
@@ -129,7 +144,23 @@ build-ffi:
     echo "build-ffi: C smoke test passed"
 
 build-wasm:
-    @echo "not yet built: build-wasm"
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v wasm-pack >/dev/null 2>&1; then
+        echo "build-wasm: wasm-pack not on PATH; run 'just setup-js' first"
+        exit 1
+    fi
+    wasm-pack build crates/tagma-wasm --target nodejs --out-dir ../../bindings/js/wasm/node
+    wasm-pack build crates/tagma-wasm --target web --out-dir ../../bindings/js/wasm/web
+    # wasm-pack emits a per-output-dir .gitignore ("**"); bindings/js/.gitignore
+    # already ignores wasm/ wholesale for git, but a nested ignore file also
+    # makes npm-packlist drop these files from `npm pack` even when the
+    # package's own .npmignore says otherwise, so remove it post-build.
+    rm -f bindings/js/wasm/node/.gitignore bindings/js/wasm/web/.gitignore
+    if [ -f bindings/js/scripts/inline.mjs ]; then
+        node bindings/js/scripts/inline.mjs
+    fi
+    echo "build-wasm: pkg + .d.ts emitted"
 
 dev-py: setup-py
     #!/usr/bin/env bash

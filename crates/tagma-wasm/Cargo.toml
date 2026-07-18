@@ -1,0 +1,13 @@
+[package]
+name = "tagma-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "wasm-bindgen wrapper over tagma-core (PLAN.md Phase 5, task W1)."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+tagma-core = { path = "../tagma-core" }
+wasm-bindgen = "0.2"
+js-sys = "0.3"
