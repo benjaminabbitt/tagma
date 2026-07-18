@@ -1,0 +1,3 @@
+# npm always respects .gitignore unless this file exists; presence alone
+# overrides that so the "files" allow-list in package.json (which includes
+# the gitignored wasm/ build output) actually ships in the tarball.

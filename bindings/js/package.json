@@ -1,0 +1,33 @@
+{
+  "name": "tagma",
+  "version": "0.1.0",
+  "private": true,
+  "description": "tagma: tag parsing, query compilation and matching over a WASM-built tagma-core (placeholder package, not published).",
+  "type": "module",
+  "main": "./src/node.mjs",
+  "types": "./src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "node": "./src/node.mjs",
+      "browser": "./src/browser.mjs",
+      "default": "./src/browser.mjs"
+    },
+    "./inline": {
+      "types": "./src/index.d.ts",
+      "default": "./src/inline.mjs"
+    }
+  },
+  "files": [
+    "src",
+    "wasm",
+    "scripts"
+  ],
+  "scripts": {
+    "prepack": "node scripts/inline.mjs",
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "@cucumber/cucumber": "^11.0.0"
+  }
+}
