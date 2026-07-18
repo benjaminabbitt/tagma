@@ -179,7 +179,7 @@ dev-py: setup-py
 # --- performance (Phase 4+) -------------------------------------------------
 
 bench:
-    @echo "not yet built: bench"
+    cargo bench -p tagma-core
 
 # --- misc --------------------------------------------------------------
 
