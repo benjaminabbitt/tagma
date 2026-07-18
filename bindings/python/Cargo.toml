@@ -1,0 +1,20 @@
+# tagma-py: PyO3 bindings for tagma-core (PLAN.md §11, Phase 6 / Y1).
+#
+# This crate lives outside the root workspace's `crates/*` members glob
+# (ARCHITECTURE.md: bindings/ports are their own thing). The empty
+# [workspace] table below makes it a standalone workspace so cargo does not
+# try to fold it into the parent workspace at ../../Cargo.toml.
+[workspace]
+
+[package]
+name = "tagma-py"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "tagma"
+crate-type = ["cdylib"]
+
+[dependencies]
+tagma-core = { path = "../../crates/tagma-core" }
+pyo3 = { version = "0.29", features = ["abi3-py310", "extension-module"] }

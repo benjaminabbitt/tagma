@@ -23,7 +23,14 @@ setup-js:
     @echo "not yet built: setup-js"
 
 setup-py:
-    @echo "not yet built: setup-py"
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ ! -d bindings/python/.venv ]; then
+        python3 -m venv bindings/python/.venv
+    fi
+    bindings/python/.venv/bin/pip install --upgrade pip >/dev/null
+    bindings/python/.venv/bin/pip install maturin behave
+    echo "setup-py: venv ready"
 
 setup-go:
     @echo "not yet built: setup-go"
@@ -75,14 +82,12 @@ conformance-js:
     fi
     echo "not yet built: conformance-js"
 
-conformance-py:
+conformance-py: setup-py
     #!/usr/bin/env bash
     set -euo pipefail
-    if [ ! -d bindings/python ]; then
-        echo "SKIP: bindings/python not yet built"
-        exit 0
-    fi
-    echo "not yet built: conformance-py"
+    cd bindings/python
+    .venv/bin/maturin develop --release
+    .venv/bin/behave features --no-capture
 
 conformance-go:
     #!/usr/bin/env bash
@@ -126,8 +131,12 @@ build-ffi:
 build-wasm:
     @echo "not yet built: build-wasm"
 
-dev-py:
-    @echo "not yet built: dev-py"
+dev-py: setup-py
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd bindings/python
+    .venv/bin/maturin develop --release
+    .venv/bin/python tests/test_smoke.py
 
 # --- performance (Phase 4+) -------------------------------------------------
 
