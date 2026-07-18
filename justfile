@@ -99,7 +99,7 @@ build-cli:
     #!/usr/bin/env bash
     set -euo pipefail
     if [ -d crates/tagma-cli ]; then
-        cargo build -p tagma-cli
+        cargo build -p tagma-cli --release
     else
         echo "not yet built: build-cli"
     fi
