@@ -1,0 +1,11 @@
+[package]
+name = "tagma-ffi"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "tagma_ffi"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+tagma-core = { path = "../tagma-core" }

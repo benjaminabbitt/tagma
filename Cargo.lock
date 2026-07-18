@@ -925,6 +925,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "tagma-ffi"
+version = "0.1.0"
+dependencies = [
+ "tagma-core",
+]
+
+[[package]]
 name = "terminal_size"
 version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -107,11 +107,21 @@ build-cli:
 build-ffi:
     #!/usr/bin/env bash
     set -euo pipefail
-    if [ -d crates/tagma-ffi ]; then
-        cargo build -p tagma-ffi
-    else
+    if [ ! -d crates/tagma-ffi ]; then
         echo "not yet built: build-ffi"
+        exit 0
     fi
+    if ! command -v cbindgen >/dev/null 2>&1; then
+        echo "build-ffi: cbindgen not on PATH; installing"
+        cargo install cbindgen --locked
+    fi
+    cargo build -p tagma-ffi --release
+    cbindgen --config crates/tagma-ffi/cbindgen.toml --crate tagma-ffi \
+        --output include/tagma.h crates/tagma-ffi
+    cc crates/tagma-ffi/tests/smoke.c -I include -L target/release -ltagma_ffi \
+        -Wl,-rpath,"$(pwd)/target/release" -o target/release/tagma-ffi-smoke
+    LD_LIBRARY_PATH="$(pwd)/target/release:${LD_LIBRARY_PATH:-}" target/release/tagma-ffi-smoke
+    echo "build-ffi: C smoke test passed"
 
 build-wasm:
     @echo "not yet built: build-wasm"
