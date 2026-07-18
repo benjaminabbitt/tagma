@@ -6,7 +6,7 @@ cucumber-js, behave, godog) implements exactly these nine steps against its
 own binding or port, and nothing else. Extending this vocabulary is a
 `[SPEC]` task.
 
-Nine steps. Ports implement these and nothing else. `{string}` is a quoted
+Ten steps. Ports implement these and nothing else. `{string}` is a quoted
 cucumber-expression string; empty string means absent/none; id and tag lists
 are single-space-separated; match assertions compare **sorted** id sets.
 

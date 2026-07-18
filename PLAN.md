@@ -237,7 +237,7 @@ Scoped when a mobile consumer exists; uniffi UDL over the same handle API.
 
 ## Appendix A — frozen step vocabulary
 
-Nine steps. Ports implement these and nothing else. `{string}` is a quoted
+Ten steps. Ports implement these and nothing else. `{string}` is a quoted
 cucumber-expression string; empty string means absent/none; id and tag lists
 are single-space-separated; match assertions compare **sorted** id sets.
 
