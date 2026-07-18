@@ -1,0 +1,38 @@
+Feature: Infix query compilation
+
+  The infix query frontend compiles to the postfix wire form. Precedence is
+  not > and > or; parentheses override precedence. Fixtures transcribed
+  verbatim from PLAN.md Appendix B.2 and B.3.
+
+  Scenario Outline: compiling infix to postfix
+    When the query "<infix>" is compiled
+    Then the postfix is "<postfix>"
+
+    Examples:
+      | infix                          | postfix                       |
+      | urgent                         | urgent                        |
+      | urgent and range>4             | urgent/range>4/and            |
+      | a or b and c                   | a/b/c/and/or                  |
+      | (a or b) and c                 | a/b/or/c/and                  |
+      | not a and b                    | a/not/b/and                   |
+      | not (a and b)                  | a/b/and/not                   |
+      | not not a                      | a/not/not                     |
+      | a and b and c                  | a/b/and/c/and                 |
+      | *:lang=en and not status=done  | *:lang=en/status=done/not/and |
+      | *                              | *                              |
+      | and=*                          | and=*                         |
+
+  Scenario Outline: compilation failures
+    When the query "<infix>" is compiled
+    Then compilation fails
+
+    Examples:
+      | infix   |
+      | a and   |
+      | and a   |
+      | (a      |
+      | a )     |
+      | a b     |
+      | a & b   |
+      | not     |
+      | a=* or  |
