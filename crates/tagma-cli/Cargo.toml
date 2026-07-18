@@ -1,0 +1,11 @@
+[package]
+name = "tagma-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "tagma"
+path = "src/main.rs"
+
+[dependencies]
+tagma-core = { path = "../tagma-core" }
