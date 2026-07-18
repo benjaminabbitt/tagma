@@ -1,5 +1,6 @@
 //! tagma-core: the tagma engine — tag parsing, atom/infix/postfix query
 //! compilation and evaluation over an in-memory index (SPEC.md, PLAN.md §7).
+#![deny(missing_docs)]
 
 pub mod atom;
 pub mod index;
