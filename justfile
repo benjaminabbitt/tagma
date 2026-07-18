@@ -48,7 +48,10 @@ setup-py:
     echo "setup-py: venv ready"
 
 setup-go:
-    @echo "not yet built: setup-go"
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd ports/go
+    go mod download
 
 # --- critical path -------------------------------------------------------
 
@@ -111,7 +114,8 @@ conformance-go:
         echo "SKIP: ports/go not yet built"
         exit 0
     fi
-    echo "not yet built: conformance-go"
+    cd ports/go
+    go test -run TestConformance -v ./...
 
 # --- builds ----------------------------------------------------------------
 
