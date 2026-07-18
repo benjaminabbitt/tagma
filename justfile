@@ -98,7 +98,10 @@ conformance-js:
         echo "SKIP: bindings/js not yet built"
         exit 0
     fi
-    echo "not yet built: conformance-js"
+    if [ ! -f bindings/js/wasm/node/tagma_wasm.js ]; then
+        just build-wasm
+    fi
+    cd bindings/js && npx cucumber-js
 
 conformance-py: setup-py
     #!/usr/bin/env bash

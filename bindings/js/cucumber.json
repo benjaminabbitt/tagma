@@ -1,0 +1,7 @@
+{
+  "default": {
+    "paths": ["../../features"],
+    "import": ["features-steps/**/*.mjs"],
+    "strict": true
+  }
+}
