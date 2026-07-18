@@ -1,0 +1,24 @@
+
+# ctxloom private working state (rebuildable/local — cache, fetched pieces, sessions, ephemeral scratch, project id)
+*.ctxloom.bak
+.agents/
+.codex/config.toml
+
+# tool-config directories (agent/editor tooling, not project sources)
+.ctxloom/
+.ctxloom-opencode-managed
+.kiro/
+.codex/
+.opencode/
+.claude/
+.mcp.json
+opencode.json
+AGENTS.md
+
+# tagma build artifacts
+target/
+node_modules/
+dist/
+__pycache__/
+.venv/
+*.wasm
