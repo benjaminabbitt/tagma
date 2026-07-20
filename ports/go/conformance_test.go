@@ -19,7 +19,7 @@ import (
 
 	"github.com/cucumber/godog"
 
-	tagma "github.com/tagma/tagma/ports/go"
+	tagma "github.com/benjaminabbitt/tagma/ports/go"
 )
 
 // conformanceState holds the "current" parse/compile/query result for the

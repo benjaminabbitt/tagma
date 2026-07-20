@@ -1,4 +1,4 @@
-module github.com/tagma/tagma/ports/go
+module github.com/benjaminabbitt/tagma/ports/go
 
 go 1.24.4
 
