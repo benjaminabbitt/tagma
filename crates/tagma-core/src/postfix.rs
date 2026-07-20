@@ -20,6 +20,7 @@
 
 use crate::atom::Atom;
 use crate::index::Index;
+use crate::token::split_unquoted;
 
 /// A stack entry: a sorted, deduplicated `Vec<u32>` of interned item ids,
 /// tagged as itself (`Pos`) or as the complement of that set over the
@@ -147,11 +148,14 @@ fn difference(a: &[u32], b: &[u32]) -> Vec<u32> {
 /// Evaluates a postfix query string against `index`, returning sorted
 /// matching ids.
 ///
-/// The query is split on `/`. `and`/`or` pop two operands and push their
-/// combination per [`Frame::and`]/[`Frame::or`]; `not` pops one and flips
-/// it per [`Frame::not`]; anything else is parsed as an atom and pushes its
-/// match set. Stack underflow, a final stack size other than one, or an
-/// empty query are errors.
+/// The query is split on unquoted `/` (SPEC.md §2 QUOTING extension: a
+/// `"`-quoted span is opaque to the splitter, so a literal `/` inside a
+/// quoted atom's value survives instead of being mistaken for the
+/// separator). `and`/`or` pop two operands and push their combination per
+/// [`Frame::and`]/[`Frame::or`]; `not` pops one and flips it per
+/// [`Frame::not`]; anything else is parsed as an atom and pushes its match
+/// set. Stack underflow, a final stack size other than one, an empty
+/// query, or an unterminated quote are errors.
 ///
 /// # Errors
 ///
@@ -163,7 +167,7 @@ pub fn eval(postfix: &str, index: &Index) -> Result<Vec<String>, String> {
 
     let mut stack: Vec<Frame> = Vec::new();
 
-    for tok in postfix.split('/') {
+    for tok in split_unquoted(postfix, '/').map_err(|e| format!("postfix: {e}"))? {
         match tok {
             "and" => {
                 let rhs = pop(&mut stack, "and")?;
@@ -232,6 +236,24 @@ mod tests {
     fn trailing_operand_is_an_error() {
         let idx = fixture();
         assert!(eval("urgent/range=5", &idx).is_err());
+    }
+
+    // --- QUOTING extension (SPEC.md §2) -------------------------------
+
+    #[test]
+    fn a_quoted_literal_slash_survives_the_wire_form_split() {
+        let mut idx = Index::new();
+        idx.add_item("g", vec![Tag::parse("path=\"/etc/passwd\"").unwrap()]);
+        assert_eq!(
+            eval("path=\"/etc/passwd\"", &idx).unwrap(),
+            vec!["g".to_string()]
+        );
+    }
+
+    #[test]
+    fn unterminated_quote_is_an_evaluation_error() {
+        let idx = fixture();
+        assert!(eval("path=\"unterminated", &idx).is_err());
     }
 
     #[test]

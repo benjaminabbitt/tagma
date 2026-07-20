@@ -28,21 +28,25 @@ Feature: Tag parsing
     Quoting is syntax, not data: the canonical, stored value is always the
     decoded content, so a quoted spelling that didn't need quoting (e.g.
     "3.5") parses identically to its bare spelling. `""` inside the quotes
-    escapes one literal `"`.
-    When the tag "<input>" is parsed
-    Then it parses with namespace "<namespace>", key "<key>", value "<value>"
+    escapes one literal `"`. (Table cells here embed literal `"` characters,
+    so the step arguments below are single-quote-delimited — the same
+    {string} cucumber-expression type, just the other legal delimiter.)
+    When the tag '<input>' is parsed
+    Then it parses with namespace '<namespace>', key '<key>', value '<value>'
 
     Examples:
-      | input                          | namespace | key | value                 |
-      | due=\"2026-08-01T10:00:00\"    |           | due | 2026-08-01T10:00:00   |
-      | note=\"hello world\"           |           | note | hello world          |
-      | \"a:b\"=c                      |           | a:b | c                     |
-      | x=\"3.5\"                      |           | x   | 3.5                   |
-      | x=\"say \"\"hi\"\"\"           |           | x   | say \"hi\"            |
+      | input                       | namespace | key  | value                 |
+      | due="2026-08-01T10:00:00"   |           | due  | 2026-08-01T10:00:00   |
+      | note="hello world"          |           | note | hello world           |
+      | "a:b"=c                     |           | a:b  | c                     |
+      | x="3.5"                     |           | x    | 3.5                   |
+      | x="say ""hi"""              |           | x    | say "hi"              |
 
   Scenario Outline: invalid tags
-    Includes the empty-string input, which must also fail to parse.
-    When the tag "<input>" is parsed
+    Includes the empty-string input, which must also fail to parse. The
+    step arguments are single-quote-delimited so the unterminated-quote
+    row below can embed a literal `"` with no escaping.
+    When the tag '<input>' is parsed
     Then parsing fails
 
     Examples:
@@ -61,4 +65,4 @@ Feature: Tag parsing
       | a:b:c       |
       | key=va~lue  |
       |             |
-      | x=\"abc     |
+      | x="abc      |

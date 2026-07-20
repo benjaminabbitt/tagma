@@ -1,7 +1,7 @@
 //! Query atom parsing (SPEC.md §3-4; PLAN.md §7.2) and matching (§7.5).
 
 use crate::tag::Tag;
-use crate::token::{is_token, is_value_token};
+use crate::token::{decode_quoted_prefix, find_unquoted, parse_component};
 
 /// A parsed query-atom position: concrete token, `*` (any/absent), or `+`
 /// (present).
@@ -46,29 +46,34 @@ pub struct Atom {
 }
 
 impl Atom {
-    /// Parses a query atom string per PLAN.md §7.2.
+    /// Parses a query atom string per PLAN.md §7.2, plus the QUOTING
+    /// extension (SPEC.md §2): `q-ns`/`q-key`/`q-value` may each be spelled
+    /// as a `qtoken` instead of a `bare-token` (sharing the same `token`
+    /// production a write-side tag uses), as well as the `*`/`+`
+    /// quantifiers.
     ///
-    /// Operator scan: earliest position wins; at equal position two-char
-    /// operators (`!=` `>=` `<=`) beat one-char (`=` `>` `<` `~`); a lone
-    /// `!` is never an operator. The text left of the operator (or the
-    /// whole atom, if there is none) splits on its first `:` into an
-    /// optional namespace and the key.
+    /// Operator scan: earliest *unquoted* position wins; at equal position
+    /// two-char operators (`!=` `>=` `<=`) beat one-char (`=` `>` `<` `~`);
+    /// a lone `!` is never an operator. An operator character inside a
+    /// quoted span is opaque content, not an operator. The text left of the
+    /// operator (or the whole atom, if there is none) splits on its first
+    /// *unquoted* `:` into an optional namespace and the key.
     ///
     /// # Errors
     ///
-    /// Returns a `String` naming the invalid component.
+    /// Returns a `String` naming the invalid or unterminated component.
     pub fn parse(s: &str) -> Result<Atom, String> {
         if s.is_empty() {
             return Err("atom: empty".to_string());
         }
 
-        let (left, op_value) = match find_operator(s) {
+        let (left, op_value) = match find_operator(s)? {
             Some((start, op, len)) => (&s[..start], Some((op, &s[start + len..]))),
             None => (s, None),
         };
 
-        let (ns_part, key_part) = match left.find(':') {
-            Some(idx) => (Some(&left[..idx]), &left[idx + 1..]),
+        let (ns_part, key_part) = match find_unquoted(left, &[':'])? {
+            Some((idx, _)) => (Some(&left[..idx]), &left[idx + 1..]),
             None => (None, left),
         };
 
@@ -147,49 +152,60 @@ impl Atom {
 }
 
 /// Parses a `q-ns` / `q-key` / `q-value` component: `*` -> `Any`, `+` ->
-/// `Present`, else a validated token (`value-token` charset, which admits a
-/// leading `-`, when `allow_leading_dash` is set).
+/// `Present`, else a validated token (bare, per the `value-token` charset
+/// admitting a leading `-` when `allow_leading_dash` is set, or a `qtoken`
+/// decoded to its canonical content — SPEC.md §2 QUOTING extension). Note
+/// a *quoted* `"*"`/`"+"` is the literal one-character token, not the
+/// quantifier: quoting always turns syntax into data.
 fn parse_q_pos(s: &str, allow_leading_dash: bool) -> Result<Pos, String> {
     match s {
         "*" => Ok(Pos::Any),
         "+" => Ok(Pos::Present),
-        _ => {
-            let ok = if allow_leading_dash {
-                is_value_token(s)
-            } else {
-                is_token(s)
-            };
-            if ok {
-                Ok(Pos::Tok(s.to_string()))
-            } else {
-                Err(format!("atom: invalid component {s:?}"))
-            }
-        }
+        _ => parse_component(s, allow_leading_dash).map(Pos::Tok),
     }
 }
 
-/// Scans `s` for the earliest operator, preferring a two-char match over a
-/// one-char match at the same starting position. Returns `(start, op, len)`.
-fn find_operator(s: &str) -> Option<(usize, Op, usize)> {
-    let bytes = s.as_bytes();
-    for i in 0..bytes.len() {
-        if i + 1 < bytes.len() {
-            match &bytes[i..i + 2] {
-                b"!=" => return Some((i, Op::Ne, 2)),
-                b">=" => return Some((i, Op::Ge, 2)),
-                b"<=" => return Some((i, Op::Le, 2)),
+/// Scans `s` for the earliest *unquoted* operator, preferring a two-char
+/// match over a one-char match at the same starting position; a `"`-quoted
+/// span (SPEC.md §2) is skipped whole, so an operator character inside
+/// quoted content is never mistaken for the real operator. Returns
+/// `(start, op, len)`.
+///
+/// # Errors
+///
+/// Returns a `String` if an opened quote is never closed.
+fn find_operator(s: &str) -> Result<Option<(usize, Op, usize)>, String> {
+    let mut i = 0;
+    while i < s.len() {
+        let rest = &s[i..];
+        let c = rest
+            .chars()
+            .next()
+            .expect("i < s.len() implies a char remains");
+        if c == '"' {
+            let (_, len) = decode_quoted_prefix(rest)?;
+            i += len;
+            continue;
+        }
+        let bytes = rest.as_bytes();
+        if bytes.len() >= 2 {
+            match &bytes[0..2] {
+                b"!=" => return Ok(Some((i, Op::Ne, 2))),
+                b">=" => return Ok(Some((i, Op::Ge, 2))),
+                b"<=" => return Ok(Some((i, Op::Le, 2))),
                 _ => {}
             }
         }
-        match bytes[i] {
-            b'=' => return Some((i, Op::Eq, 1)),
-            b'>' => return Some((i, Op::Gt, 1)),
-            b'<' => return Some((i, Op::Lt, 1)),
-            b'~' => return Some((i, Op::Match, 1)),
+        match bytes[0] {
+            b'=' => return Ok(Some((i, Op::Eq, 1))),
+            b'>' => return Ok(Some((i, Op::Gt, 1))),
+            b'<' => return Ok(Some((i, Op::Lt, 1))),
+            b'~' => return Ok(Some((i, Op::Match, 1))),
             _ => {}
         }
+        i += c.len_utf8();
     }
-    None
+    Ok(None)
 }
 
 /// Parses a value under the v1 numeric grammar `-?[0-9]+(\.[0-9]+)?`
@@ -394,5 +410,53 @@ mod tests {
         let a = Atom::parse("due~2026-..-..").unwrap();
         assert!(a.matches(&[tag(None, "due", Some("2026-08-01"))]));
         assert!(!a.matches(&[tag(None, "due", Some("2026"))]));
+    }
+
+    // --- QUOTING extension (SPEC.md §2) -------------------------------
+
+    #[test]
+    fn quoted_operand_admits_reserved_chars() {
+        let a = Atom::parse("due=\"2026-08-01T10:00:00\"").unwrap();
+        assert_eq!(a.key, Pos::Tok("due".to_string()));
+        assert_eq!(
+            a.value,
+            Some((Op::Eq, Pos::Tok("2026-08-01T10:00:00".to_string())))
+        );
+    }
+
+    #[test]
+    fn quoted_key_containing_a_colon_is_not_mistaken_for_a_namespace_separator() {
+        let a = Atom::parse("\"a:b\"=c").unwrap();
+        assert_eq!(a.ns, None);
+        assert_eq!(a.key, Pos::Tok("a:b".to_string()));
+    }
+
+    #[test]
+    fn quoted_operand_is_syntax_not_data() {
+        assert_eq!(Atom::parse("range>\"4\""), Atom::parse("range>4"));
+    }
+
+    #[test]
+    fn quoted_star_and_plus_are_literal_data_not_quantifiers() {
+        let a = Atom::parse("key=\"*\"").unwrap();
+        assert_eq!(a.value, Some((Op::Eq, Pos::Tok("*".to_string()))));
+        let a = Atom::parse("key=\"+\"").unwrap();
+        assert_eq!(a.value, Some((Op::Eq, Pos::Tok("+".to_string()))));
+    }
+
+    #[test]
+    fn quoted_pattern_still_uses_the_dot_wildcard_anchored_match() {
+        // Quoting only lifts the charset a "~" pattern may contain, not the
+        // pattern language: "." is still "any char", not "literal dot".
+        let a = Atom::parse("due~\"2026-..-..\"").unwrap();
+        assert!(a.matches(&[tag(None, "due", Some("2026-08-01"))]));
+        assert!(!a.matches(&[tag(None, "due", Some("2026"))]));
+    }
+
+    #[test]
+    fn unterminated_quote_fails_to_parse() {
+        for s in ["key=\"abc", "\"abc=5", "\""] {
+            assert!(Atom::parse(s).is_err(), "expected {s:?} to fail parsing");
+        }
     }
 }

@@ -1,6 +1,7 @@
 //! Infix query compilation to postfix (SPEC.md §2; PLAN.md §7.3).
 
 use crate::atom::Atom;
+use crate::token::decode_quoted_prefix;
 
 /// Compiles an infix query string to its canonical postfix (wire) form,
 /// tokens joined with `/`.
@@ -21,7 +22,7 @@ use crate::atom::Atom;
 /// Returns a `String` describing the compile failure (unbalanced
 /// parentheses, a misplaced operator/operand, or an invalid atom).
 pub fn compile(s: &str) -> Result<String, String> {
-    let tokens = lex(s);
+    let tokens = lex(s)?;
     if tokens.is_empty() {
         return Err("compile: empty query".to_string());
     }
@@ -113,11 +114,30 @@ fn precedence(op: &str) -> u8 {
 }
 
 /// Lexes an infix query string: `(`/`)` are always standalone tokens;
-/// everything else splits on whitespace.
-fn lex(s: &str) -> Vec<String> {
+/// everything else splits on whitespace — except a `"`-quoted span
+/// (SPEC.md §2 QUOTING extension), which is consumed whole (whitespace,
+/// `(`/`)`, and any other reserved character inside it are opaque
+/// content), so a quoted atom carries its quotes intact into `Atom::parse`.
+///
+/// # Errors
+///
+/// Returns a `String` if an opened quote is never closed.
+fn lex(s: &str) -> Result<Vec<String>, String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
-    for c in s.chars() {
+    let mut i = 0;
+    while i < s.len() {
+        let rest = &s[i..];
+        let c = rest
+            .chars()
+            .next()
+            .expect("i < s.len() implies a char remains");
+        if c == '"' {
+            let (_, len) = decode_quoted_prefix(rest).map_err(|e| format!("compile: {e}"))?;
+            current.push_str(&rest[..len]);
+            i += len;
+            continue;
+        }
         if c.is_whitespace() {
             if !current.is_empty() {
                 tokens.push(std::mem::take(&mut current));
@@ -130,11 +150,12 @@ fn lex(s: &str) -> Vec<String> {
         } else {
             current.push(c);
         }
+        i += c.len_utf8();
     }
     if !current.is_empty() {
         tokens.push(current);
     }
-    tokens
+    Ok(tokens)
 }
 
 #[cfg(test)]
@@ -184,5 +205,30 @@ mod tests {
     fn parens_are_standalone_regardless_of_spacing() {
         assert_eq!(compile("(a or b) and c").as_deref(), Ok("a/b/or/c/and"));
         assert_eq!(compile("( a or b ) and c").as_deref(), Ok("a/b/or/c/and"));
+    }
+
+    // --- QUOTING extension (SPEC.md §2) -------------------------------
+
+    #[test]
+    fn quoted_whitespace_stays_one_atom_instead_of_splitting() {
+        assert_eq!(
+            compile("note=\"hello world\"").as_deref(),
+            Ok("note=\"hello world\"")
+        );
+    }
+
+    #[test]
+    fn quoted_atom_composes_with_and_or() {
+        assert_eq!(compile("\"a:b\"=c and x").as_deref(), Ok("\"a:b\"=c/x/and"));
+    }
+
+    #[test]
+    fn quoted_parens_are_literal_content_not_grouping() {
+        assert_eq!(compile("expr=\"(a+b)\"").as_deref(), Ok("expr=\"(a+b)\""));
+    }
+
+    #[test]
+    fn unterminated_quote_fails_to_compile() {
+        assert!(compile("note=\"unterminated").is_err());
     }
 }

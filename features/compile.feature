@@ -5,8 +5,11 @@ Feature: Infix query compilation
   verbatim from PLAN.md Appendix B.2 and B.3.
 
   Scenario Outline: compiling infix to postfix
-    When the query "<infix>" is compiled
-    Then the postfix is "<postfix>"
+    Step arguments are single-quote-delimited (the other legal {string}
+    delimiter) so the quoted-atom rows below can embed literal `"`
+    characters with no escaping.
+    When the query '<infix>' is compiled
+    Then the postfix is '<postfix>'
 
     Examples:
       | infix                          | postfix                       |
@@ -21,11 +24,13 @@ Feature: Infix query compilation
       | *:lang=en and not status=done  | *:lang=en/status=done/not/and |
       | *                              | *                              |
       | and=*                          | and=*                         |
-      | note=\"hello world\"           | note=\"hello world\"          |
-      | \"a:b\"=c and x                | \"a:b\"=c/x/and               |
+      | note="hello world"             | note="hello world"            |
+      | "a:b"=c and x                  | "a:b"=c/x/and                 |
 
   Scenario Outline: compilation failures
-    When the query "<infix>" is compiled
+    Step arguments are single-quote-delimited so the unterminated-quote row
+    below can embed a literal `"` with no escaping.
+    When the query '<infix>' is compiled
     Then compilation fails
 
     Examples:
@@ -38,4 +43,4 @@ Feature: Infix query compilation
       | a & b   |
       | not     |
       | a=* or  |
-      | note=\"unterminated |
+      | note="unterminated |

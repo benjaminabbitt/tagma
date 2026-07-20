@@ -1,6 +1,6 @@
 //! Tag parsing (SPEC.md §2; PLAN.md §7.1).
 
-use crate::token::{is_token, is_value_token};
+use crate::token::{find_unquoted, parse_component};
 
 /// A parsed tag: `(namespace?, key, value?)` (SPEC.md §1-2).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,25 +14,28 @@ pub struct Tag {
 }
 
 impl Tag {
-    /// Parses a write-side tag string per SPEC.md §2 / PLAN.md §7.1.
+    /// Parses a write-side tag string per SPEC.md §2 / PLAN.md §7.1, plus
+    /// the QUOTING extension (SPEC.md §2): the namespace, key, and value
+    /// positions may each be spelled as a `qtoken` instead of a
+    /// `bare-token`.
     ///
-    /// The namespace separator is the first `:` only if it occurs before the
-    /// first `=` (or there is no `=`); every present component is validated
-    /// against its charset.
+    /// The namespace separator is the first *unquoted* `:` only if it
+    /// occurs before the first unquoted `=` (or there is no `=`); a `:` or
+    /// `=` inside a quoted span is opaque content, not a separator. Every
+    /// present component is then validated: a quoted component decodes to
+    /// its canonical (unquoted) content with no further charset check; a
+    /// bare component is validated against its charset as before.
     ///
     /// # Errors
     ///
-    /// Returns a `String` naming the invalid component.
+    /// Returns a `String` naming the invalid or unterminated component.
     pub fn parse(s: &str) -> Result<Tag, String> {
         if s.is_empty() {
             return Err("tag: empty".to_string());
         }
 
-        let eq = s.find('=');
-        let colon = s.find(':');
-        let ns_sep = match (colon, eq) {
-            (Some(c), Some(e)) if c < e => Some(c),
-            (Some(c), None) => Some(c),
+        let ns_sep = match find_unquoted(s, &[':', '='])? {
+            Some((idx, ':')) => Some(idx),
             _ => None,
         };
 
@@ -41,33 +44,20 @@ impl Tag {
             None => (None, s),
         };
 
-        let (key_part, value_part) = match rest.find('=') {
-            Some(idx) => (&rest[..idx], Some(&rest[idx + 1..])),
+        let (key_part, value_part) = match find_unquoted(rest, &['='])? {
+            Some((idx, _)) => (&rest[..idx], Some(&rest[idx + 1..])),
             None => (rest, None),
         };
 
         let namespace = match ns_part {
-            Some(ns) => {
-                if !is_token(ns) {
-                    return Err(format!("tag: invalid namespace {ns:?}"));
-                }
-                Some(ns.to_string())
-            }
+            Some(ns) => Some(parse_component(ns, false)?),
             None => None,
         };
 
-        if !is_token(key_part) {
-            return Err(format!("tag: invalid key {key_part:?}"));
-        }
-        let key = key_part.to_string();
+        let key = parse_component(key_part, false)?;
 
         let value = match value_part {
-            Some(v) => {
-                if !is_value_token(v) {
-                    return Err(format!("tag: invalid value {v:?}"));
-                }
-                Some(v.to_string())
-            }
+            Some(v) => Some(parse_component(v, true)?),
             None => None,
         };
 
@@ -132,5 +122,64 @@ mod tests {
         ] {
             assert!(Tag::parse(s).is_err(), "expected {s:?} to fail parsing");
         }
+    }
+
+    // --- QUOTING extension (SPEC.md §2) -------------------------------
+
+    #[test]
+    fn quoted_value_admits_reserved_chars_and_whitespace() {
+        assert_eq!(
+            Tag::parse("due=\"2026-08-01T10:00:00\""),
+            Ok(t(None, "due", Some("2026-08-01T10:00:00")))
+        );
+        assert_eq!(
+            Tag::parse("note=\"hello world\""),
+            Ok(t(None, "note", Some("hello world")))
+        );
+    }
+
+    #[test]
+    fn quoted_key_containing_a_colon_is_not_mistaken_for_a_namespace_separator() {
+        assert_eq!(Tag::parse("\"a:b\"=c"), Ok(t(None, "a:b", Some("c"))));
+    }
+
+    #[test]
+    fn quoting_is_syntax_not_data() {
+        // A quoted spelling that didn't need quoting parses identically to
+        // its bare spelling — the canonical stored value is unquoted.
+        assert_eq!(Tag::parse("x=\"3.5\""), Tag::parse("x=3.5"));
+        assert_eq!(Tag::parse("x=\"3.5\""), Ok(t(None, "x", Some("3.5"))));
+    }
+
+    #[test]
+    fn doubled_quote_escapes_a_literal_quote() {
+        assert_eq!(
+            Tag::parse("x=\"say \"\"hi\"\"\""),
+            Ok(t(None, "x", Some("say \"hi\"")))
+        );
+    }
+
+    #[test]
+    fn quoted_empty_string_is_a_present_value_distinct_from_absent() {
+        let present = Tag::parse("x=\"\"").unwrap();
+        let absent = Tag::parse("x").unwrap();
+        assert_eq!(present.value, Some(String::new()));
+        assert_eq!(absent.value, None);
+        assert_ne!(present, absent);
+    }
+
+    #[test]
+    fn unterminated_quote_fails_to_parse() {
+        for s in ["x=\"abc", "\"abc=5", "\""] {
+            assert!(Tag::parse(s).is_err(), "expected {s:?} to fail parsing");
+        }
+    }
+
+    #[test]
+    fn quoted_namespace_and_key_round_trip() {
+        assert_eq!(
+            Tag::parse("\"geo\":\"lat\"=\"57.64\""),
+            Ok(t(Some("geo"), "lat", Some("57.64")))
+        );
     }
 }
