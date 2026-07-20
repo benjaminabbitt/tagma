@@ -2,7 +2,6 @@ package tagma
 
 import (
 	"fmt"
-	"strings"
 )
 
 // posKind distinguishes the three things a query-atom position (namespace,
@@ -50,9 +49,13 @@ type atom struct {
 	val   pos
 }
 
-// parsePos parses a single atom position. "*" -> Any, "+" -> Present, else
-// a token (the value position additionally admits a leading '-', per
-// value-token).
+// parsePos parses a single atom position: "*" -> Any, "+" -> Present, else
+// a validated token (bare, per the value-token charset admitting a leading
+// '-' when allowLeadingDash is set, or a qtoken decoded to its canonical
+// content — SPEC.md §2 QUOTING extension). A *quoted* "*"/"+" is the
+// literal one-character token, not the quantifier: quoting always turns
+// syntax into data, never the reverse — parseComponent only sees the
+// decode path once s no longer matches the bare "*"/"+" spelling exactly.
 func parsePos(s string, allowLeadingDash bool) (pos, error) {
 	switch s {
 	case "*":
@@ -60,57 +63,77 @@ func parsePos(s string, allowLeadingDash bool) (pos, error) {
 	case "+":
 		return pos{kind: posPresent}, nil
 	}
-	ok := isToken(s)
-	if allowLeadingDash {
-		ok = isValueToken(s)
+	tok, err := parseComponent(s, allowLeadingDash)
+	if err != nil {
+		return pos{}, err
 	}
-	if !ok {
-		return pos{}, fmt.Errorf("invalid component %q", s)
-	}
-	return pos{kind: posTok, tok: s}, nil
+	return pos{kind: posTok, tok: tok}, nil
 }
 
-// scanOp finds the earliest operator in s. PLAN.md §7.2: earliest position
-// wins; at an equal position two-char ops (!=, >=, <=) beat one-char
-// (=, >, <, ~); a lone '!' (not followed by '=') is never an operator, so
-// scanning continues past it (it later fails charset validation as part of
-// whatever position it landed in).
-func scanOp(s string) (start, length int, op opKind, found bool) {
-	for i := 0; i < len(s); i++ {
-		switch s[i] {
+// scanOp finds the earliest *unquoted* operator in s. PLAN.md §7.2:
+// earliest position wins; at an equal position two-char ops (!=, >=, <=)
+// beat one-char (=, >, <, ~); a lone '!' (not followed by '=') is never an
+// operator, so scanning continues past it (it later fails charset
+// validation as part of whatever position it landed in). A '"'-quoted span
+// (SPEC.md §2 QUOTING extension) is skipped whole, so an operator
+// character inside quoted content is never mistaken for the real operator.
+//
+// Returns an error if an opened quote is never closed.
+func scanOp(s string) (start, length int, op opKind, found bool, err error) {
+	i := 0
+	for i < len(s) {
+		c := s[i]
+		if c == '"' {
+			_, consumed, decErr := decodeQuotedPrefix(s[i:])
+			if decErr != nil {
+				return 0, 0, 0, false, decErr
+			}
+			i += consumed
+			continue
+		}
+		switch c {
 		case '!':
 			if i+1 < len(s) && s[i+1] == '=' {
-				return i, 2, opNe, true
+				return i, 2, opNe, true, nil
 			}
 			// lone '!' is never an operator; keep scanning
 		case '>':
 			if i+1 < len(s) && s[i+1] == '=' {
-				return i, 2, opGe, true
+				return i, 2, opGe, true, nil
 			}
-			return i, 1, opGt, true
+			return i, 1, opGt, true, nil
 		case '<':
 			if i+1 < len(s) && s[i+1] == '=' {
-				return i, 2, opLe, true
+				return i, 2, opLe, true, nil
 			}
-			return i, 1, opLt, true
+			return i, 1, opLt, true, nil
 		case '=':
-			return i, 1, opEq, true
+			return i, 1, opEq, true, nil
 		case '~':
-			return i, 1, opMatch, true
+			return i, 1, opMatch, true, nil
 		}
+		i++
 	}
-	return 0, 0, 0, false
+	return 0, 0, 0, false, nil
 }
 
-// parseAtom parses the query-atom grammar (SPEC.md §2, PLAN.md §7.2):
+// parseAtom parses the query-atom grammar (SPEC.md §2, PLAN.md §7.2), plus
+// the QUOTING extension (SPEC.md §2): q-ns/q-key/q-value may each be
+// spelled as a qtoken instead of a bare-token (sharing the same token
+// production a write-side tag uses), as well as the "*"/"+" quantifiers.
 //
 //	atom ::= (q-ns ":")? q-key (op q-value)?
+//
+// The operator scan and the namespace-separator search both skip over
+// quoted spans (see scanOp, findUnquoted).
 func parseAtom(s string) (atom, error) {
 	left := s
 	var hasOp bool
 	var op opKind
 	var valuePart string
-	if start, length, o, found := scanOp(s); found {
+	if start, length, o, found, err := scanOp(s); err != nil {
+		return atom{}, fmt.Errorf("tagma: %w in atom %q", err, s)
+	} else if found {
 		hasOp = true
 		op = o
 		left = s[:start]
@@ -120,7 +143,9 @@ func parseAtom(s string) (atom, error) {
 	var nsPart string
 	hasNs := false
 	keyPart := left
-	if idx := strings.IndexByte(left, ':'); idx != -1 {
+	if idx, _, found, err := findUnquoted(left, ":"); err != nil {
+		return atom{}, fmt.Errorf("tagma: %w in atom %q", err, s)
+	} else if found {
 		hasNs = true
 		nsPart = left[:idx]
 		keyPart = left[idx+1:]

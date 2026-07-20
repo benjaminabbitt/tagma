@@ -10,7 +10,6 @@ package tagma
 
 import (
 	"fmt"
-	"strings"
 )
 
 // Index stores items (by id) and their tags, and evaluates postfix/infix
@@ -31,11 +30,20 @@ func (idx *Index) AddItem(id string, tags []Tag) {
 	idx.items[id] = append(idx.items[id], tags...)
 }
 
-// AddLine parses a "<id> <tag> <tag>..." line (whitespace-separated,
-// PLAN.md §7 Index shape) and adds it via AddItem. Returns an error naming
-// the first invalid tag; it does not add anything on error.
+// AddLine parses a "<id> <tag> <tag>..." line (PLAN.md §7 Index shape) and
+// adds it via AddItem. Returns an error naming the first invalid tag, or an
+// unterminated quote; it does not add anything on error.
+//
+// Fields split on *unquoted* whitespace (SPEC.md §2 QUOTING extension): a
+// '"'-quoted span is opaque to the splitter, so a tag whose value contains
+// a literal space (e.g. note="hello world") stays one field instead of
+// being torn in two. This mirrors QueryPostfix's quote-aware '/'-splitting
+// for the same reason.
 func (idx *Index) AddLine(line string) error {
-	fields := strings.Fields(line)
+	fields, err := splitUnquotedWhitespace(line)
+	if err != nil {
+		return fmt.Errorf("tagma: add line %q: %w", line, err)
+	}
 	if len(fields) == 0 {
 		return fmt.Errorf("tagma: empty line")
 	}

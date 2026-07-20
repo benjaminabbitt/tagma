@@ -56,14 +56,21 @@ func (a idSet) sorted() []string {
 	return out
 }
 
-// splitPostfix splits a postfix string on '/'. An empty (or whitespace-
-// only) query is an error rather than the one-element-containing-"" slice
-// strings.Split would otherwise produce.
+// splitPostfix splits a postfix string on unquoted '/' (SPEC.md §2 QUOTING
+// extension: a '"'-quoted span is opaque to the splitter, so a literal '/'
+// inside a quoted atom's value survives instead of being mistaken for the
+// separator). An empty (or whitespace-only) query is an error rather than
+// the one-element-containing-"" slice a plain split would otherwise
+// produce.
 func splitPostfix(postfix string) ([]string, error) {
 	if strings.TrimSpace(postfix) == "" {
 		return nil, fmt.Errorf("tagma: empty postfix query")
 	}
-	return strings.Split(postfix, "/"), nil
+	parts, err := splitUnquoted(postfix, '/')
+	if err != nil {
+		return nil, fmt.Errorf("tagma: %w", err)
+	}
+	return parts, nil
 }
 
 // evalPostfix runs the postfix stack VM (PLAN.md §7.4) over elems.

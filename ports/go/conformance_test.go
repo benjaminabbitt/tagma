@@ -9,6 +9,18 @@ package tagma_test
 // five `Then` steps (plus one `Given`), i.e. ten total. All ten are
 // implemented here regardless of the header's count, since the feature
 // files use exactly these ten step texts.
+//
+// docs/steps.md: "{string} is a quoted cucumber-expression string" — the
+// QUOTING extension (SPEC.md §2) needs fixtures that embed a literal '"'
+// (e.g. a quoted qtoken), so features/*.feature spells those step
+// arguments with the *other* legal {string} delimiter, a single quote
+// ('...'), to avoid escaping (see e.g. features/tags.feature's "quoted
+// tokens" scenario outline). Both delimiters can appear in the same step,
+// even the same line (a bare id in "..." next to a tags list in '...').
+// Every step regex below therefore matches either delimiter per argument
+// via stringArg, capturing the delimiters along with the content in one
+// group (so godog's positional arg-to-param mapping — one capture group
+// per handler parameter — stays intact); unquoteArg strips them back off.
 
 import (
 	"context"
@@ -44,6 +56,13 @@ func (c *conformanceState) reset() {
 
 // Given an item {string} tagged {string}
 func (c *conformanceState) anItemTagged(id, tags string) error {
+	id, tags = unquoteArg(id), unquoteArg(tags)
+	// Same unquoted-whitespace split as the ARCHITECTURE.md bulk-ingest
+	// line format (Index.AddLine), so a fixture tag can quote a value
+	// containing a literal space (SPEC.md §2 QUOTING extension) without
+	// being torn into two fields: concatenating id and tags and handing
+	// the whole line to AddLine reuses that splitter instead of
+	// duplicating it here.
 	line := id + " " + tags
 	if err := c.idx.AddLine(line); err != nil {
 		// docs/steps.md: "panics on invalid tag" — Background fixtures are
@@ -55,30 +74,31 @@ func (c *conformanceState) anItemTagged(id, tags string) error {
 
 // When the tag {string} is parsed
 func (c *conformanceState) theTagIsParsed(input string) error {
-	c.parsedTag, c.parseErr = tagma.ParseTag(input)
+	c.parsedTag, c.parseErr = tagma.ParseTag(unquoteArg(input))
 	return nil
 }
 
 // When the query {string} is compiled
 func (c *conformanceState) theQueryIsCompiled(input string) error {
-	c.compiledPostfix, c.compileErr = tagma.Compile(input)
+	c.compiledPostfix, c.compileErr = tagma.Compile(unquoteArg(input))
 	return nil
 }
 
 // When the query {string} is run
 func (c *conformanceState) theQueryIsRun(input string) error {
-	c.matchResult, c.matchErr = c.idx.Query(input)
+	c.matchResult, c.matchErr = c.idx.Query(unquoteArg(input))
 	return nil
 }
 
 // When the postfix query {string} is run
 func (c *conformanceState) thePostfixQueryIsRun(input string) error {
-	c.matchResult, c.matchErr = c.idx.QueryPostfix(input)
+	c.matchResult, c.matchErr = c.idx.QueryPostfix(unquoteArg(input))
 	return nil
 }
 
 // Then it parses with namespace {string}, key {string}, value {string}
 func (c *conformanceState) itParsesWithNamespaceKeyValue(ns, key, val string) error {
+	ns, key, val = unquoteArg(ns), unquoteArg(key), unquoteArg(val)
 	if c.parseErr != nil {
 		return fmt.Errorf("expected successful parse, got error: %v", c.parseErr)
 	}
@@ -106,6 +126,7 @@ func (c *conformanceState) parsingFails() error {
 
 // Then the postfix is {string}
 func (c *conformanceState) thePostfixIs(want string) error {
+	want = unquoteArg(want)
 	if c.compileErr != nil {
 		return fmt.Errorf("expected successful compile, got error: %v", c.compileErr)
 	}
@@ -125,6 +146,7 @@ func (c *conformanceState) compilationFails() error {
 
 // Then it matches exactly {string}
 func (c *conformanceState) itMatchesExactly(want string) error {
+	want = unquoteArg(want)
 	if c.matchErr != nil {
 		return fmt.Errorf("expected successful query, got error: %v", c.matchErr)
 	}
@@ -164,16 +186,31 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 		return ctx, nil
 	})
 
-	sc.Given(`^an item "([^"]*)" tagged "([^"]*)"$`, state.anItemTagged)
-	sc.When(`^the tag "([^"]*)" is parsed$`, state.theTagIsParsed)
-	sc.When(`^the query "([^"]*)" is compiled$`, state.theQueryIsCompiled)
-	sc.When(`^the query "([^"]*)" is run$`, state.theQueryIsRun)
-	sc.When(`^the postfix query "([^"]*)" is run$`, state.thePostfixQueryIsRun)
-	sc.Then(`^it parses with namespace "([^"]*)", key "([^"]*)", value "([^"]*)"$`, state.itParsesWithNamespaceKeyValue)
+	sc.Given(`^an item `+stringArg+` tagged `+stringArg+`$`, state.anItemTagged)
+	sc.When(`^the tag `+stringArg+` is parsed$`, state.theTagIsParsed)
+	sc.When(`^the query `+stringArg+` is compiled$`, state.theQueryIsCompiled)
+	sc.When(`^the query `+stringArg+` is run$`, state.theQueryIsRun)
+	sc.When(`^the postfix query `+stringArg+` is run$`, state.thePostfixQueryIsRun)
+	sc.Then(`^it parses with namespace `+stringArg+`, key `+stringArg+`, value `+stringArg+`$`, state.itParsesWithNamespaceKeyValue)
 	sc.Then(`^parsing fails$`, state.parsingFails)
-	sc.Then(`^the postfix is "([^"]*)"$`, state.thePostfixIs)
+	sc.Then(`^the postfix is `+stringArg+`$`, state.thePostfixIs)
 	sc.Then(`^compilation fails$`, state.compilationFails)
-	sc.Then(`^it matches exactly "([^"]*)"$`, state.itMatchesExactly)
+	sc.Then(`^it matches exactly `+stringArg+`$`, state.itMatchesExactly)
+}
+
+// stringArg is the regex fragment for a single {string}-style step
+// argument (docs/steps.md): a "-delimited or '-delimited literal, with the
+// delimiters captured as part of the single group. Capturing the
+// delimiters too (rather than splitting into two per-delimiter groups)
+// keeps exactly one capture group per logical argument, matching godog's
+// positional arg-to-handler-param mapping; unquoteArg strips them back off.
+const stringArg = `("[^"]*"|'[^']*')`
+
+// unquoteArg strips the single leading/trailing delimiter byte a stringArg
+// match captured. The delimiter is always exactly one ASCII byte, a double
+// or single quote, so a plain byte slice is safe.
+func unquoteArg(s string) string {
+	return s[1 : len(s)-1]
 }
 
 func TestConformance(t *testing.T) {

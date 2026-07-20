@@ -3,41 +3,64 @@ package tagma
 import (
 	"fmt"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Compile compiles an infix query (SPEC.md §2 `query`) to its canonical
 // postfix wire form (PLAN.md §7.3): a lexer followed by a shunting-yard
 // pass with precedence not(3) > and(2) > or(1).
 func Compile(infix string) (string, error) {
-	return compileTokens(lexInfix(infix))
+	tokens, err := lexInfix(infix)
+	if err != nil {
+		return "", fmt.Errorf("tagma: %w", err)
+	}
+	return compileTokens(tokens)
 }
 
-// lexInfix tokenizes an infix query. '(' and ')' are standalone tokens
-// regardless of spacing (peeled off the front/back of each whitespace-
-// separated word); every other token is whitespace-delimited as-is —
-// atoms never contain '(' or ')' (both are reserved characters), so
-// peeling parens off the edges of a word is safe.
-func lexInfix(s string) []string {
-	words := strings.Fields(s)
-	tokens := make([]string, 0, len(words))
-	for _, w := range words {
-		i := 0
-		for i < len(w) && w[i] == '(' {
-			tokens = append(tokens, "(")
-			i++
+// lexInfix tokenizes an infix query: '(' and ')' are always standalone
+// tokens; everything else splits on whitespace — except a '"'-quoted span
+// (SPEC.md §2 QUOTING extension), which is consumed whole (whitespace,
+// '('/')', and any other reserved character inside it are opaque
+// content), so a quoted atom carries its quotes intact into parseAtom.
+//
+// Returns an error if an opened quote is never closed.
+func lexInfix(s string) ([]string, error) {
+	var tokens []string
+	var current strings.Builder
+	i := 0
+	for i < len(s) {
+		if s[i] == '"' {
+			_, consumed, err := decodeQuotedPrefix(s[i:])
+			if err != nil {
+				return nil, err
+			}
+			current.WriteString(s[i : i+consumed])
+			i += consumed
+			continue
 		}
-		j := len(w)
-		for j > i && w[j-1] == ')' {
-			j--
+		r, size := utf8.DecodeRuneInString(s[i:])
+		switch {
+		case unicode.IsSpace(r):
+			if current.Len() > 0 {
+				tokens = append(tokens, current.String())
+				current.Reset()
+			}
+		case r == '(' || r == ')':
+			if current.Len() > 0 {
+				tokens = append(tokens, current.String())
+				current.Reset()
+			}
+			tokens = append(tokens, string(r))
+		default:
+			current.WriteRune(r)
 		}
-		if j > i {
-			tokens = append(tokens, w[i:j])
-		}
-		for k := j; k < len(w); k++ {
-			tokens = append(tokens, ")")
-		}
+		i += size
 	}
-	return tokens
+	if current.Len() > 0 {
+		tokens = append(tokens, current.String())
+	}
+	return tokens, nil
 }
 
 // prec returns shunting-yard precedence for an infix operator keyword.

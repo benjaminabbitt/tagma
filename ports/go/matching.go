@@ -115,16 +115,22 @@ func parseNumeric(s string) (float64, bool) {
 	return f, true
 }
 
-// anchoredMatch reports whether pattern anchor-matches s: same length,
-// '.' in pattern matches any single byte, every other byte matches
-// itself. (Both pattern and value are restricted to the value-token
-// charset, which is single-byte ASCII, so byte-wise comparison is exact.)
+// anchoredMatch reports whether pattern anchor-matches s: same length (in
+// characters), '.' in pattern matches any single character, every other
+// character matches itself. Before the QUOTING extension (SPEC.md §2) both
+// pattern and value were restricted to the value-token charset (single-byte
+// ASCII), so a byte-wise comparison was exact; quoting lifts that charset
+// (a quoted "~" pattern or value may contain arbitrary content, SPEC.md §2),
+// so this compares by rune, mirroring the Rust reference's char-wise
+// anchored_match.
 func anchoredMatch(pattern, s string) bool {
-	if len(pattern) != len(s) {
+	pr := []rune(pattern)
+	sr := []rune(s)
+	if len(pr) != len(sr) {
 		return false
 	}
-	for i := 0; i < len(pattern); i++ {
-		if pattern[i] != '.' && pattern[i] != s[i] {
+	for i := range pr {
+		if pr[i] != '.' && pr[i] != sr[i] {
 			return false
 		}
 	}
