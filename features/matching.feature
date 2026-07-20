@@ -124,3 +124,43 @@ Feature: Postfix query matching
     Then it matches exactly "d"
     When the query "not not=x" is run
     Then it matches exactly "a b c"
+
+  Scenario: a quoted query atom matches a stored value containing a reserved character
+    Quoting lets a value contain characters the bare grammar reserves for
+    lexing (SPEC.md §2 QUOTING extension); the quoted query atom decodes to
+    the same canonical string as the stored tag, so it matches.
+    Given an item "f" tagged "due=\"2026-08-01T10:00:00\""
+    When the query "due=\"2026-08-01T10:00:00\"" is run
+    Then it matches exactly "f"
+
+  Scenario: a quoted numeric value still compares numerically
+    Quoting is syntax only — `range>"4"` decodes to the same value-token as
+    `range>4` and casts under the same numeric rule (SPEC.md §4; §2
+    QUOTING extension). This must match exactly what the unquoted
+    `range>4` scenario above matches.
+    When the query "range>\"4\"" is run
+    Then it matches exactly "a"
+
+  Scenario: a quoted empty string is a present value, distinct from absent
+    `x=""` decodes to a present value that happens to be the empty string
+    — distinct from bare `x`, which has no value at all (SPEC.md §2
+    QUOTING extension: presence vs. absence). "has a value" (`x=+`) and an
+    exact match against the empty string both single out the quoted item.
+    Given an item "p" tagged "x=\"\""
+    Given an item "q" tagged "x"
+    When the query "x=+" is run
+    Then it matches exactly "p"
+    When the query "x=\"\"" is run
+    Then it matches exactly "p"
+
+  Scenario: a quoted value containing a literal "/" survives the postfix wire form
+    Postfix atoms are joined and split on "/"; quoting keeps a literal "/"
+    inside a token from being mistaken for that delimiter — the wire-form
+    reader treats quoted spans as opaque (SPEC.md §2 QUOTING extension;
+    §6 generalizes the old "~ patterns must avoid /" note now that
+    quoting exists).
+    Given an item "g" tagged "path=\"/etc/passwd\""
+    When the query "path=\"/etc/passwd\"" is run
+    Then it matches exactly "g"
+    When the postfix query "path=\"/etc/passwd\"" is run
+    Then it matches exactly "g"

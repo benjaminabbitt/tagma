@@ -21,6 +21,8 @@ Feature: Infix query compilation
       | *:lang=en and not status=done  | *:lang=en/status=done/not/and |
       | *                              | *                              |
       | and=*                          | and=*                         |
+      | note=\"hello world\"           | note=\"hello world\"          |
+      | \"a:b\"=c and x                | \"a:b\"=c/x/and               |
 
   Scenario Outline: compilation failures
     When the query "<infix>" is compiled
@@ -36,3 +38,4 @@ Feature: Infix query compilation
       | a & b   |
       | not     |
       | a=* or  |
+      | note=\"unterminated |

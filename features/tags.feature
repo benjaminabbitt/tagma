@@ -23,6 +23,23 @@ Feature: Tag parsing
       | and                   |           | and     |                |
       | due=2026-08-01        |           | due     | 2026-08-01     |
 
+  Scenario Outline: quoted tokens (QUOTING extension, SPEC.md §2)
+    A `"`-quoted token is legal in the namespace, key, or value position.
+    Quoting is syntax, not data: the canonical, stored value is always the
+    decoded content, so a quoted spelling that didn't need quoting (e.g.
+    "3.5") parses identically to its bare spelling. `""` inside the quotes
+    escapes one literal `"`.
+    When the tag "<input>" is parsed
+    Then it parses with namespace "<namespace>", key "<key>", value "<value>"
+
+    Examples:
+      | input                          | namespace | key | value                 |
+      | due=\"2026-08-01T10:00:00\"    |           | due | 2026-08-01T10:00:00   |
+      | note=\"hello world\"           |           | note | hello world          |
+      | \"a:b\"=c                      |           | a:b | c                     |
+      | x=\"3.5\"                      |           | x   | 3.5                   |
+      | x=\"say \"\"hi\"\"\"           |           | x   | say \"hi\"            |
+
   Scenario Outline: invalid tags
     Includes the empty-string input, which must also fail to parse.
     When the tag "<input>" is parsed
@@ -44,3 +61,4 @@ Feature: Tag parsing
       | a:b:c       |
       | key=va~lue  |
       |             |
+      | x=\"abc     |

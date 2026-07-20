@@ -24,12 +24,16 @@ A **tag** is a triple `(namespace?, key, value?)`:
 
 ```ebnf
 /* ---- lexical ---- */
-token       ::= [A-Za-z0-9_] [A-Za-z0-9_.-]*
-value-token ::= "-"? token          /* leading "-" admits negative numbers */
+bare-token  ::= [A-Za-z0-9_] [A-Za-z0-9_.-]*
+qtoken      ::= '"' ( '""' | [^"] )* '"'    /* '""' escapes one literal '"' */
+token       ::= bare-token | qtoken
+value-token ::= ("-"? bare-token) | qtoken  /* leading "-" only applies unquoted */
 
-/* Reserved characters (never inside tokens):
-   ":" "=" "<" ">" "~" "!" "/" "*" "+" "(" ")" and whitespace.
-   Reserved words (operator names): "and" "or" "not".                        */
+/* Reserved characters (never inside a bare-token; legal, literal content
+   inside a qtoken): ":" "=" "<" ">" "~" "!" "/" "*" "+" "(" ")" and
+   whitespace. Reserved words (operator names): "and" "or" "not" — also
+   escapable by quoting the whole token (e.g. a key literally "and" may be
+   spelled `"and"`, alongside the existing redundant `and=*` spelling).   */
 
 /* ---- write-side tag (concrete tokens only; no "*" or "+") ---- */
 tag         ::= (namespace ":")? key ("=" value)?
@@ -66,6 +70,45 @@ primary     ::= atom | "(" query ")"
 - Postfix well-formedness is a stack constraint on top of the grammar:
   evaluated left to right with `and`/`or` popping two operands and `not`
   popping one, the sequence must leave exactly one result.
+
+**Quoting** — a `qtoken` may stand in for a `bare-token` in any of the three
+tag positions (namespace, key, value) and their query-atom counterparts
+(`q-ns`, `q-key`, `q-value`); it shares the `token`/`value-token`
+productions above, so a quoted tag key parses identically whether written
+into a tag or a query atom (e.g. `tagma:"triage:impact"` is the same key on
+both sides).
+
+- **Quoting is syntax, not data.** A `qtoken`'s canonical value is its
+  *decoded* content — delimiting quotes stripped, `""` undoubled to a
+  single literal `"` — and that decoded string is indistinguishable from
+  the same content spelled as a `bare-token`, wherever the bare charset
+  would have allowed it. `key="3.5"` and `key=3.5` parse to the identical
+  tag; `due~"2026-..-.."` casts and matches identically to
+  `due~2026-..-..` (§4's casting rule is unchanged by quoting). A token
+  should be spelled quoted only when it must be: it contains a reserved
+  character or whitespace, or it is the empty string.
+- **Escaping.** `""` inside a `qtoken` decodes to one literal `"` — the
+  only escape; there is no backslash metacharacter.
+- **Reserved characters and whitespace are legal, literal content** inside
+  a `qtoken`, including a literal `/` (see the postfix note below) and the
+  delimiter `"` itself (via `""`).
+- **Presence vs. absence.** `""` is a *present* value that happens to be
+  the empty string, distinct from that position being absent — the same
+  distinction §1 already draws for unquoted tags. `key=""` is a valued tag
+  whose value is the empty string; bare `key` is valueless.
+- **Quantifiers are syntax too.** Quoting `*` or `+` (`"*"`, `"+"`) yields
+  the literal one-character token `*`/`+` as data, not the quantifier —
+  quoting always turns syntax into data, never the reverse.
+- **Unterminated quotes fail to parse**, exactly like any other malformed
+  tag or query: an opening `"` with no matching closing `"` is a parse
+  error, not a partial match.
+- **Postfix stays `/`-delimited** (§5): a `qtoken` containing a literal `/`
+  is always legal to *store* (write-side tags never touch postfix) and is
+  legal inside a query atom too — the postfix reader treats quoted spans as
+  opaque when splitting on `/`, so the `/` survives inside the quotes
+  rather than being mistaken for the atom separator. This generalizes,
+  rather than lifts, the §6 note that unquoted `~` patterns can't contain a
+  literal `/`: quoting is what now makes that possible.
 
 ## 3. Atom semantics
 
@@ -124,12 +167,21 @@ served by scan until a value-level index earns its keep.
 
 ## 6. Resolved for v1 / deferred
 
+- **Quoting (v1, promoted from deferred)**: `"`-delimited `qtoken`s (§2) are
+  legal in the namespace, key, and value positions of both the write-side
+  tag grammar and the query atom grammar. Quoting is syntax only — the
+  canonical form is always the decoded, unquoted content — so it changes
+  neither matching nor the §4 casting rule for any value that didn't need
+  quoting. This section used to carry a deferred note about a possible
+  "quoting extension"; §2 is now that extension, formally specified.
 - **`~` pattern language (v1)**: anchored full-value match; the pattern is a
   value-token, where `.` matches any single character and every other
-  character matches itself. This is what the unquoted charset admits — no
-  escapes, so a literal-dot-only match is unexpressible in v1 (accepted).
-  A quoting extension to the infix frontend may later admit full regexes;
-  postfix stays unquoted, so such patterns must avoid `/`. Deferred.
+  character matches itself — unchanged by quoting: a quoted pattern decodes
+  to the same string a bare one would, so `.` still means "any char", never
+  "literal dot". Quoting only lifts the *charset* a pattern may contain
+  (e.g. a literal `:` or `/`), not the pattern language itself — a
+  literal-dot-only match is still unexpressible in v1 (accepted). Full
+  regex support for `~` remains genuinely deferred.
 - **Numeric grammar (v1)**: `-? [0-9]+ ("." [0-9]+)?`, compared as IEEE-754
   doubles. No exponents, hex, or leading `+` (reserved). Values outside this
   grammar don't match numeric operators.
