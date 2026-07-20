@@ -98,9 +98,11 @@ conformance-js:
         echo "SKIP: bindings/js not yet built"
         exit 0
     fi
-    if [ ! -f bindings/js/wasm/node/tagma_wasm.js ]; then
-        just build-wasm
-    fi
+    # Always rebuild: a file-exists check here is the same stale-cache trap
+    # -count=1 works around in conformance-go — a wasm pkg built before a
+    # tagma-core change (e.g. new features/*.feature scenarios) would sit on
+    # disk looking "built" and silently mask a stale PASS.
+    just build-wasm
     cd bindings/js && npx cucumber-js
 
 conformance-py: setup-py
