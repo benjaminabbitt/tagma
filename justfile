@@ -118,7 +118,10 @@ conformance-go:
         exit 0
     fi
     cd ports/go
-    go test -run TestConformance -v ./...
+    # -count=1 disables Go's test cache: the conformance suite reads the shared
+    # ../../features/*.feature files, which the cache does NOT track as inputs,
+    # so without this a stale PASS can silently omit newly-added scenarios.
+    go test -run TestConformance -v -count=1 ./...
 
 # --- builds ----------------------------------------------------------------
 
