@@ -169,6 +169,59 @@ pub(crate) fn split_unquoted(s: &str, sep: char) -> Result<Vec<&str>, String> {
     Ok(parts)
 }
 
+/// Splits `s` into fields on runs of unquoted whitespace, treating
+/// `"`-quoted spans as opaque so a literal space inside a quoted token
+/// survives as part of that field, instead of being torn into two fields
+/// (SPEC.md §2 QUOTING extension). Leading/trailing whitespace is trimmed
+/// and consecutive whitespace collapses to one boundary — for input with
+/// no quoting, this produces exactly what `str::split_whitespace` would.
+///
+/// Used by the bulk-ingest line format (`<id> <tag> <tag>...`,
+/// ARCHITECTURE.md, [`crate::Index::add_line`]) and — since fixtures need
+/// the same tokenization — by the conformance harness's own
+/// `Given an item {string} tagged {string}` tag-list argument. `pub`
+/// (alongside [`is_token`]/[`is_value_token`]) so both call sites, in and
+/// out of this crate, share one implementation.
+///
+/// # Errors
+///
+/// Returns a `String` if an opened quote is never closed.
+pub fn split_unquoted_whitespace(s: &str) -> Result<Vec<&str>, String> {
+    let mut fields = Vec::new();
+    let mut field_start: Option<usize> = None;
+    let mut i = 0;
+    while i < s.len() {
+        let rest = &s[i..];
+        let c = rest
+            .chars()
+            .next()
+            .expect("i < s.len() implies a char remains");
+        if c == '"' {
+            if field_start.is_none() {
+                field_start = Some(i);
+            }
+            let (_, len) = decode_quoted_prefix(rest)?;
+            i += len;
+            continue;
+        }
+        if c.is_whitespace() {
+            if let Some(start) = field_start.take() {
+                fields.push(&s[start..i]);
+            }
+            i += c.len_utf8();
+            continue;
+        }
+        if field_start.is_none() {
+            field_start = Some(i);
+        }
+        i += c.len_utf8();
+    }
+    if let Some(start) = field_start {
+        fields.push(&s[start..]);
+    }
+    Ok(fields)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,5 +373,40 @@ mod tests {
     #[test]
     fn split_unquoted_propagates_unterminated_quote_error() {
         assert!(split_unquoted("a/\"bc", '/').is_err());
+    }
+
+    #[test]
+    fn split_unquoted_whitespace_matches_str_split_whitespace_when_unquoted() {
+        let s = "a  b\tc\nd";
+        assert_eq!(
+            split_unquoted_whitespace(s).unwrap(),
+            s.split_whitespace().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn split_unquoted_whitespace_keeps_a_quoted_space_inside_one_field() {
+        assert_eq!(
+            split_unquoted_whitespace("note=\"hello world\" urgent").unwrap(),
+            vec!["note=\"hello world\"", "urgent"]
+        );
+    }
+
+    #[test]
+    fn split_unquoted_whitespace_trims_and_collapses_like_split_whitespace() {
+        assert_eq!(
+            split_unquoted_whitespace("  a   b  ").unwrap(),
+            vec!["a", "b"]
+        );
+        assert_eq!(split_unquoted_whitespace("").unwrap(), Vec::<&str>::new());
+        assert_eq!(
+            split_unquoted_whitespace("   ").unwrap(),
+            Vec::<&str>::new()
+        );
+    }
+
+    #[test]
+    fn split_unquoted_whitespace_propagates_unterminated_quote_error() {
+        assert!(split_unquoted_whitespace("a \"bc").is_err());
     }
 }

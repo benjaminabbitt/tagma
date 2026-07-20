@@ -166,3 +166,16 @@ Feature: Postfix query matching
     Then it matches exactly "g"
     When the postfix query 'path="/etc/passwd"' is run
     Then it matches exactly "g"
+
+  Scenario: a tag list splits on unquoted whitespace, so a quoted space stays in one tag
+    "Given ... tagged ..." and the ARCHITECTURE.md bulk-ingest line format
+    both split their tag list the same way: on unquoted whitespace, so a
+    quoted value containing a literal space (SPEC.md §2 QUOTING extension)
+    survives as one tag instead of being torn into two. `note="hello
+    world"` and `urgent` below must land as two separate, correctly-formed
+    tags on "h".
+    Given an item "h" tagged 'note="hello world" urgent'
+    When the query 'note="hello world"' is run
+    Then it matches exactly "h"
+    When the query "urgent" is run
+    Then it matches exactly "a c h"

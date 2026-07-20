@@ -3,7 +3,7 @@
 //! shared `features/` suite. `[[test]] harness = false` (Cargo.toml).
 
 use cucumber::{given, then, when, World};
-use tagma_core::{infix, Index, Tag};
+use tagma_core::{infix, token, Index, Tag};
 
 /// Cucumber world: an index plus the outcome slots for the last tag parse,
 /// compile, and query/match operations.
@@ -17,8 +17,14 @@ pub struct TagmaWorld {
 
 #[given(expr = "an item {string} tagged {string}")]
 fn given_item(world: &mut TagmaWorld, id: String, tags: String) {
-    let parsed: Vec<Tag> = tags
-        .split_whitespace()
+    // Same unquoted-whitespace split as the ARCHITECTURE.md bulk-ingest
+    // line format (`Index::add_line`), so a fixture tag can quote a value
+    // containing a literal space (SPEC.md §2 QUOTING extension) without
+    // being torn into two fields; plain whitespace-separated fixtures
+    // split exactly as `str::split_whitespace` would.
+    let parsed: Vec<Tag> = token::split_unquoted_whitespace(&tags)
+        .unwrap_or_else(|e| panic!("invalid tag list {tags:?}: {e}"))
+        .into_iter()
         .map(|t| Tag::parse(t).unwrap_or_else(|e| panic!("invalid tag {t:?}: {e}")))
         .collect();
     world.index.add_item(&id, parsed);

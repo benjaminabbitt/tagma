@@ -46,13 +46,16 @@ postinstall, runs in Node/Deno/Bun/browser/edge:
 
 ## Interchange & serialization — no protobuf in the core
 
-The tag grammar **is** the serialization format: unquoted single-token
-positions mean every tag round-trips as a plain string. Boundary types are
-strings and u64 id arrays; nothing needs a schema compiler.
+The tag grammar **is** the serialization format: every tag position (bare or
+quoted — SPEC.md §2's QUOTING extension) round-trips as a plain string.
+Boundary types are strings and u64 id arrays; nothing needs a schema
+compiler.
 
 - **Bulk dump/ingest**: line-oriented text — `<item-id> <tag> <tag> ...` per
-  line (or JSONL where structure is wanted). Greppable, diffable, spec-defined
-  by the tag grammar itself.
+  line (or JSONL where structure is wanted), fields split on *unquoted*
+  whitespace so a quoted tag value containing a literal space stays one
+  field (SPEC.md §2). Greppable, diffable, spec-defined by the tag grammar
+  itself.
 - **Query wire form**: the postfix string, already canonical.
 - **Conformance suite**: Gherkin (human-authored, diffable, executable).
 - **Index persistence/snapshot**: internal implementation detail, explicitly

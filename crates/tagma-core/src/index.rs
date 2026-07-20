@@ -51,6 +51,7 @@ use crate::atom::{anchored_match, parse_numeral, Atom, Op, Pos};
 use crate::infix;
 use crate::postfix;
 use crate::tag::Tag;
+use crate::token::split_unquoted_whitespace;
 
 /// An id-set posting list: sorted, deduplicated interned item ids.
 type PostingList = Vec<u32>;
@@ -121,11 +122,19 @@ impl Index {
     /// Parses and adds a `<id> <tag> <tag>...` line (ARCHITECTURE.md bulk
     /// ingest format).
     ///
+    /// Fields split on *unquoted* whitespace (SPEC.md §2 QUOTING
+    /// extension): a `"`-quoted span is opaque to the splitter, so a tag
+    /// whose value contains a literal space (e.g. `note="hello world"`)
+    /// stays one field instead of being torn in two. This mirrors
+    /// [`postfix::eval`]'s quote-aware `/`-splitting for the same reason.
+    ///
     /// # Errors
     ///
-    /// Returns a `String` naming the first invalid tag.
+    /// Returns a `String` naming the first invalid tag, or an unterminated
+    /// quote.
     pub fn add_line(&mut self, line: &str) -> Result<(), String> {
-        let mut parts = line.split_whitespace();
+        let fields = split_unquoted_whitespace(line).map_err(|e| format!("index: {e}"))?;
+        let mut parts = fields.into_iter();
         let id = parts
             .next()
             .ok_or_else(|| "index: empty line".to_string())?;
@@ -441,6 +450,28 @@ mod tests {
     fn add_line_rejects_invalid_tags() {
         let mut idx = Index::new();
         assert!(idx.add_line("a =5").is_err());
+    }
+
+    // --- QUOTING extension (SPEC.md §2) -------------------------------
+
+    #[test]
+    fn add_line_splits_on_unquoted_whitespace_only() {
+        let mut idx = Index::new();
+        idx.add_line("h note=\"hello world\" urgent").unwrap();
+        assert_eq!(
+            idx.matching_ids(&Atom::parse("note=\"hello world\"").unwrap()),
+            BTreeSet::from(["h".to_string()])
+        );
+        assert_eq!(
+            idx.matching_ids(&Atom::parse("urgent").unwrap()),
+            BTreeSet::from(["h".to_string()])
+        );
+    }
+
+    #[test]
+    fn add_line_rejects_an_unterminated_quote() {
+        let mut idx = Index::new();
+        assert!(idx.add_line("a note=\"unterminated").is_err());
     }
 
     #[test]
