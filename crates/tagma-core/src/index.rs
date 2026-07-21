@@ -66,6 +66,21 @@ const HIDE_NS_CONFIG_NAMESPACE: &str = "tagma.hide-ns";
 /// explicit `tagma.hide-ns:tagma=false`.
 const HIDE_NS_DEFAULT_HIDDEN: &str = "tagma";
 
+/// The reserved namespace `tagma.arity` config tags live in (SPEC.md §8): a
+/// config tag is `tagma.arity:<target>=<arity>`, so this is the tag's own
+/// namespace, not the namespace it targets (which is encoded, first-colon
+/// split, in the tag's *key*).
+const ARITY_CONFIG_NAMESPACE: &str = "tagma.arity";
+
+/// A target key's declared arity (SPEC.md §8). `Set` is the default for any
+/// undeclared `(namespace, key)` — today's unchanged multi-valued behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum Arity {
+    Scalar,
+    #[default]
+    Set,
+}
+
 /// Hide-ns visibility (SPEC.md §7): the namespaces currently hidden in this
 /// store, paired with a `referenced` set that reveals (dot-subtree) some of
 /// them back. The same shape serves two *distinct* roles depending on what
@@ -142,20 +157,41 @@ impl Index {
     }
 
     /// Adds `tags` to item `id`. If the item already exists, `tags` are
-    /// appended to (not replacing) its existing tags.
+    /// appended to (not replacing) its existing tags — except where SPEC.md
+    /// §8's `tagma.arity` config declares a tag's `(ns, key)` `scalar`: an
+    /// incoming tag whose target is `scalar` and which differs in value from
+    /// a tag the item already carries for that same `(ns, key)` collapses
+    /// the old value out (last-value-wins) rather than accumulating
+    /// alongside it. `add_item` stays infallible either way — collapse never
+    /// errors.
     ///
     /// Posting lists are id-sets, so re-adding the same tag to the same id
     /// (duplicate tags) is idempotent at the index level: the id appears
     /// once per `(ns, key[, value])` regardless of how many times it was
     /// inserted.
+    ///
+    /// Arity config is read once, up front, from the store as it stood
+    /// *before* this call (SPEC.md §8 "Ordering" — write-time evaluation): a
+    /// `tagma.arity` config tag included in this same `tags` batch governs
+    /// later `add_item` calls, not other tags alongside it in this one.
     pub fn add_item(&mut self, id: &str, tags: Vec<Tag>) {
         let (iid, is_new_id) = self.intern(id);
-        for tag in &tags {
+        let arity_cfg = self.arity_config();
+        for tag in tags {
             self.namespaces.insert(tag.namespace.clone());
             self.keys_by_ns
                 .entry(tag.namespace.clone())
                 .or_default()
                 .insert(tag.key.clone());
+
+            if arity_lookup(&arity_cfg, &tag.namespace, &tag.key) == Arity::Scalar
+                && !self.collapse_scalar(iid, &tag)
+            {
+                // An identical value is already on record for this item:
+                // per SPEC.md §8, a no-op — skip re-inserting the duplicate.
+                continue;
+            }
+
             push_id(
                 self.by_ns_key
                     .entry((tag.namespace.clone(), tag.key.clone()))
@@ -172,8 +208,47 @@ impl Index {
                     is_new_id,
                 );
             }
+            self.tags_by_id[iid as usize].push(tag);
         }
-        self.tags_by_id[iid as usize].extend(tags);
+    }
+
+    /// Enforces SPEC.md §8's scalar collapse for one incoming `tag` on item
+    /// `iid`, whose `(namespace, key)` has been declared `scalar`: removes
+    /// any tag the item already carries sharing that `(namespace, key)` but
+    /// a *different* value — from both `tags_by_id` and the corresponding
+    /// `by_ns_key_value` posting (`by_ns_key` is left alone: the caller
+    /// always inserts a replacement tag for the same `(ns, key)`
+    /// immediately after, except in the identical-value case below, where
+    /// the existing posting is already correct).
+    ///
+    /// Returns `false` iff the item already carries this exact tag
+    /// (identical namespace, key, *and* value) — the caller's signal to
+    /// treat this write as a no-op and skip re-inserting the duplicate.
+    fn collapse_scalar(&mut self, iid: u32, tag: &Tag) -> bool {
+        let mut removed_values: Vec<String> = Vec::new();
+        let mut identical_present = false;
+        self.tags_by_id[iid as usize].retain(|t| {
+            if t.namespace != tag.namespace || t.key != tag.key {
+                return true; // different target: untouched by this collapse
+            }
+            if t.value == tag.value {
+                identical_present = true;
+                return true; // identical value already present: keep, no-op
+            }
+            if let Some(v) = &t.value {
+                removed_values.push(v.clone());
+            }
+            false // a different value under the same scalar key: collapse it
+        });
+        for v in removed_values {
+            if let Some(ids) =
+                self.by_ns_key_value
+                    .get_mut(&(tag.namespace.clone(), tag.key.clone(), v))
+            {
+                ids.retain(|&x| x != iid);
+            }
+        }
+        !identical_present
     }
 
     /// Parses and adds a `<id> <tag> <tag>...` line (ARCHITECTURE.md bulk
@@ -354,6 +429,48 @@ impl Index {
             }
         }
         hidden
+    }
+
+    /// The current `tagma.arity` config (SPEC.md §8), derived by reading
+    /// `tagma.arity:<target>=<arity>` tags back out of the store — the same
+    /// self-hosted pattern as [`Self::hidden_namespaces`]: an internal read
+    /// of `keys_by_ns` / `by_ns_key_value` that bypasses the query-time
+    /// hide (`tagma.arity` is itself under the hidden `tagma` family).
+    ///
+    /// Each config tag's key is a `<target>` string packing the target
+    /// `(namespace?, key)` pair; [`split_target`] recovers the pair via a
+    /// first-colon split. On a target with both a `=scalar` and a `=set` tag
+    /// on record (possible since this reference core has no untag/delete
+    /// operation), `scalar` wins — the same fail-safe posture as hide-ns's
+    /// hide-wins rule. A target whose only recorded value is neither
+    /// `scalar` nor `set` configures nothing and is omitted, so lookups fall
+    /// through to the `Set` default.
+    fn arity_config(&self) -> BTreeMap<(Option<String>, String), Arity> {
+        let mut config = BTreeMap::new();
+        let config_ns = Some(ARITY_CONFIG_NAMESPACE.to_string());
+        if let Some(targets) = self.keys_by_ns.get(&config_ns) {
+            for target in targets {
+                let says_scalar = self.by_ns_key_value.contains_key(&(
+                    config_ns.clone(),
+                    target.clone(),
+                    "scalar".to_string(),
+                ));
+                let says_set = self.by_ns_key_value.contains_key(&(
+                    config_ns.clone(),
+                    target.clone(),
+                    "set".to_string(),
+                ));
+                let arity = if says_scalar {
+                    Arity::Scalar
+                } else if says_set {
+                    Arity::Set
+                } else {
+                    continue;
+                };
+                config.insert(split_target(target), arity);
+            }
+        }
+        config
     }
 
     /// `true` iff `atom` has the one shape the inverted index doesn't serve
@@ -565,6 +682,38 @@ fn atom_ns_reference(atom: &Atom) -> BTreeSet<String> {
     match &atom.ns {
         Some(Pos::Tok(n)) => BTreeSet::from([n.clone()]),
         _ => BTreeSet::new(),
+    }
+}
+
+/// Looks up `(ns, key)`'s declared arity in a config built by
+/// [`Index::arity_config`], defaulting to [`Arity::Set`] for any
+/// undeclared target (SPEC.md §8).
+fn arity_lookup(
+    config: &BTreeMap<(Option<String>, String), Arity>,
+    ns: &Option<String>,
+    key: &str,
+) -> Arity {
+    config
+        .get(&(ns.clone(), key.to_string()))
+        .copied()
+        .unwrap_or_default()
+}
+
+/// Splits a `tagma.arity` config tag's `<target>` key into the target
+/// `(namespace?, key)` pair it encodes (SPEC.md §8): a **first-colon
+/// split**, not applied recursively — everything before the first `:` is
+/// the target namespace, everything after is the target key; no `:` means a
+/// null target namespace and the whole string is the target key. A target
+/// key that itself contains a `:` (only reachable by quoting `<target>` at
+/// config-write time) is indistinguishable from a namespace separator here
+/// — a documented limitation, not disambiguated.
+fn split_target(target: &str) -> (Option<String>, String) {
+    match target.find(':') {
+        Some(idx) => (
+            Some(target[..idx].to_string()),
+            target[idx + 1..].to_string(),
+        ),
+        None => (None, target.to_string()),
     }
 }
 
@@ -952,6 +1101,153 @@ mod tests {
         assert_eq!(
             idx.hidden_namespaces(),
             BTreeSet::from(["tagma".to_string()])
+        );
+    }
+
+    // --- arity (SPEC.md §8) — internals not otherwise pinned by the
+    // conformance suite -----------------------------------------------------
+
+    #[test]
+    fn split_target_recovers_null_and_named_target_namespaces() {
+        assert_eq!(split_target("k"), (None, "k".to_string()));
+        assert_eq!(
+            split_target("triage:impact"),
+            (Some("triage".to_string()), "impact".to_string())
+        );
+        // Not recursive: only the first colon splits (SPEC.md §8's
+        // documented, undisambiguated pathological case).
+        assert_eq!(
+            split_target("a:b:c"),
+            (Some("a".to_string()), "b:c".to_string())
+        );
+    }
+
+    #[test]
+    fn arity_config_defaults_to_empty_with_no_config_tags_at_all() {
+        let idx = Index::new();
+        assert!(idx.arity_config().is_empty());
+        assert_eq!(arity_lookup(&idx.arity_config(), &None, "k"), Arity::Set);
+    }
+
+    #[test]
+    fn arity_config_reads_a_null_namespace_declaration() {
+        let mut idx = Index::new();
+        idx.add_line("cfg tagma.arity:k=scalar").unwrap();
+        assert_eq!(arity_lookup(&idx.arity_config(), &None, "k"), Arity::Scalar);
+        assert_eq!(
+            arity_lookup(&idx.arity_config(), &Some("other".to_string()), "k"),
+            Arity::Set
+        );
+    }
+
+    #[test]
+    fn arity_config_reads_a_namespaced_declaration_via_first_colon_split() {
+        let mut idx = Index::new();
+        idx.add_line("cfg tagma.arity:\"triage:impact\"=scalar")
+            .unwrap();
+        assert_eq!(
+            arity_lookup(&idx.arity_config(), &Some("triage".to_string()), "impact"),
+            Arity::Scalar
+        );
+        // A sibling key in the same namespace is untouched.
+        assert_eq!(
+            arity_lookup(&idx.arity_config(), &Some("triage".to_string()), "type"),
+            Arity::Set
+        );
+    }
+
+    #[test]
+    fn arity_config_conflicting_scalar_and_set_prefers_scalar() {
+        // No untag/delete operation exists yet (SPEC.md §8), so both tags
+        // can coexist on record; scalar is the documented fail-safe winner.
+        let mut idx = Index::new();
+        idx.add_line("cfg1 tagma.arity:k=scalar").unwrap();
+        idx.add_line("cfg2 tagma.arity:k=set").unwrap();
+        assert_eq!(arity_lookup(&idx.arity_config(), &None, "k"), Arity::Scalar);
+    }
+
+    #[test]
+    fn arity_config_ignores_an_uninterpretable_value() {
+        let mut idx = Index::new();
+        idx.add_line("cfg tagma.arity:k=maybe").unwrap();
+        // Neither "scalar" nor "set": configures nothing, per SPEC.md §4's
+        // "no errors, no coercion surprises" style.
+        assert!(idx.arity_config().is_empty());
+    }
+
+    #[test]
+    fn scalar_collapse_removes_the_old_value_from_the_by_ns_key_value_posting() {
+        let mut idx = Index::new();
+        idx.add_line("cfg tagma.arity:k=scalar").unwrap();
+        idx.add_item("a", vec![Tag::parse("k=1").unwrap()]);
+        idx.add_item("a", vec![Tag::parse("k=2").unwrap()]);
+
+        assert_eq!(
+            idx.matching_ids(&Atom::parse("k=1").unwrap()),
+            BTreeSet::new()
+        );
+        assert_eq!(
+            idx.matching_ids(&Atom::parse("k=2").unwrap()),
+            BTreeSet::from(["a".to_string()])
+        );
+        // by_ns_key presence survives the collapse: "a" still carries a "k"
+        // tag (just a different value), so a bare existence atom still
+        // finds it.
+        assert_eq!(
+            idx.matching_ids(&Atom::parse("k").unwrap()),
+            BTreeSet::from(["a".to_string()])
+        );
+    }
+
+    #[test]
+    fn scalar_collapse_within_one_add_item_call_leaves_only_the_last_value() {
+        let mut idx = Index::new();
+        idx.add_line("cfg tagma.arity:k=scalar").unwrap();
+        idx.add_item(
+            "a",
+            vec![Tag::parse("k=1").unwrap(), Tag::parse("k=2").unwrap()],
+        );
+
+        assert_eq!(
+            idx.matching_ids(&Atom::parse("k=1").unwrap()),
+            BTreeSet::new()
+        );
+        assert_eq!(
+            idx.matching_ids(&Atom::parse("k=2").unwrap()),
+            BTreeSet::from(["a".to_string()])
+        );
+    }
+
+    #[test]
+    fn scalar_collapse_is_a_no_op_for_an_identical_repeated_value() {
+        let mut idx = Index::new();
+        idx.add_line("cfg tagma.arity:k=scalar").unwrap();
+        idx.add_item("a", vec![Tag::parse("k=1").unwrap()]);
+        idx.add_item("a", vec![Tag::parse("k=1").unwrap()]);
+
+        assert_eq!(
+            idx.matching_ids(&Atom::parse("k=1").unwrap()),
+            BTreeSet::from(["a".to_string()])
+        );
+    }
+
+    #[test]
+    fn arity_declared_after_the_fact_does_not_retroactively_collapse_prior_writes() {
+        // SPEC.md §8 "Ordering": arity config is evaluated at write time,
+        // so a scalar declaration only governs writes made after it lands.
+        let mut idx = Index::new();
+        idx.add_item("a", vec![Tag::parse("k=1").unwrap()]);
+        idx.add_item("a", vec![Tag::parse("k=2").unwrap()]);
+        idx.add_line("cfg tagma.arity:k=scalar").unwrap();
+
+        // Both pre-existing values are still on record.
+        assert_eq!(
+            idx.matching_ids(&Atom::parse("k=1").unwrap()),
+            BTreeSet::from(["a".to_string()])
+        );
+        assert_eq!(
+            idx.matching_ids(&Atom::parse("k=2").unwrap()),
+            BTreeSet::from(["a".to_string()])
         );
     }
 }

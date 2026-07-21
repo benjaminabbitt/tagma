@@ -296,3 +296,69 @@ not. The tokenizer itself is unchanged — `.` remains lexically an ordinary
 bare-token character in both positions; the separator meaning is purely
 semantic, applied only by hide-ns's prefix matching, never by the lexer or
 by key comparison.
+
+## 8. Self-hosted meta-configuration — `tagma.arity`
+
+tagma configures itself using its own tag model (§7): `arity` is the second
+self-hosted meta-feature, declaring how many values a given target key may
+hold per item. Its config tags live in namespace `tagma.arity`, itself under
+the `tagma` family, so they are hidden by §7's default with no
+special-casing required — like hide-ns, arity config is *derived* by reading
+`tagma.arity:*` tags directly back out of the store, bypassing the
+query-time hide.
+
+**Config tag form.** `tagma.arity:<target>=<arity>` declares the arity of
+the target key encoded in `<target>` — the config tag's own key, not its
+value. `<arity>` is the literal token `scalar` or `set` (case-sensitive; any
+other value configures nothing, per §4's "no errors, no coercion surprises"
+style, mirroring hide-ns's `<bool>` handling in §7).
+
+**Target encoding — a first-colon split.** `<target>` packs the target
+`(namespace?, key)` pair into one string, quoted (§2) whenever it needs to
+be: `<targetkey>` alone for a null target namespace (no colon, so no quoting
+is needed on that account — e.g. `tagma.arity:k=scalar`), or
+`<targetns>:<targetkey>` for a named one (e.g.
+`tagma.arity:"triage:impact"=scalar`, quoted because the target string
+itself contains a literal `:`). Recovering the target pair from `<target>`
+is a **first-colon split**: everything before the first `:` is the target
+namespace, everything after is the target key; no `:` means a null target
+namespace and the whole string is the target key — the same first-colon
+convention a tag's own `namespace:key` grammar uses (§2). It is not applied
+recursively: a target key that itself contains a `:` (only reachable by
+quoting the target string at config-write time) is indistinguishable from a
+namespace separator at read time. This reference implementation does not
+attempt to disambiguate that pathological case — documented here, not
+solved.
+
+**Arity levels.**
+- `set` — the **default** for any undeclared `(namespace, key)`: today's
+  unchanged behavior. A key is multi-valued (§1): many values per item,
+  unordered, dedup-at-query.
+- `scalar` — **at most one value per (target-ns, target-key), per item.**
+  Distinct items are unrelated: each independently holds at most one live
+  value for a scalar key; a scalar declaration never relates values across
+  different items.
+
+**Enforcement — collapse, not rejection.** Writing stays infallible: it is
+never an error to write a second value for a scalar key. Instead, when a
+tag being written targets a `(ns, key)` declared `scalar`, and the item
+already carries a tag with that same `(ns, key)` but a *different* value,
+the old value is silently **collapsed** — removed as the new one is kept —
+**last-value-wins**. Writing the same value again (an already-present,
+*identical* value) is a no-op. Collapse applies uniformly whether the
+conflicting values arrive across two separate writes to the same item or
+together within one write's tag batch — both leave at most one value
+standing.
+
+**Ordering.** Arity config is evaluated **at write time**: a `scalar`
+declaration governs writes that happen after tagma has that declaration on
+record. Retroactively collapsing values that were already written under the
+old (`set`, or undeclared) reading before the `scalar` declaration landed is
+out of scope for this reference core — deferred, the same posture as
+hide-ns's append-only config (§7).
+
+**Conflicting declarations.** Because this reference core has no
+untag/delete operation, a target key's arity config is append-only, so
+`<target>` may end up with both a `=scalar` and a `=set` tag on record; on
+that conflict, `scalar` wins — the same fail-safe posture as hide-ns's
+hide-wins rule (§7), the more restrictive reading taking precedence.
