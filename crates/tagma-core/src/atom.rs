@@ -2,6 +2,7 @@
 
 use crate::tag::Tag;
 use crate::token::{decode_quoted_prefix, find_unquoted, parse_component};
+use crate::typecmp::{relational_matches, TypeCtx};
 
 /// A parsed query-atom position: concrete token, `*` (any/absent), or `+`
 /// (present).
@@ -92,13 +93,30 @@ impl Atom {
 
     /// Returns `true` if some tag in `tags` satisfies this atom
     /// (SPEC.md §3-4; PLAN.md §7.5: an atom matches iff SOME tag satisfies
-    /// the ns, key, and value clauses together).
+    /// the ns, key, and value clauses together). Relational operators
+    /// (`>` `>=` `<` `<=`) use only tagma's own v1 numeric grammar (§6)
+    /// here — no [`crate::typecmp::TypeComparator`] is ever consulted,
+    /// since a standalone `Atom` has no [`crate::index::Index`] to read a
+    /// `tagma.type` declaration or registered comparator from (SPEC.md
+    /// §9's typed comparison is inherently an `Index`-level, query-time
+    /// feature). See [`Self::matches_with_types`] for the version
+    /// [`crate::index::Index`] itself calls.
     pub fn matches(&self, tags: &[Tag]) -> bool {
-        tags.iter().any(|t| self.matches_tag(t))
+        tags.iter().any(|t| self.matches_tag(t, None))
     }
 
-    fn matches_tag(&self, tag: &Tag) -> bool {
-        self.ns_matches(tag) && self.key_matches(tag) && self.value_matches(tag)
+    /// [`Self::matches`]'s counterpart with SPEC.md §9 typed-comparison
+    /// fallback: `type_ctx` carries the calling [`crate::index::Index`]'s
+    /// currently-declared `tagma.type` config and registered comparators,
+    /// letting a relational operator fall back to a client's
+    /// [`crate::typecmp::TypeComparator`] wherever the numeric grammar
+    /// can't interpret a value (see [`relational_matches`]).
+    pub(crate) fn matches_with_types(&self, tags: &[Tag], type_ctx: &TypeCtx) -> bool {
+        tags.iter().any(|t| self.matches_tag(t, Some(type_ctx)))
+    }
+
+    fn matches_tag(&self, tag: &Tag, type_ctx: Option<&TypeCtx>) -> bool {
+        self.ns_matches(tag) && self.key_matches(tag) && self.value_matches(tag, type_ctx)
     }
 
     fn ns_matches(&self, tag: &Tag) -> bool {
@@ -117,7 +135,7 @@ impl Atom {
         }
     }
 
-    fn value_matches(&self, tag: &Tag) -> bool {
+    fn value_matches(&self, tag: &Tag, type_ctx: Option<&TypeCtx>) -> bool {
         let (op, pos) = match &self.value {
             None => return true,
             Some(pair) => pair,
@@ -133,16 +151,7 @@ impl Atom {
                     Op::Eq => tv == v,
                     Op::Ne => tv != v,
                     Op::Gt | Op::Ge | Op::Lt | Op::Le => {
-                        match (parse_numeral(tv), parse_numeral(v)) {
-                            (Some(a), Some(b)) => match op {
-                                Op::Gt => a > b,
-                                Op::Ge => a >= b,
-                                Op::Lt => a < b,
-                                Op::Le => a <= b,
-                                _ => unreachable!(),
-                            },
-                            _ => false,
-                        }
+                        relational_matches(*op, tv, v, &tag.namespace, &tag.key, type_ctx)
                     }
                     Op::Match => anchored_match(tv, v),
                 }

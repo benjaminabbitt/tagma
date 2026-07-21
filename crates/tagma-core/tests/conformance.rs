@@ -2,17 +2,161 @@
 //! (docs/steps.md / PLAN.md Appendix A) against `tagma_core`, running the
 //! shared `features/` suite. `[[test]] harness = false` (Cargo.toml).
 
+use std::cmp::Ordering;
+use std::sync::Arc;
+
 use cucumber::{given, then, when, World};
-use tagma_core::{infix, token, Index, Tag};
+use tagma_core::{infix, token, Index, Tag, TypeComparator};
 
 /// Cucumber world: an index plus the outcome slots for the last tag parse,
-/// compile, and query/match operations.
-#[derive(Debug, Default, World)]
+/// compile, and query/match operations. `#[derive(World)]` builds a fresh
+/// world per scenario via `Default::default()`; [`Default`] is implemented
+/// by hand below (rather than derived) so every fresh [`Index`] comes with
+/// [`SemverComparator`] pre-registered — see the manual impl for why.
+#[derive(Debug, World)]
 pub struct TagmaWorld {
     index: Index,
     last_tag: Option<Result<Tag, String>>,
     last_compile: Option<Result<String, String>>,
     last_match: Option<Result<Vec<String>, String>>,
+}
+
+impl Default for TagmaWorld {
+    fn default() -> Self {
+        let mut index = Index::default();
+        // SPEC.md §9 (client-loadable type comparison): tagma-core itself
+        // ships no semver knowledge. This registration is the test
+        // fixture `features/type-comparison.feature` exercises — every
+        // scenario gets a fresh Index with "semver" already registered,
+        // via ordinary `Given`/`When` steps (a `tagma.type:<target>=semver`
+        // tag write, then a relational query), with no new step
+        // vocabulary needed (docs/steps.md's frozen ten steps are
+        // untouched by this feature).
+        index.register_type("semver", Arc::new(SemverComparator));
+        TagmaWorld {
+            index,
+            last_tag: None,
+            last_compile: None,
+            last_match: None,
+        }
+    }
+}
+
+/// Test fixture only (SemVer 2.0.0, <https://semver.org/#spec-item-11>):
+/// full precedence, including the pre-release comparison rules of §11 and
+/// build-metadata-is-ignored of §10. Not part of tagma-core's own public
+/// API surface — registered only by this conformance harness, standing in
+/// for a real client's own comparator.
+struct SemverComparator;
+
+impl TypeComparator for SemverComparator {
+    fn compare(&self, a: &str, b: &str) -> Option<Ordering> {
+        Some(parse_semver(a)?.cmp(&parse_semver(b)?))
+    }
+}
+
+/// `(major, minor, patch)` plus optional pre-release identifiers. Build
+/// metadata (`+...`) is stripped and ignored before this is ever built
+/// (SemVer §10), so two strings differing only in build metadata parse
+/// identical and compare `Equal`. `None` (a release version) sorts after
+/// `Some` (SemVer §11.4: "a pre-release version has lower precedence than
+/// the associated normal version").
+#[derive(Debug, PartialEq, Eq)]
+struct SemverKey {
+    core: (u64, u64, u64),
+    prerelease: Option<Vec<Identifier>>,
+}
+
+impl Ord for SemverKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.core.cmp(&other.core).then_with(|| {
+            match (&self.prerelease, &other.prerelease) {
+                (None, None) => Ordering::Equal,
+                (None, Some(_)) => Ordering::Greater,
+                (Some(_), None) => Ordering::Less,
+                // Vec<Identifier> compares lexicographically by its Ord
+                // impl, with a shared-prefix-but-shorter Vec sorting
+                // Less — exactly SemVer §11.4.4's rule.
+                (Some(a), Some(b)) => a.cmp(b),
+            }
+        })
+    }
+}
+
+impl PartialOrd for SemverKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// One dot-separated pre-release identifier (SemVer §9, §11.4.3):
+/// digits-only compares numerically; otherwise lexically (ASCII byte
+/// order); a numeric identifier always has lower precedence than an
+/// alphanumeric one, regardless of value.
+#[derive(Debug, PartialEq, Eq)]
+enum Identifier {
+    Numeric(u64),
+    Alnum(String),
+}
+
+impl Ord for Identifier {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            (Identifier::Numeric(a), Identifier::Numeric(b)) => a.cmp(b),
+            (Identifier::Alnum(a), Identifier::Alnum(b)) => a.cmp(b),
+            (Identifier::Numeric(_), Identifier::Alnum(_)) => Ordering::Less,
+            (Identifier::Alnum(_), Identifier::Numeric(_)) => Ordering::Greater,
+        }
+    }
+}
+
+impl PartialOrd for Identifier {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Parses `s` as `MAJOR.MINOR.PATCH(-PRERELEASE)?(+BUILD)?` (SemVer §2,
+/// §9, §10), returning `None` for anything that doesn't fit — an
+/// unparseable value is `NotComparable` (SPEC.md §9), never a panic.
+fn parse_semver(s: &str) -> Option<SemverKey> {
+    let core_and_pre = s.split('+').next().unwrap_or(s); // strip build metadata (§10)
+    let mut it = core_and_pre.splitn(2, '-');
+    let core_str = it.next().unwrap();
+    let pre_str = it.next();
+
+    let mut parts = core_str.split('.');
+    let major = parts.next()?.parse::<u64>().ok()?;
+    let minor = parts.next()?.parse::<u64>().ok()?;
+    let patch = parts.next()?.parse::<u64>().ok()?;
+    if parts.next().is_some() {
+        return None; // more than three dotted components: not X.Y.Z
+    }
+
+    let prerelease = match pre_str {
+        None => None,
+        Some(p) => Some(
+            p.split('.')
+                .map(parse_identifier)
+                .collect::<Option<Vec<_>>>()?,
+        ),
+    };
+
+    Some(SemverKey {
+        core: (major, minor, patch),
+        prerelease,
+    })
+}
+
+fn parse_identifier(part: &str) -> Option<Identifier> {
+    if part.is_empty() {
+        return None;
+    }
+    if part.bytes().all(|b| b.is_ascii_digit()) {
+        Some(Identifier::Numeric(part.parse().ok()?))
+    } else {
+        Some(Identifier::Alnum(part.to_string()))
+    }
 }
 
 #[given(expr = "an item {string} tagged {string}")]

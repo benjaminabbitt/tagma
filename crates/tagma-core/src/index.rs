@@ -46,12 +46,14 @@
 //! "sorted matching ids" contract.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
 
-use crate::atom::{anchored_match, parse_numeral, Atom, Op, Pos};
+use crate::atom::{anchored_match, Atom, Op, Pos};
 use crate::infix;
 use crate::postfix;
 use crate::tag::Tag;
 use crate::token::split_unquoted_whitespace;
+use crate::typecmp::{relational_matches, TypeComparator, TypeCtx};
 
 /// An id-set posting list: sorted, deduplicated interned item ids.
 type PostingList = Vec<u32>;
@@ -73,6 +75,12 @@ const HIDE_DEFAULT_TARGET: &str = "tagma:*";
 /// namespace, not the namespace it targets (which is encoded, first-colon
 /// split, in the tag's *key*).
 const ARITY_CONFIG_NAMESPACE: &str = "tagma.arity";
+
+/// The reserved namespace `tagma.type` config tags live in (SPEC.md §9): a
+/// config tag is `tagma.type:<target>=<typename>`, so this is the tag's
+/// own namespace, not the target it declares (which is encoded, first-colon
+/// split, in the tag's *key*, exactly as `tagma.arity`'s target is).
+const TYPE_CONFIG_NAMESPACE: &str = "tagma.type";
 
 /// A target key's declared arity (SPEC.md §8). `Set` is the default for any
 /// undeclared `(namespace, key)` — today's unchanged multi-valued behavior.
@@ -229,7 +237,7 @@ fn covers(ns: &str, root: &str) -> bool {
 }
 
 /// An in-memory tag index: item id -> tags, queryable via infix or postfix.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct Index {
     /// `u32 -> String`: the interned id table, indexed by the id itself.
     id_table: Vec<String>,
@@ -248,12 +256,48 @@ pub struct Index {
     /// `(ns, key, value) -> ids` — exact value; ordered so the distinct
     /// values under a `(ns, key)` prefix form a contiguous range.
     by_ns_key_value: BTreeMap<(Option<String>, String, String), PostingList>,
+    /// `tagma.type` name -> registered comparator (SPEC.md §9), set via
+    /// [`Self::register_type`]. A `dyn TypeComparator` carries no `Debug`
+    /// bound by design (client comparators shouldn't need to implement
+    /// it), so [`Index`] can't `#[derive(Debug)]` with this field present
+    /// — see the manual `impl Debug for Index` below, which summarizes it
+    /// as just its registered names.
+    type_comparators: HashMap<String, Arc<dyn TypeComparator>>,
+}
+
+impl std::fmt::Debug for Index {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Index")
+            .field("id_table", &self.id_table)
+            .field("tags_by_id", &self.tags_by_id)
+            .field("namespaces", &self.namespaces)
+            .field("keys_by_ns", &self.keys_by_ns)
+            .field("by_ns_key", &self.by_ns_key)
+            .field("by_ns_key_value", &self.by_ns_key_value)
+            .field(
+                "type_comparators",
+                &self.type_comparators.keys().collect::<Vec<_>>(),
+            )
+            .finish()
+    }
 }
 
 impl Index {
     /// Creates an empty index.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Registers a client-provided [`TypeComparator`] under `name`
+    /// (SPEC.md §9), so `tagma.type:<target>=<name>` declarations naming
+    /// it switch that target's relational-operator matching (`>` `>=` `<`
+    /// `<=`) to typed comparison whenever tagma's own §6 numeric grammar
+    /// can't interpret a value (see [`crate::typecmp::relational_matches`]).
+    /// Re-registering the same `name` replaces the previously-registered
+    /// comparator. tagma-core itself ships no type knowledge — registering
+    /// one is entirely the client's responsibility.
+    pub fn register_type(&mut self, name: &str, cmp: Arc<dyn TypeComparator>) {
+        self.type_comparators.insert(name.to_string(), cmp);
     }
 
     /// Adds `tags` to item `id`. If the item already exists, `tags` are
@@ -477,10 +521,11 @@ impl Index {
     /// postfix query ([`postfix::eval`]).
     pub(crate) fn matching_ids_u32(&self, atom: &Atom) -> Vec<u32> {
         let vis = self.visibility_for(atom_reference(atom));
+        let type_ctx = self.type_ctx();
         if self.should_scan(atom) {
-            self.scan_matching_ids_u32(atom, &vis)
+            self.scan_matching_ids_u32(atom, &vis, &type_ctx)
         } else {
-            self.indexed_matching_ids_u32(atom, &vis)
+            self.indexed_matching_ids_u32(atom, &vis, &type_ctx)
         }
     }
 
@@ -586,6 +631,47 @@ impl Index {
         config
     }
 
+    /// The current `tagma.type` config (SPEC.md §9), derived by reading
+    /// `tagma.type:<target>=<typename>` tags back out of the store — the
+    /// same self-hosted pattern as [`Self::hidden_patterns`] /
+    /// [`Self::arity_config`]: an internal read of `keys_by_ns` /
+    /// `by_ns_key_value` that bypasses the query-time hide (`tagma.type`
+    /// is itself under the hidden `tagma` family).
+    ///
+    /// Unlike `hide`'s true/false (hide-wins) or `arity`'s scalar/set
+    /// (scalar-wins), declared type *names* have no ordering to break a
+    /// tie with — SPEC.md §9's conflict rule is instead: a target with
+    /// more than one *distinct* declared type name on record disables
+    /// typed comparison for that target outright, so such a target is
+    /// simply omitted here (falling through to the §6 numeric grammar),
+    /// rather than resolving to some picked winner.
+    fn type_config(&self) -> BTreeMap<(Option<String>, String), String> {
+        let mut config = BTreeMap::new();
+        let config_ns = Some(TYPE_CONFIG_NAMESPACE.to_string());
+        if let Some(targets) = self.keys_by_ns.get(&config_ns) {
+            for target in targets {
+                let mut names = self.value_entries(&config_ns, target).map(|(v, _)| v);
+                if let (Some(only), None) = (names.next(), names.next()) {
+                    config.insert(split_target(target), only.to_string());
+                }
+            }
+        }
+        config
+    }
+
+    /// Builds a [`TypeCtx`] against the store's current `tagma.type`
+    /// config and registered comparators (SPEC.md §9), owned outright
+    /// (mirroring [`Self::visibility_for`]'s own per-call [`Visibility`]).
+    /// Built fresh per [`Self::matching_ids_u32`] call — `tagma.type` is
+    /// evaluated at query time (SPEC.md §9 "Ordering"), unlike
+    /// `tagma.arity`'s write-time enforcement (§8).
+    fn type_ctx(&self) -> TypeCtx {
+        TypeCtx {
+            declared: self.type_config(),
+            comparators: self.type_comparators.clone(),
+        }
+    }
+
     /// `true` iff `atom` has the one shape the inverted index doesn't serve
     /// directly: namespace *and* key both quantified (`*`/`+`), combined
     /// with an operator that needs per-distinct-value iteration (`!=`, a
@@ -615,7 +701,7 @@ impl Index {
     /// being handed to [`Atom::matches`], so a hidden, unreferenced tag is
     /// invisible to the match — as if it weren't there at all — without
     /// [`Atom::matches`]'s own signature needing to know about `hide`.
-    fn scan_matching_ids_u32(&self, atom: &Atom, vis: &Visibility) -> Vec<u32> {
+    fn scan_matching_ids_u32(&self, atom: &Atom, vis: &Visibility, type_ctx: &TypeCtx) -> Vec<u32> {
         self.tags_by_id
             .iter()
             .enumerate()
@@ -625,7 +711,7 @@ impl Index {
                     .filter(|t| vis.tag_visible(&t.namespace, &t.key))
                     .cloned()
                     .collect();
-                atom.matches(&visible)
+                atom.matches_with_types(&visible, type_ctx)
             })
             .map(|(iid, _)| iid as u32)
             .collect()
@@ -650,14 +736,19 @@ impl Index {
     /// so this atom's own candidate loop only ever visits its own key
     /// candidate(s) in the first place (see [`Self::key_candidates`]),
     /// always the one(s) [`atom_reference`] itself contributes.
-    fn indexed_matching_ids_u32(&self, atom: &Atom, vis: &Visibility) -> Vec<u32> {
+    fn indexed_matching_ids_u32(
+        &self,
+        atom: &Atom,
+        vis: &Visibility,
+        type_ctx: &TypeCtx,
+    ) -> Vec<u32> {
         let mut result: Vec<u32> = Vec::new();
         for ns in self.ns_candidates(&atom.ns) {
             for key in self.key_candidates(&ns, &atom.key) {
                 if !vis.tag_visible(&ns, &key) {
                     continue;
                 }
-                self.collect_ns_key(&ns, &key, &atom.value, &mut result);
+                self.collect_ns_key(&ns, &key, &atom.value, type_ctx, &mut result);
             }
         }
         result.sort_unstable();
@@ -726,6 +817,7 @@ impl Index {
         ns: &Option<String>,
         key: &str,
         value: &Option<(Op, Pos)>,
+        type_ctx: &TypeCtx,
         out: &mut Vec<u32>,
     ) {
         match value {
@@ -755,21 +847,8 @@ impl Index {
                 }
             }
             Some((op @ (Op::Gt | Op::Ge | Op::Lt | Op::Le), Pos::Tok(v))) => {
-                let Some(rhs) = parse_numeral(v) else {
-                    return;
-                };
                 for (val, ids) in self.value_entries(ns, key) {
-                    let Some(lhs) = parse_numeral(val) else {
-                        continue;
-                    };
-                    let matches = match op {
-                        Op::Gt => lhs > rhs,
-                        Op::Ge => lhs >= rhs,
-                        Op::Lt => lhs < rhs,
-                        Op::Le => lhs <= rhs,
-                        _ => unreachable!(),
-                    };
-                    if matches {
+                    if relational_matches(*op, val, v, ns, key, Some(type_ctx)) {
                         out.extend_from_slice(ids);
                     }
                 }
@@ -1219,10 +1298,11 @@ mod tests {
             "*:*=+",
         ];
         let vis = Visibility::default();
+        let type_ctx = idx.type_ctx();
         for a in atoms {
             let atom = Atom::parse(a).unwrap();
             let mut indexed = idx.matching_ids_u32(&atom);
-            let mut scanned = idx.scan_matching_ids_u32(&atom, &vis);
+            let mut scanned = idx.scan_matching_ids_u32(&atom, &vis, &type_ctx);
             indexed.sort_unstable();
             scanned.sort_unstable();
             assert_eq!(indexed, scanned, "mismatch for atom {a:?}");
@@ -1298,7 +1378,7 @@ mod tests {
 
         let atom = Atom::parse("k=1").unwrap();
         let mut indexed = idx.matching_ids_u32(&atom);
-        let mut scanned = idx.scan_matching_ids_u32(&atom, &Visibility::default());
+        let mut scanned = idx.scan_matching_ids_u32(&atom, &Visibility::default(), &idx.type_ctx());
         indexed.sort_unstable();
         scanned.sort_unstable();
         assert_eq!(indexed, scanned);
