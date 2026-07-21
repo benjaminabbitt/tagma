@@ -189,3 +189,92 @@ served by scan until a value-level index earns its keep.
   before `>`, `!=` before `!`; a lone `!` is invalid).
 - **Case sensitivity**: tokens are case-sensitive, including the reserved
   words `and`/`or`/`not`. Revisit only on user-facing friction.
+
+## 7. Self-hosted meta-configuration — `tagma.hide-ns`
+
+tagma configures itself using its own tag model: reserved `tagma.*`
+namespaces carry meta-configuration tags, written and read exactly like
+ordinary tags. `hide-ns` is the first such feature: per-namespace visibility
+control over ordinary queries.
+
+**Config tag form.** `tagma.hide-ns:<ns>=<bool>` declares whether namespace
+`<ns>` — the tag's key — is hidden; `<bool>` is the literal token `true` or
+`false` (case-sensitive; any other value configures nothing, per §4's "no
+errors, no coercion surprises" style). `<ns>` is quoted (§2) when it needs to
+be, e.g. `tagma.hide-ns:"weird:ns"=true`.
+
+**Config is stored as tags, and read back as tags.** hide-ns tags live in the
+ordinary tag store, never a separate structure; the hide configuration is
+*derived* at query time by reading `tagma.hide-ns:*` tags back out.
+Implementations may cache the derived result for query performance but must
+rebuild or invalidate it whenever a hide-ns tag is added. A hide-ns tag's
+effect is store-wide and unconditional — it need not be attached to any
+particular item, and once present it governs every subsequent query, not
+only ones that reference it. Because this reference core has no untag/delete
+operation, a namespace's hide-ns tags are append-only, so `<ns>` may end up
+with both a `=true` and a `=false` tag on record; on that conflict, hide wins
+(the fail-safe reading).
+
+**Default.** tagma behaves as if an implicit `tagma.hide-ns:tagma=true` is
+always present: the entire `tagma.*` meta-family — including hide-ns's own
+config tags — is hidden by default. An explicit `tagma.hide-ns:tagma=false`
+un-hides it, store-wide.
+
+**Prefix match is dot-delimited, in namespaces only.** Hiding namespace `N`
+hides `N` itself and every namespace `N.<anything>`, recursively — `.` is a
+genuine hierarchy separator between namespace path components, not a
+lexical prefix match:
+
+| hidden | covers | does not cover |
+|---|---|---|
+| `tagma` | `tagma`, `tagma.arity`, `tagma.hide-ns`, `tagma.arity.sub` | `tagmax`, `tagma-foo`, `tagmaZ` |
+
+Formally: namespace `C` is covered by hidden namespace `N` iff `C == N` or
+`C` starts with `N` immediately followed by `.`.
+
+**Visibility rule.** A hidden namespace's tags participate in a query if and
+only if that query references the namespace. A query that does not name it
+— including the empty/universal query — treats those tags as absent.
+
+| query | hidden-ns tags | why |
+|---|---|---|
+| `tagma.arity:*` | participate | the atom's namespace is exactly `tagma.arity` |
+| `urgent` | absent | no atom names `tagma.arity` or a covering ancestor |
+| `*:*` (the universe atom) / bare `*` | absent | wildcards never count as naming a namespace |
+
+An item whose only tags fall in a hidden, unreferenced namespace is
+therefore absent from that query's results — not an error, just an empty
+visible tag set. Mental model: a hidden namespace is a dotfile — invisible
+to a bare `ls` (any unreferencing query, universal included), visible to
+`ls -a` or to naming it directly.
+
+**Unhiding mirrors hiding: the same dot-delimited-prefix relation, applied
+in the opposite direction, scoped to the whole query.** An atom anywhere in
+a (possibly compound) query that names namespace `X` with a concrete token
+— never a wildcard — unhides `X` and its entire subtree for every atom
+evaluated in *that query*, not just the atom that names it: naming `tagma`
+unhides `tagma.arity` too, including through a different, wildcard, atom
+joined by `and`/`or` in the same query (`tagma:foo or *:x=1` — the first
+clause's reference unhides `tagma.arity` for the second). Naming a leaf like
+`tagma.arity` unhides `tagma.arity` and its own subtree, but not sibling
+`tagma.hide-ns`. This is deliberately symmetric with hiding: a single
+`tagma:*` is enough to surface all of tagma's meta-config for introspection.
+
+- A namespace wildcard atom (`*:key`, `+:key`, bare `*`, `*:*`) never
+  references a namespace — wildcards only ever hide, never unhide.
+- The store-wide default/override from **Default** above always applies
+  first; per-query referencing is a second, additive way namespaces become
+  visible on top of it — referencing `tagma` doesn't change the stored
+  config, only this query's view of it.
+
+**`.` is a separator in namespaces, not in keys.** In a namespace, `.` is
+the dot-delimited hierarchy separator the prefix rule above uses. In a key,
+`.` is an ordinary token character — already legal in `bare-token`'s
+charset (§2), and often used by convention to suggest hierarchy (`a.b.c` as
+a key) — to which tagma applies no splitting semantics: a key is compared
+only for exact equality (§3-4), opaque end to end. This is a deliberate
+asymmetry: namespaces get real hierarchy semantics via hide-ns; keys do
+not. The tokenizer itself is unchanged — `.` remains lexically an ordinary
+bare-token character in both positions; the separator meaning is purely
+semantic, applied only by hide-ns's prefix matching, never by the lexer or
+by key comparison.

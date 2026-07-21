@@ -56,6 +56,52 @@ use crate::token::split_unquoted_whitespace;
 /// An id-set posting list: sorted, deduplicated interned item ids.
 type PostingList = Vec<u32>;
 
+/// The reserved namespace config tags live in (SPEC.md §7): a config tag
+/// is `tagma.hide-ns:<ns>=<bool>`, so this is the tag's own namespace, not
+/// the namespace it configures (which is the tag's *key*).
+const HIDE_NS_CONFIG_NAMESPACE: &str = "tagma.hide-ns";
+
+/// The implicit default hide (SPEC.md §7): as if
+/// `tagma.hide-ns:tagma=true` were always present, unless overridden by an
+/// explicit `tagma.hide-ns:tagma=false`.
+const HIDE_NS_DEFAULT_HIDDEN: &str = "tagma";
+
+/// Query-scoped hide-ns visibility (SPEC.md §7): the namespaces currently
+/// hidden in this store, and the namespaces the *current query* explicitly
+/// names (by a concrete token, never a wildcard) and therefore unhides,
+/// subtree-wide, for every atom evaluated as part of that query.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Visibility {
+    hidden: BTreeSet<String>,
+    referenced: BTreeSet<String>,
+}
+
+impl Visibility {
+    /// `true` iff a tag in namespace `ns` should participate in this
+    /// query: the null namespace is always visible; a named namespace is
+    /// visible unless it's covered by a hidden namespace, or it's covered
+    /// by a namespace this query explicitly referenced (unhiding wins over
+    /// hiding, since referencing is what makes a hidden namespace visible
+    /// at all).
+    fn ns_visible(&self, ns: &Option<String>) -> bool {
+        match ns {
+            None => true,
+            Some(n) => !covers_any(n, &self.hidden) || covers_any(n, &self.referenced),
+        }
+    }
+}
+
+/// `true` iff `ns` is covered by some root in `roots`: `ns` equals the
+/// root, or `ns` is a dot-delimited descendant of it (SPEC.md §7 — `.` is
+/// a hierarchy separator between namespace path components, unlike in
+/// keys). The same relation serves both the hide-ns prefix rule and its
+/// symmetric unhide-by-reference counterpart.
+fn covers_any(ns: &str, roots: &BTreeSet<String>) -> bool {
+    roots.iter().any(|r| {
+        ns == r || (ns.starts_with(r.as_str()) && ns.as_bytes().get(r.len()) == Some(&b'.'))
+    })
+}
+
 /// An in-memory tag index: item id -> tags, queryable via infix or postfix.
 #[derive(Debug, Clone, Default)]
 pub struct Index {
@@ -223,12 +269,71 @@ impl Index {
     /// The interned ids of items matching `atom` — the engine-internal
     /// counterpart of [`Self::matching_ids`], used by the postfix VM so the
     /// query path stays in `u32` until the final result.
+    ///
+    /// Applies hide-ns visibility (SPEC.md §7) treating `atom` as the whole
+    /// query: only `atom`'s own explicit namespace (if any) counts as
+    /// referenced. [`Self::matching_ids_u32_vis`] is the counterpart used
+    /// when evaluating a full (possibly compound) postfix query, where the
+    /// referenced set spans every atom in it.
     pub(crate) fn matching_ids_u32(&self, atom: &Atom) -> Vec<u32> {
+        let vis = self.visibility_for(atom_ns_reference(atom));
+        self.matching_ids_u32_vis(atom, &vis)
+    }
+
+    /// Like [`Self::matching_ids_u32`], but under an explicit, already
+    /// query-wide [`Visibility`] rather than one derived from `atom` alone.
+    pub(crate) fn matching_ids_u32_vis(&self, atom: &Atom, vis: &Visibility) -> Vec<u32> {
         if self.should_scan(atom) {
-            self.scan_matching_ids_u32(atom)
+            self.scan_matching_ids_u32(atom, vis)
         } else {
-            self.indexed_matching_ids_u32(atom)
+            self.indexed_matching_ids_u32(atom, vis)
         }
+    }
+
+    /// Builds the [`Visibility`] for a query that explicitly names
+    /// `referenced` namespaces (SPEC.md §7): the store's current hidden set
+    /// (see [`Self::hidden_namespaces`]) paired with what this query
+    /// unhides.
+    pub(crate) fn visibility_for(&self, referenced: BTreeSet<String>) -> Visibility {
+        Visibility {
+            hidden: self.hidden_namespaces(),
+            referenced,
+        }
+    }
+
+    /// The namespaces currently configured hidden (SPEC.md §7): the
+    /// implicit `tagma` default, adjusted by any `tagma.hide-ns:<ns>=<bool>`
+    /// tags read back from the store. hide-ns tags are ordinary tags, not a
+    /// separate structure, so this reads the same `keys_by_ns` /
+    /// `by_ns_key_value` registries every other atom does — no separate
+    /// cache or invalidation to maintain. On a namespace with both a
+    /// `=true` and a `=false` tag on record (possible since this reference
+    /// core has no untag/delete operation, so a "changed" setting is only
+    /// ever additive), hide wins — the fail-safe reading.
+    fn hidden_namespaces(&self) -> BTreeSet<String> {
+        let mut hidden = BTreeSet::new();
+        hidden.insert(HIDE_NS_DEFAULT_HIDDEN.to_string());
+        let config_ns = Some(HIDE_NS_CONFIG_NAMESPACE.to_string());
+        if let Some(targets) = self.keys_by_ns.get(&config_ns) {
+            for target in targets {
+                let says_hidden = self.by_ns_key_value.contains_key(&(
+                    config_ns.clone(),
+                    target.clone(),
+                    "true".to_string(),
+                ));
+                let says_visible = self.by_ns_key_value.contains_key(&(
+                    config_ns.clone(),
+                    target.clone(),
+                    "false".to_string(),
+                ));
+                if says_hidden {
+                    hidden.insert(target.clone());
+                } else if says_visible {
+                    hidden.remove(target);
+                }
+            }
+        }
+        hidden
     }
 
     /// `true` iff `atom` has the one shape the inverted index doesn't serve
@@ -254,11 +359,24 @@ impl Index {
     /// as the fallback for the shape identified by [`Self::should_scan`].
     /// `tags_by_id` is iterated in id order, so the result is already a
     /// sorted `Vec<u32>`.
-    fn scan_matching_ids_u32(&self, atom: &Atom) -> Vec<u32> {
+    ///
+    /// Each item's tags are filtered by `vis` (SPEC.md §7) before being
+    /// handed to [`Atom::matches`], so a tag in a hidden, unreferenced
+    /// namespace is invisible to the match — as if it weren't there at all
+    /// — without [`Atom::matches`]'s own signature needing to know about
+    /// hide-ns.
+    fn scan_matching_ids_u32(&self, atom: &Atom, vis: &Visibility) -> Vec<u32> {
         self.tags_by_id
             .iter()
             .enumerate()
-            .filter(|(_, tags)| atom.matches(tags))
+            .filter(|(_, tags)| {
+                let visible: Vec<Tag> = tags
+                    .iter()
+                    .filter(|t| vis.ns_visible(&t.namespace))
+                    .cloned()
+                    .collect();
+                atom.matches(&visible)
+            })
             .map(|(iid, _)| iid as u32)
             .collect()
     }
@@ -269,9 +387,21 @@ impl Index {
     /// (union-heavy atoms like `!=` can touch hundreds of value buckets),
     /// then sorts and dedups once at the end — a single collect-and-sort
     /// rather than hundreds of pairwise linear merges.
-    fn indexed_matching_ids_u32(&self, atom: &Atom) -> Vec<u32> {
+    ///
+    /// Each candidate namespace is checked against `vis` (SPEC.md §7)
+    /// before its postings are collected — a hidden, unreferenced
+    /// namespace is simply never expanded into, so its tags never enter
+    /// the result. An atom with a concrete namespace token is unaffected
+    /// by this in practice: naming a namespace always makes it a
+    /// referenced (hence visible) candidate (see [`atom_ns_reference`] /
+    /// [`Self::visibility_for`]), the same as `[Self::matching_ids_u32]`'s
+    /// atom-as-whole-query default.
+    fn indexed_matching_ids_u32(&self, atom: &Atom, vis: &Visibility) -> Vec<u32> {
         let mut result: Vec<u32> = Vec::new();
         for ns in self.ns_candidates(&atom.ns) {
+            if !vis.ns_visible(&ns) {
+                continue;
+            }
             for key in self.key_candidates(&ns, &atom.key) {
                 self.collect_ns_key(&ns, &key, &atom.value, &mut result);
             }
@@ -398,6 +528,19 @@ impl Index {
                 }
             }
         }
+    }
+}
+
+/// The namespace an atom by itself "references" for hide-ns purposes
+/// (SPEC.md §7): its own explicit namespace token, if it has one — a `*`/`+`
+/// namespace quantifier never counts. Used to treat a lone atom (e.g. via
+/// [`Index::matching_ids`]/[`Index::matching_ids_u32`]) as the whole query
+/// when no broader postfix context is available; [`postfix::eval`] instead
+/// unions this across every atom in a compound query.
+fn atom_ns_reference(atom: &Atom) -> BTreeSet<String> {
+    match &atom.ns {
+        Some(Pos::Tok(n)) => BTreeSet::from([n.clone()]),
+        _ => BTreeSet::new(),
     }
 }
 
@@ -639,10 +782,11 @@ mod tests {
             "*:*=done",
             "*:*=+",
         ];
+        let vis = Visibility::default();
         for a in atoms {
             let atom = Atom::parse(a).unwrap();
             let mut indexed = idx.matching_ids_u32(&atom);
-            let mut scanned = idx.scan_matching_ids_u32(&atom);
+            let mut scanned = idx.scan_matching_ids_u32(&atom, &vis);
             indexed.sort_unstable();
             scanned.sort_unstable();
             assert_eq!(indexed, scanned, "mismatch for atom {a:?}");
@@ -718,10 +862,72 @@ mod tests {
 
         let atom = Atom::parse("k=1").unwrap();
         let mut indexed = idx.matching_ids_u32(&atom);
-        let mut scanned = idx.scan_matching_ids_u32(&atom);
+        let mut scanned = idx.scan_matching_ids_u32(&atom, &Visibility::default());
         indexed.sort_unstable();
         scanned.sort_unstable();
         assert_eq!(indexed, scanned);
         assert_eq!(indexed, vec![0, 1, 2]);
+    }
+
+    // --- hide-ns (SPEC.md §7) — internals not otherwise pinned by the
+    // conformance suite -----------------------------------------------------
+
+    #[test]
+    fn covers_any_is_dot_delimited_not_a_lexical_prefix() {
+        let roots = BTreeSet::from(["tagma".to_string()]);
+        assert!(covers_any("tagma", &roots));
+        assert!(covers_any("tagma.arity", &roots));
+        assert!(covers_any("tagma.arity.sub", &roots));
+        assert!(!covers_any("tagmax", &roots));
+        assert!(!covers_any("tagma-foo", &roots));
+        assert!(!covers_any("tagmaZ", &roots));
+    }
+
+    #[test]
+    fn hidden_namespaces_defaults_to_tagma_with_no_config_tags_at_all() {
+        let idx = Index::new();
+        assert_eq!(
+            idx.hidden_namespaces(),
+            BTreeSet::from(["tagma".to_string()])
+        );
+    }
+
+    #[test]
+    fn hidden_namespaces_explicit_false_removes_the_default() {
+        let mut idx = Index::new();
+        idx.add_line("cfg tagma.hide-ns:tagma=false").unwrap();
+        assert_eq!(idx.hidden_namespaces(), BTreeSet::new());
+    }
+
+    #[test]
+    fn hidden_namespaces_explicit_true_adds_a_user_namespace() {
+        let mut idx = Index::new();
+        idx.add_line("cfg tagma.hide-ns:triage=true").unwrap();
+        assert_eq!(
+            idx.hidden_namespaces(),
+            BTreeSet::from(["tagma".to_string(), "triage".to_string()])
+        );
+    }
+
+    #[test]
+    fn hidden_namespaces_conflicting_true_and_false_hides() {
+        // No untag/delete operation exists yet (SPEC.md §7), so both tags
+        // can coexist on record; hide is the documented fail-safe winner.
+        let mut idx = Index::new();
+        idx.add_line("cfg1 tagma.hide-ns:triage=true").unwrap();
+        idx.add_line("cfg2 tagma.hide-ns:triage=false").unwrap();
+        assert!(idx.hidden_namespaces().contains("triage"));
+    }
+
+    #[test]
+    fn hidden_namespaces_ignores_an_uninterpretable_value() {
+        let mut idx = Index::new();
+        idx.add_line("cfg tagma.hide-ns:triage=maybe").unwrap();
+        // Neither "true" nor "false": configures nothing, per SPEC.md §7's
+        // "no errors, no coercion surprises" style.
+        assert_eq!(
+            idx.hidden_namespaces(),
+            BTreeSet::from(["tagma".to_string()])
+        );
     }
 }

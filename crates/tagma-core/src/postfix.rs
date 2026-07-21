@@ -18,7 +18,9 @@
 //! lexicographically — intern order isn't string order) at the very end,
 //! in [`eval`].
 
-use crate::atom::Atom;
+use std::collections::BTreeSet;
+
+use crate::atom::{Atom, Pos};
 use crate::index::Index;
 use crate::token::split_unquoted;
 
@@ -145,6 +147,15 @@ fn difference(a: &[u32], b: &[u32]) -> Vec<u32> {
     out
 }
 
+/// A postfix token, parsed once up front (see [`eval`]): an operator, or an
+/// atom.
+enum PfTok {
+    And,
+    Or,
+    Not,
+    Atom(Atom),
+}
+
 /// Evaluates a postfix query string against `index`, returning sorted
 /// matching ids.
 ///
@@ -157,6 +168,15 @@ fn difference(a: &[u32], b: &[u32]) -> Vec<u32> {
 /// set. Stack underflow, a final stack size other than one, an empty
 /// query, or an unterminated quote are errors.
 ///
+/// Every token is parsed into an atom (or recognized as an operator) in a
+/// first pass, before any evaluation: this both preserves the original
+/// parse-error-fails-fast behavior and lets the hide-ns visibility rule
+/// (SPEC.md §7) be computed query-wide — the set of namespaces named by a
+/// concrete token anywhere in the query, across every atom, not just the
+/// one atom being evaluated — before any atom is matched against the
+/// index. Every atom in the query then evaluates under that same
+/// [`Index::matching_ids_u32_vis`] visibility.
+///
 /// # Errors
 ///
 /// Returns a `String` describing the evaluation failure.
@@ -165,27 +185,47 @@ pub fn eval(postfix: &str, index: &Index) -> Result<Vec<String>, String> {
         return Err("postfix: empty query".to_string());
     }
 
-    let mut stack: Vec<Frame> = Vec::new();
-
+    let mut toks: Vec<PfTok> = Vec::new();
     for tok in split_unquoted(postfix, '/').map_err(|e| format!("postfix: {e}"))? {
+        toks.push(match tok {
+            "and" => PfTok::And,
+            "or" => PfTok::Or,
+            "not" => PfTok::Not,
+            _ => PfTok::Atom(Atom::parse(tok)?),
+        });
+    }
+
+    let referenced: BTreeSet<String> = toks
+        .iter()
+        .filter_map(|t| match t {
+            PfTok::Atom(a) => match &a.ns {
+                Some(Pos::Tok(n)) => Some(n.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    let vis = index.visibility_for(referenced);
+
+    let mut stack: Vec<Frame> = Vec::new();
+    for tok in toks {
         match tok {
-            "and" => {
+            PfTok::And => {
                 let rhs = pop(&mut stack, "and")?;
                 let lhs = pop(&mut stack, "and")?;
                 stack.push(lhs.and(rhs));
             }
-            "or" => {
+            PfTok::Or => {
                 let rhs = pop(&mut stack, "or")?;
                 let lhs = pop(&mut stack, "or")?;
                 stack.push(lhs.or(rhs));
             }
-            "not" => {
+            PfTok::Not => {
                 let operand = pop(&mut stack, "not")?;
                 stack.push(operand.not());
             }
-            _ => {
-                let atom = Atom::parse(tok)?;
-                stack.push(Frame::Pos(index.matching_ids_u32(&atom)));
+            PfTok::Atom(atom) => {
+                stack.push(Frame::Pos(index.matching_ids_u32_vis(&atom, &vis)));
             }
         }
     }
