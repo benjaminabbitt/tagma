@@ -31,6 +31,33 @@ const hideNsConfigNamespace = "tagma.hide-ns"
 // explicit tagma.hide-ns:tagma=false.
 const hideNsDefaultHidden = "tagma"
 
+// arityConfigNamespace is the reserved namespace tagma.arity config tags
+// live in (SPEC.md §8): a config tag is tagma.arity:<target>=<arity>, so
+// this is the tag's own namespace, not the namespace it targets (which is
+// encoded, first-colon split, in the tag's key).
+const arityConfigNamespace = "tagma.arity"
+
+// arity is a target key's declared arity (SPEC.md §8). arityDefault (Set)
+// is the default for any undeclared (namespace, key) — today's unchanged
+// multi-valued behavior.
+type arity int
+
+const (
+	arityDefault arity = iota // Set: today's unchanged multi-valued default
+	arityScalar
+)
+
+// arityTarget is the (namespace?, key) pair a tagma.arity config tag
+// targets, recovered from the config tag's own key via splitArityTarget.
+// Used as a map key, so it holds a dereferenced *string (nsPresent/ns)
+// rather than the *string itself, which isn't comparable across distinct
+// pointers to equal strings.
+type arityTarget struct {
+	nsPresent bool
+	ns        string
+	key       string
+}
+
 // visibility pairs the store's currently-hidden namespaces with a
 // referenced set that reveals (dot-subtree) some of them back. The same
 // shape serves two distinct roles depending on what "referenced" is built
@@ -82,9 +109,77 @@ func NewIndex() *Index {
 }
 
 // AddItem adds tags to id. Calling AddItem more than once for the same id
-// accumulates tags (appends) rather than replacing them.
+// accumulates tags (appends) rather than replacing them) — except where
+// SPEC.md §8's tagma.arity config declares a tag's (ns, key) scalar: an
+// incoming tag whose target is scalar and which differs in value from a
+// tag the item already carries for that same (ns, key) collapses the old
+// value out (last-value-wins) rather than accumulating alongside it.
+// AddItem stays infallible either way — collapse never errors.
+//
+// Arity config is read once, up front (arityConfig), from the store as it
+// stood *before* this call (SPEC.md §8 "Ordering" — write-time
+// evaluation): a tagma.arity config tag included in this same tags batch
+// governs later AddItem calls, not other tags alongside it in this one.
+// Collapse itself (collapseScalar) is applied per tag as it's inserted, so
+// it also takes effect across two tags within this one call's slice.
 func (idx *Index) AddItem(id string, tags []Tag) {
-	idx.items[id] = append(idx.items[id], tags...)
+	arityCfg := idx.arityConfig()
+	for _, tag := range tags {
+		if arityLookup(arityCfg, tag.Namespace, tag.Key) == arityScalar && !idx.collapseScalar(id, tag) {
+			// An identical value is already on record for this item: per
+			// SPEC.md §8, a no-op — skip re-appending the duplicate.
+			continue
+		}
+		idx.items[id] = append(idx.items[id], tag)
+	}
+}
+
+// collapseScalar enforces SPEC.md §8's scalar collapse for one incoming
+// tag on item id, whose (namespace, key) has been declared scalar: removes
+// any tag the item already carries sharing that (namespace, key) but a
+// *different* value. The caller always appends a replacement tag for the
+// same (ns, key) immediately after, except in the identical-value case
+// below, where the existing tag is already correct and is left in place.
+//
+// Returns false iff the item already carries this exact tag (identical
+// namespace, key, and value) — the caller's signal to treat this write as
+// a no-op and skip appending the duplicate.
+func (idx *Index) collapseScalar(id string, tag Tag) bool {
+	existing := idx.items[id]
+	kept := existing[:0]
+	identicalPresent := false
+	for _, t := range existing {
+		if !sameTarget(t, tag) {
+			kept = append(kept, t)
+			continue
+		}
+		if valuesEqual(t.Value, tag.Value) {
+			identicalPresent = true
+			kept = append(kept, t)
+			continue
+		}
+		// A different value under the same scalar target: collapse it out
+		// (drop from kept).
+	}
+	idx.items[id] = kept
+	return !identicalPresent
+}
+
+// sameTarget reports whether tags a and b share the same (namespace, key)
+// target — the comparison collapseScalar and arity config keying both use,
+// treating a nil namespace as the null namespace (equal only to another
+// nil).
+func sameTarget(a, b Tag) bool {
+	return valuesEqual(a.Namespace, b.Namespace) && a.Key == b.Key
+}
+
+// valuesEqual reports whether two optional (*string) components are equal:
+// both nil (absent), or both non-nil and pointing at equal strings.
+func valuesEqual(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 // AddLine parses a "<id> <tag> <tag>..." line (PLAN.md §7 Index shape) and
@@ -225,6 +320,78 @@ func (idx *Index) hiddenNamespaces() map[string]struct{} {
 		}
 	}
 	return hidden
+}
+
+// arityConfig derives the current tagma.arity config (SPEC.md §8) by
+// reading tagma.arity:<target>=<arity> tags back out of the store — the
+// same self-hosted pattern as hiddenNamespaces: an internal scan of
+// idx.items that bypasses the query-time hide (tagma.arity is itself under
+// the hidden "tagma" family).
+//
+// Each config tag's key is a <target> string packing the target
+// (namespace?, key) pair; splitArityTarget recovers the pair via a
+// first-colon split. On a target with both a "=scalar" and a "=set" tag on
+// record (possible since this port has no untag/delete operation), scalar
+// wins — the same fail-safe posture as hide-ns's hide-wins rule. A target
+// whose only recorded value is neither "scalar" nor "set" configures
+// nothing and is omitted, so lookups fall through to the Set default.
+func (idx *Index) arityConfig() map[arityTarget]arity {
+	type verdict struct{ saysScalar, saysSet bool }
+	targets := map[string]verdict{}
+	for _, tags := range idx.items {
+		for _, t := range tags {
+			if t.Namespace == nil || *t.Namespace != arityConfigNamespace || t.Value == nil {
+				continue
+			}
+			v := targets[t.Key]
+			switch *t.Value {
+			case "scalar":
+				v.saysScalar = true
+			case "set":
+				v.saysSet = true
+			default:
+				continue // uninterpretable value configures nothing (SPEC.md §8/§4)
+			}
+			targets[t.Key] = v
+		}
+	}
+	config := map[arityTarget]arity{}
+	for target, v := range targets {
+		switch {
+		case v.saysScalar:
+			config[splitArityTarget(target)] = arityScalar
+		case v.saysSet:
+			config[splitArityTarget(target)] = arityDefault
+		}
+	}
+	return config
+}
+
+// splitArityTarget splits a tagma.arity config tag's <target> key into the
+// target (namespace?, key) pair it encodes (SPEC.md §8): a first-colon
+// split, not applied recursively — everything before the first ':' is the
+// target namespace, everything after is the target key; no ':' means a
+// null target namespace and the whole string is the target key. A target
+// key that itself contains a ':' (only reachable by quoting <target> at
+// config-write time) is indistinguishable from a namespace separator here
+// — a documented limitation, not disambiguated.
+func splitArityTarget(target string) arityTarget {
+	if i := strings.IndexByte(target, ':'); i != -1 {
+		return arityTarget{nsPresent: true, ns: target[:i], key: target[i+1:]}
+	}
+	return arityTarget{key: target}
+}
+
+// arityLookup looks up (ns, key)'s declared arity in a config built by
+// arityConfig, defaulting to arityDefault (Set) for any undeclared target
+// (SPEC.md §8).
+func arityLookup(config map[arityTarget]arity, ns *string, key string) arity {
+	t := arityTarget{key: key}
+	if ns != nil {
+		t.nsPresent = true
+		t.ns = *ns
+	}
+	return config[t]
 }
 
 // participatingIDs returns the ids of items that *participate* in a query
