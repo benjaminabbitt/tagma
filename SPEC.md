@@ -345,8 +345,7 @@ whether one particular *atom* is allowed to match one particular tag
   makes a hidden tag matchable by an atom that doesn't itself reference it
   clearly enough.
 
-**Unhide-by-reference — the rule this rework had to decide; flagged
-prominently for review before it reaches the Go/Python/JS ports.**
+**Unhide-by-reference — reveal specificity must match hide specificity.**
 `hide-ns` had one reveal primitive: naming a namespace concretely unhides
 its whole dot-subtree. Generalizing to `ns:key` hides raises a genuine
 question `hide-ns` never had to answer: does naming *just the namespace*
@@ -354,76 +353,85 @@ question `hide-ns` never had to answer: does naming *just the namespace*
 one declared by `tagma.hide:"triage:cwe"=true`), even though the atom never
 names `cwe` at all?
 
-**Chosen rule: yes.** Naming the ns-subtree unhides everything under it —
-both ns-level and key-level hides alike; naming the exact `ns:key` pair
-*additionally* unhides a key-level hide even when there is no ns name to
-lean on at all (chiefly the null-namespace case, where there is no
-namespace token to name). Formally, a query/atom *references* two things:
+**Chosen rule: no — an atom must be at least as specific as the pattern it
+would reveal, in *both* positions.** A hide pattern is a `(ns-pattern,
+key-pattern)` pair (see "The pattern grammar" above); a query atom reveals
+one iff:
 
-- **ns-reference**: the concrete (non-wildcard) namespace token an atom
-  itself names, if any — exactly `hide-ns`'s own reveal primitive,
-  unchanged. A namespace quantifier (`*:key`, `+:key`) never contributes
-  one.
-- **exact-reference**: the `(namespace, key)` pair an atom itself names,
-  when *both* its namespace clause (a concrete token, or absent/null) *and*
-  its key clause (a concrete token, never `*`/`+`) are pinned down. A
-  namespace or key quantifier never contributes one.
+- **ns position**: the atom names a namespace within the pattern's
+  dot-subtree — its namespace equals the pattern's ns-pattern, or is a
+  dot-descendant of it. A namespace *quantifier* (`*:key`, `+:key`) never
+  counts as naming, exactly as in `hide-ns`.
+- **key position**: the pattern's key-pattern is `*` (an ns-level hide,
+  satisfied regardless of the atom's own key), **or** the atom's key
+  equals the pattern's exact key-pattern, **or** the atom's key is itself
+  `*`/`+` (a key-wildcard atom reveals an exact key-pattern too, mirroring
+  how `*`/`+` already collapse to "any key" for matching itself, §3).
 
-A hidden tag `(ns, key)` is **unhidden by reference** `R` iff `ns`'s
-dot-subtree is covered by some namespace `R` names, **or** `(ns, key)`
-exactly is one of `R`'s exact-references. Participation's `R` is the union
-of every atom's own references across the whole query; one atom's own
-matching uses only its own references, never a sibling's (unchanged from
-`hide-ns`).
+**A tag is query-visible iff *every* active hide pattern that matches it is
+revealed** by some atom (participation: any atom anywhere in the query;
+matching: that one atom alone — unchanged two-level structure from
+`hide-ns`). A tag hidden by two patterns at once — e.g. a broad `"triage:*"`
+ns-hide and a narrower `"triage:cwe"` key-hide both landing on the same
+`triage:cwe` tag — stays hidden until a query reveals **both**, not just
+one.
 
-*Edge case, confirmed deliberately*: `triage:type` (an atom naming only ns
-`triage`, key `type`) **does** unhide a `triage:cwe`-level hide — same
-ns-subtree, different key — because naming the ns is enough on its own; the
-atom does not additionally have to name `cwe`. This was chosen over the
-alternative — "a key-level hide is only unhidden by referencing that ns
-*or* that exact key" reads the same on paper, but would have made naming
-`triage` alone *insufficient* to reveal a `triage:cwe` hide, which is not
-what was chosen — for three reasons:
+*Edge case, confirmed*: `triage:type` (an atom naming ns `triage`, key
+`type`) does **not** unhide a `triage:cwe`-level hide — it is at least as
+specific in the ns position (it names `triage`), but *not* in the key
+position (`type` ≠ `cwe`, and `type` is not a key-wildcard), so it fails
+the key-position test and the hide stays in force. This was chosen over the
+alternative — "naming the ns unhides everything under it, key-level hides
+included" (the simpler-sounding rule, and this rework's own first attempt)
+— because:
 
-1. It is a strict, additive generalization of `hide-ns`'s existing mental
-   model ("naming a namespace reveals its whole subtree") rather than a new,
-   second, narrower reveal concept a caller must learn alongside it. A
-   two-tier *hide* (ns-level, key-level) paired with a *one-tier* reveal
-   (ns-subtree, plus the exact-pair only where there is no ns to name at
-   all) is simpler to hold in mind than a two-tier hide paired with a
-   matching two-tier reveal.
-2. It keeps `not`/participation reasoning identical in shape to `hide-ns`'s
-   own worked table below — only the grain of what counts as "hidden"
-   changed, not the shape of what counts as "revealed."
-3. The exact-reference clause exists only to cover ground the ns-reference
-   clause structurally cannot reach (the null namespace has no subtree to
-   name) — not to compete with or narrow it for named namespaces.
+1. **Hide and reveal must be symmetric in grain, or the facet lies about
+   its own granularity.** A key-level hide's entire point is "hide *this
+   key*, not the whole namespace" — a reveal rule that lets naming the bare
+   namespace defeat it silently reintroduces namespace-only granularity
+   through the back door, so a per-key hide is never actually more targeted
+   than an ns-level one from the query side, only from the config side.
+2. It composes correctly when a tag is hidden by *multiple* patterns at
+   once (the ns-hide-and-key-hide-together case below): each pattern must
+   be independently revealed, and that only means something if "reveal"
+   already respects each pattern's own specificity — an asymmetric reveal
+   (broad ns-naming defeats everything) would make the narrower pattern
+   pointless the moment any broader one coexists with it.
+3. It keeps one reveal test ("at least as specific as the hidden pattern,
+   in both positions") rather than a special case for "unless the hide
+   happens to be key-level, in which case naming the ns alone isn't
+   enough" — a single uniform rule, not a rule-plus-exception.
 
-| query atom | hidden tag | participates? | matched by *this* atom? |
+| query atom | hidden tag | reveals `"triage:*"` (ns-hide)? | reveals `"triage:cwe"` (key-hide)? |
 |---|---|---|---|
-| `triage:*` | `triage:cwe=79` (key-level hide, `"triage:cwe"=true`) | yes — ns-reference `triage` | yes — the atom names `triage`, key wildcarded |
-| `urgent` | `triage:cwe=79` (item's only tag) | no | — (item never appears) |
-| `*:*` / bare `*` | any hidden tag | no | — (quantifiers reveal nothing) |
-| `triage:foo or *:x=1` | `triage:x=1` (hidden via `"triage:*"=true`) | yes (revealed by `triage:foo`'s ns-reference) | no — `*:x=1` never itself names `triage` |
-| `secret` (null ns) | `secret=shh` (hidden via bare `secret=true`) | yes — exact-reference `(None, "secret")` | yes |
-| `triage:type` | `triage:cwe=79` (hidden via `"triage:cwe"=true`) | yes — ns-reference `triage` covers the whole subtree, key-level hides included | n/a — `triage:type`'s own key clause is `type`, so it was never going to match a `cwe`-keyed tag regardless of hide; this row exists to confirm `triage:cwe=79` still counts toward *participation* |
+| `triage:type` | `triage:cwe=79` | yes — key-pattern `*` is satisfied regardless | **no** — key `type` ≠ `cwe`, and not a key-wildcard |
+| `triage:cwe` | `triage:cwe=79` | yes | yes — exact key match |
+| `triage:*` | `triage:cwe=79` | yes | yes — a key-wildcard atom reveals an exact key-pattern too |
+| `*:x=1` | (any hidden tag) | no | no — a namespace quantifier never counts as naming |
 
-An item whose only tags fall in a hidden, unreferenced pattern therefore
+Consequently: a `triage:cwe=79` tag hidden **only** by `"triage:cwe"=true`
+is revealed by `triage:cwe` or `triage:*`, but *not* by `triage:type`. A
+`triage:cwe=79` tag hidden by **both** `"triage:*"=true` *and*
+`"triage:cwe"=true` needs a query that reveals both at once — `triage:cwe`
+does (it satisfies both tables' rows above); `triage:type` reveals only the
+ns-hide, so the tag stays hidden by the still-unrevealed key-hide.
+
+An item whose only tags fall in a hidden, unrevealed pattern therefore
 never appears in that query's results, in any position — not an error, just
 an empty visible tag set, and (since it doesn't participate) excluded from
 what `not` complements against too. The "dotfile" mental model from
 `hide-ns` still applies unchanged: a hidden namespace or key is invisible to
-a bare `ls`, visible to `ls -a` only for whichever `ls -a` invocation
-actually references it clearly enough — a sibling command referencing it
+a bare `ls`, visible to `ls -a` only for whichever `ls -a` invocation is
+itself at least as specific as the hide — a sibling command revealing it
 elsewhere doesn't retroactively make *this* one show it.
 
-- A namespace or key quantifier atom never contributes a reference, for
+- A namespace or key quantifier atom never reveals anything, for
   participation or for its own matching — quantifiers only ever hide (by
   matching a hide pattern's own `*`), never reveal.
 - The store-wide default/override from **Default** above always applies
   first, to both participation and matching; per-query revealing is a
   second, additive way a tag becomes visible, but strictly for
-  participation (and for the referencing atom's own matching) — it never
+  participation (and for the revealing atom's own matching) — it never
   extends to any other atom's matching in the same query.
 
 **`.` is a separator in namespaces, not in keys.** Unchanged from `hide-ns`:

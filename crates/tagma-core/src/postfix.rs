@@ -225,16 +225,13 @@ pub fn eval(postfix: &str, index: &Index) -> Result<Vec<String>, String> {
         });
     }
 
-    let mut referenced_ns: BTreeSet<String> = BTreeSet::new();
-    let mut referenced_exact: BTreeSet<(Option<String>, String)> = BTreeSet::new();
+    let mut references: BTreeSet<(Option<String>, Option<String>)> = BTreeSet::new();
     for t in &toks {
         if let PfTok::Atom(a) = t {
-            let (ns_ref, exact_ref) = atom_reference(a);
-            referenced_ns.extend(ns_ref);
-            referenced_exact.extend(exact_ref);
+            references.extend(atom_reference(a));
         }
     }
-    let participation_vis = index.visibility_for(referenced_ns, referenced_exact);
+    let participation_vis = index.visibility_for(references);
 
     let mut stack: Vec<Frame> = Vec::new();
     for tok in toks {

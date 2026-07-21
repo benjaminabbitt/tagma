@@ -134,11 +134,16 @@ impl HidePattern {
 }
 
 /// Hide visibility (SPEC.md §7): the `tagma.hide` patterns currently active
-/// in this store, paired with a query's *references*, which unhide
-/// (SPEC.md §7 "Unhide-by-reference") some of what those patterns would
-/// otherwise hide. The same shape serves two *distinct* roles depending on
-/// what the reference sets are built from — callers must not conflate
-/// them:
+/// in this store, paired with a query's *references* — atom shapes that can
+/// reveal (SPEC.md §7 "Unhide-by-reference") a hide pattern whose own
+/// ns/key-pattern that atom is at least as specific as. Each reference is a
+/// `(ns, key)` pair mirroring an atom's own clauses: `ns` is `None` for the
+/// null namespace or `Some(name)` for a named one (an atom with a namespace
+/// *quantifier* — `*`/`+` — contributes no reference at all: quantifiers
+/// never reveal); `key` is `None` for a key quantifier (`*`/`+` — "wildcard
+/// key", which reveals an exact key-pattern too) or `Some(key)` for a
+/// concrete key. The same reference set serves two *distinct* roles
+/// depending on what it's built from — callers must not conflate them:
 ///
 /// - **Matching** (per atom): the references are that one atom's own
 ///   ([`atom_reference`]/[`Index::matching_ids_u32`]) — a sibling atom
@@ -153,34 +158,66 @@ impl HidePattern {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Visibility {
     hidden: Vec<HidePattern>,
-    referenced_ns: BTreeSet<String>,
-    referenced_exact: BTreeSet<(Option<String>, String)>,
+    references: BTreeSet<(Option<String>, Option<String>)>,
 }
 
 impl Visibility {
     /// `true` iff a tag `(ns, key)` is visible under this [`Visibility`]:
-    /// not hidden by any active pattern, or hidden but unhidden by
-    /// reference (whose meaning — an atom's own references, or a whole
-    /// query's — depends on how this [`Visibility`] was built; see the
-    /// type docs).
+    /// SPEC.md §7's "Unhide-by-reference" rule — visible iff **every**
+    /// active hide pattern that matches `(ns, key)` is itself revealed by
+    /// some reference (whose meaning — an atom's own, or a whole query's —
+    /// depends on how this [`Visibility`] was built; see the type docs). A
+    /// tag hidden by two patterns (e.g. a broad ns-hide and a narrower
+    /// key-hide) stays hidden unless *both* are revealed.
     fn tag_visible(&self, ns: &Option<String>, key: &str) -> bool {
-        !self.is_hidden(ns, key) || self.is_referenced(ns, key)
+        !self
+            .hidden
+            .iter()
+            .any(|p| p.matches(ns, key) && !self.pattern_revealed(p))
     }
 
-    fn is_hidden(&self, ns: &Option<String>, key: &str) -> bool {
-        self.hidden.iter().any(|p| p.matches(ns, key))
+    /// `true` iff some reference is at least as specific as `pattern` in
+    /// *both* positions (SPEC.md §7 "Unhide-by-reference"): its ns names
+    /// within `pattern`'s ns-subtree, and its key satisfies `pattern`'s
+    /// key-pattern.
+    fn pattern_revealed(&self, pattern: &HidePattern) -> bool {
+        self.references.iter().any(|(ns_ref, key_ref)| {
+            ns_reveals(ns_ref, &pattern.ns) && key_reveals(key_ref, &pattern.key)
+        })
     }
+}
 
-    /// SPEC.md §7 "Unhide-by-reference": `(ns, key)` is unhidden if some
-    /// referenced namespace's dot-subtree covers `ns` (naming the ns-subtree
-    /// unhides everything under it, key-level hides included), or if
-    /// `(ns, key)` exactly is one of the exact references (covers the null
-    /// namespace, which has no subtree to name).
-    fn is_referenced(&self, ns: &Option<String>, key: &str) -> bool {
-        matches!(ns, Some(n) if covers_any(n, &self.referenced_ns))
-            || self
-                .referenced_exact
-                .contains(&(ns.clone(), key.to_string()))
+/// `true` iff a reference's namespace (`None` = null, `Some(name)` = named)
+/// is at least as specific as `pattern_ns` (SPEC.md §7 "Unhide-by-reference"):
+/// the null reference is within the null pattern or `Any`, never within a
+/// named one (null has no subtree to be "within" a named one); a named
+/// reference is within `Any`, or within a `Named` pattern iff its name is
+/// covered ([`covers`]) by the pattern's — never within `Null` (a named
+/// reference doesn't name "no namespace").
+fn ns_reveals(ns_ref: &Option<String>, pattern_ns: &NsPattern) -> bool {
+    match (ns_ref, pattern_ns) {
+        (None, NsPattern::Null | NsPattern::Any) => true,
+        (None, NsPattern::Named(_)) => false,
+        (Some(_), NsPattern::Any) => true,
+        (Some(_), NsPattern::Null) => false,
+        (Some(t), NsPattern::Named(n)) => covers(t, n),
+    }
+}
+
+/// `true` iff a reference's key (`None` = key quantifier, "wildcard key";
+/// `Some(key)` = concrete) is at least as specific as `pattern_key` (SPEC.md
+/// §7 "Unhide-by-reference"): an ns-level hide (`pattern_key` is `Any`) is
+/// satisfied by any key reference at all; an exact key-pattern is satisfied
+/// by the same exact key, or by a wildcard-key reference (`*`/`+` reveal an
+/// exact key-pattern too, exactly as a wildcard-key atom's own matching
+/// already treats `*`/`+` as equivalent, SPEC.md §3).
+fn key_reveals(key_ref: &Option<String>, pattern_key: &KeyPattern) -> bool {
+    match pattern_key {
+        KeyPattern::Any => true,
+        KeyPattern::Exact(k) => match key_ref {
+            None => true,
+            Some(ak) => ak == k,
+        },
     }
 }
 
@@ -189,14 +226,6 @@ impl Visibility {
 /// separator between namespace path components, unlike in keys).
 fn covers(ns: &str, root: &str) -> bool {
     ns == root || (ns.starts_with(root) && ns.as_bytes().get(root.len()) == Some(&b'.'))
-}
-
-/// `true` iff `ns` is covered by some root in `roots` ([`covers`]). Serves
-/// both a hide pattern's own ns-subtree matching ([`HidePattern::matches`])
-/// and the symmetric unhide-by-reference ns-reference check
-/// ([`Visibility::is_referenced`]).
-fn covers_any(ns: &str, roots: &BTreeSet<String>) -> bool {
-    roots.iter().any(|r| covers(ns, r))
 }
 
 /// An in-memory tag index: item id -> tags, queryable via infix or postfix.
@@ -447,8 +476,7 @@ impl Index {
     /// standalone ([`Self::matching_ids`]) or as one clause of a compound
     /// postfix query ([`postfix::eval`]).
     pub(crate) fn matching_ids_u32(&self, atom: &Atom) -> Vec<u32> {
-        let (ns_ref, exact_ref) = atom_reference(atom);
-        let vis = self.visibility_for(ns_ref, exact_ref);
+        let vis = self.visibility_for(atom_reference(atom));
         if self.should_scan(atom) {
             self.scan_matching_ids_u32(atom, &vis)
         } else {
@@ -457,20 +485,17 @@ impl Index {
     }
 
     /// Builds a [`Visibility`] against the store's current active hide
-    /// patterns (see [`Self::hidden_patterns`]) paired with `referenced_ns`/
-    /// `referenced_exact`. Their meaning is caller-defined — see the
-    /// [`Visibility`] type docs for the two distinct roles
-    /// ([`Self::matching_ids_u32`]'s atom-local references vs.
-    /// [`postfix::eval`]'s query-wide ones).
+    /// patterns (see [`Self::hidden_patterns`]) paired with `references`.
+    /// Its meaning is caller-defined — see the [`Visibility`] type docs for
+    /// the two distinct roles ([`Self::matching_ids_u32`]'s atom-local
+    /// references vs. [`postfix::eval`]'s query-wide ones).
     pub(crate) fn visibility_for(
         &self,
-        referenced_ns: BTreeSet<String>,
-        referenced_exact: BTreeSet<(Option<String>, String)>,
+        references: BTreeSet<(Option<String>, Option<String>)>,
     ) -> Visibility {
         Visibility {
             hidden: self.hidden_patterns(),
-            referenced_ns,
-            referenced_exact,
+            references,
         }
     }
 
@@ -616,13 +641,15 @@ impl Index {
     /// Each candidate `(ns, key)` pair is checked against `vis` (SPEC.md §7,
     /// always this one atom's own local visibility — see
     /// [`Self::matching_ids_u32`]) before its postings are collected — a
-    /// hidden, unreferenced `(ns, key)` is simply never expanded into, so
-    /// its tags never enter the result. The check is per-key, not per-ns
-    /// only, since a hide pattern may target one key within an otherwise
-    /// visible namespace. An atom with a concrete namespace token is
-    /// unaffected by this in practice: naming a namespace always makes it
-    /// its own ns-reference (hence visible) candidate (see
-    /// [`atom_reference`]).
+    /// hidden, unrevealed `(ns, key)` is simply never expanded into, so its
+    /// tags never enter the result. The check is per-key, not per-ns only,
+    /// since a hide pattern may target one key within an otherwise visible
+    /// namespace, and reveal-specificity must match hide-specificity (SPEC.md
+    /// §7): an atom whose own key clause is concrete only reveals a
+    /// same-key hide, not a hide on a sibling key under the same namespace —
+    /// so this atom's own candidate loop only ever visits its own key
+    /// candidate(s) in the first place (see [`Self::key_candidates`]),
+    /// always the one(s) [`atom_reference`] itself contributes.
     fn indexed_matching_ids_u32(&self, atom: &Atom, vis: &Visibility) -> Vec<u32> {
         let mut result: Vec<u32> = Vec::new();
         for ns in self.ns_candidates(&atom.ns) {
@@ -759,35 +786,38 @@ impl Index {
 }
 
 /// What an atom by itself "references" for `tagma.hide` unhide-by-reference
-/// purposes (SPEC.md §7 "Unhide-by-reference"): its own concrete namespace
-/// token (the ns-reference — a `*`/`+` namespace quantifier never counts),
-/// plus, when its key clause is *also* a concrete token (never `*`/`+`),
-/// the exact `(namespace, key)` pair it names (the exact-reference — this
-/// is what lets a null-namespace atom, which has no namespace token to
-/// contribute an ns-reference, still unhide a null-namespace key-level
-/// hide). [`Index::matching_ids_u32`] uses this directly, for every atom,
-/// always — matching is per-atom, so no other atom's reference ever
-/// contributes here. [`postfix::eval`] additionally unions the same
-/// per-atom references across every atom in a compound query to build the
-/// separate, query-wide *participation* set (SPEC.md §7) — a different,
-/// additive use of the same building block, never fed back into matching.
-pub(crate) fn atom_reference(
-    atom: &Atom,
-) -> (BTreeSet<String>, BTreeSet<(Option<String>, String)>) {
-    let mut ns_ref = BTreeSet::new();
-    let ns_concrete: Option<Option<String>> = match &atom.ns {
+/// purposes (SPEC.md §7 "Unhide-by-reference"): a single `(ns, key)` pair
+/// mirroring the atom's own clauses — `ns` is `None` for the null namespace
+/// (an atom with no namespace clause) or `Some(name)` for a concrete
+/// namespace token; `key` is `None` for a key quantifier (`*`/`+`,
+/// "wildcard key") or `Some(key)` for a concrete key token. A namespace
+/// *quantifier* (`*`/`+`) makes the atom reference nothing at all — an
+/// empty set, not a `(None, _)` entry — since a namespace wildcard atom
+/// never counts as naming (unchanged from the retired `hide-ns` facet).
+/// [`Index::matching_ids_u32`] uses this directly, for every atom, always —
+/// matching is per-atom, so no other atom's reference ever contributes
+/// here. [`postfix::eval`] additionally unions the same per-atom references
+/// across every atom in a compound query to build the separate, query-wide
+/// *participation* set (SPEC.md §7) — a different, additive use of the same
+/// building block, never fed back into matching.
+pub(crate) fn atom_reference(atom: &Atom) -> BTreeSet<(Option<String>, Option<String>)> {
+    // Outer `Option` here: `None` means "this atom references nothing at
+    // all" (a namespace quantifier); `Some(ns_ref)` carries the actual
+    // ns-reference, itself `None` for the null namespace or `Some(name)`
+    // for a concrete one — not to be confused with each other.
+    let ns_ref: Option<Option<String>> = match &atom.ns {
         None => Some(None),
-        Some(Pos::Tok(n)) => {
-            ns_ref.insert(n.clone());
-            Some(Some(n.clone()))
-        }
-        _ => None,
+        Some(Pos::Tok(n)) => Some(Some(n.clone())),
+        Some(Pos::Any) | Some(Pos::Present) => None,
     };
-    let mut exact_ref = BTreeSet::new();
-    if let (Some(ns_val), Pos::Tok(k)) = (ns_concrete, &atom.key) {
-        exact_ref.insert((ns_val, k.clone()));
-    }
-    (ns_ref, exact_ref)
+    let Some(ns_ref) = ns_ref else {
+        return BTreeSet::new();
+    };
+    let key_ref = match &atom.key {
+        Pos::Tok(k) => Some(k.clone()),
+        Pos::Any | Pos::Present => None,
+    };
+    BTreeSet::from([(ns_ref, key_ref)])
 }
 
 /// Looks up `(ns, key)`'s declared arity in a config built by
@@ -1279,14 +1309,13 @@ mod tests {
     // conformance suite -----------------------------------------------------
 
     #[test]
-    fn covers_any_is_dot_delimited_not_a_lexical_prefix() {
-        let roots = BTreeSet::from(["tagma".to_string()]);
-        assert!(covers_any("tagma", &roots));
-        assert!(covers_any("tagma.arity", &roots));
-        assert!(covers_any("tagma.arity.sub", &roots));
-        assert!(!covers_any("tagmax", &roots));
-        assert!(!covers_any("tagma-foo", &roots));
-        assert!(!covers_any("tagmaZ", &roots));
+    fn covers_is_dot_delimited_not_a_lexical_prefix() {
+        assert!(covers("tagma", "tagma"));
+        assert!(covers("tagma.arity", "tagma"));
+        assert!(covers("tagma.arity.sub", "tagma"));
+        assert!(!covers("tagmax", "tagma"));
+        assert!(!covers("tagma-foo", "tagma"));
+        assert!(!covers("tagmaZ", "tagma"));
     }
 
     fn hidden(idx: &Index, tag_str: &str) -> bool {

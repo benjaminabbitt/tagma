@@ -8,15 +8,23 @@ Feature: Pattern-based visibility — tagma.hide
   by dot-subtree (or `*` for any namespace) and `<key>` matches exactly (or
   `*` for any key). Visibility splits into two separate rules: PARTICIPATION
   is query-wide — an item participates iff it has at least one tag that
-  isn't hidden, or is unhidden by reference — some atom *anywhere* in the
-  query naming its namespace (dot-subtree) or its exact `ns:key`. That
-  participating set is also what "not" complements against. MATCHING is
-  per-atom — an atom only ever matches a hidden tag if *that atom itself*
-  references it clearly enough; a sibling atom referencing it elsewhere in
-  the same query makes the item participate, but does not lend its own
-  atoms' matching power to any other atom. The `tagma` family is hidden by
-  default (`tagma.hide:"tagma:*"=true`), and `.` is a dot-delimited
-  hierarchy separator between namespace path components only (not in keys).
+  isn't hidden, or every active hide pattern that hides it is revealed by
+  some atom *anywhere* in the query. That participating set is also what
+  "not" complements against. MATCHING is per-atom — an atom only ever
+  matches a hidden tag if *that atom itself* reveals every pattern hiding
+  it; a sibling atom revealing it elsewhere in the same query makes the
+  item participate, but does not lend its own atoms' matching power to any
+  other atom. REVEAL SPECIFICITY MUST MATCH HIDE SPECIFICITY: an atom
+  reveals a hide pattern only if the atom is at least as specific as the
+  pattern in *both* the ns position (its namespace names within the
+  pattern's dot-subtree) and the key position (the pattern's key-pattern is
+  `*`, or the atom's key equals the pattern's, or the atom's key is `*`) —
+  naming just the namespace of a per-key hide (e.g. `triage:type` against a
+  `triage:cwe` hide) does NOT reveal it; a tag hidden by two patterns (e.g.
+  a broad ns-hide and a narrower key-hide) stays hidden until a query
+  reveals BOTH. The `tagma` family is hidden by default
+  (`tagma.hide:"tagma:*"=true`), and `.` is a dot-delimited hierarchy
+  separator between namespace path components only (not in keys).
 
   Scenario: the tagma family is hidden by default, but a query naming it exactly sees it
     Given an item "a" tagged "tagma.arity:kind=binary"
@@ -132,19 +140,43 @@ Feature: Pattern-based visibility — tagma.hide
     When the query "secret or urgent" is run
     Then it matches exactly "z b"
 
-  Scenario: naming just the namespace unhides a sibling key-level hide for participation, though the naming atom's own key clause still can't match that different key
-    This is the "does naming triage:type unhide a triage:cwe hide"
-    edge case SPEC.md §7 calls out by name: "z"'s only tag is the key-level
-    hidden "triage:cwe"; "triage:type" names ns "triage" concretely, which
-    unhides the whole subtree for PARTICIPATION — both ns-level and
-    key-level hides under it — even though the atom's own key clause is
-    "type", not "cwe", so it was never going to MATCH "z"'s tag regardless.
-    "z" therefore participates (and so is excluded by "not", not left out
-    of the universe entirely), but only "b" is ever matched directly.
+  Scenario: reveal specificity must match hide specificity — naming only the namespace does not reveal a sibling key-level hide
+    This is the "does naming triage:type unhide a triage:cwe hide" edge case
+    SPEC.md §7 calls out by name, and the answer is NO: "z"'s only tag is
+    the key-level hidden "triage:cwe"; "triage:type" names the right
+    namespace but the WRONG key (its key-pattern is "cwe", not "*"), so it
+    is not "at least as specific as" the hide pattern and does not reveal
+    it — "z" stays hidden, and so absent even from "not"'s complement.
+    Naming the exact key ("triage:cwe") does reveal it, and so does a
+    key-wildcard atom under the same namespace ("triage:*"), since a
+    wildcard key satisfies an exact key-pattern too.
     Given an item "cfg" tagged 'tagma.hide:"triage:cwe"=true'
     Given an item "z" tagged "triage:cwe=79"
     Given an item "b" tagged "triage:type=bug"
     When the query "triage:type" is run
     Then it matches exactly "b"
     When the query "not triage:type" is run
+    Then it matches exactly ""
+    When the query "triage:cwe" is run
+    Then it matches exactly "z"
+    When the query "triage:*" is run
+    Then it matches exactly "b z"
+
+  Scenario: a tag hidden by both an ns-hide and a key-hide is visible only once a query reveals both
+    "z"'s only tag, "triage:cwe=79", is doubly hidden: once by the
+    namespace-wide "triage:*" hide (key-pattern "*", any key), and again by
+    the more specific "triage:cwe" key hide. "triage:type" reveals the
+    ns-hide (its key-pattern is "*", satisfied regardless of the atom's own
+    key) but not the key-hide (its key-pattern is "cwe", and the atom's key
+    is "type") — one matching pattern stays unrevealed, so "z" stays
+    hidden. Only a query specific enough to reveal BOTH — "triage:cwe"
+    itself — makes it visible.
+    Given an item "cfg1" tagged 'tagma.hide:"triage:*"=true'
+    Given an item "cfg2" tagged 'tagma.hide:"triage:cwe"=true'
+    Given an item "z" tagged "triage:cwe=79"
+    When the query "triage:type" is run
+    Then it matches exactly ""
+    When the query "not triage:type" is run
+    Then it matches exactly ""
+    When the query "triage:cwe" is run
     Then it matches exactly "z"
