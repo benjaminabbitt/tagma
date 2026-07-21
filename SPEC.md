@@ -232,40 +232,58 @@ lexical prefix match:
 Formally: namespace `C` is covered by hidden namespace `N` iff `C == N` or
 `C` starts with `N` immediately followed by `.`.
 
-**Visibility rule.** A hidden namespace's tags participate in a query if and
-only if that query references the namespace. A query that does not name it
-— including the empty/universal query — treats those tags as absent.
+**Visibility rule.** Visibility is decided in two separate steps that must
+not be conflated: whether an item *participates* in a query at all, and,
+independently, whether one particular *atom* is allowed to match one
+particular tag. Only the first is query-wide; the second is always local to
+the one atom doing the matching.
 
-| query | hidden-ns tags | why |
-|---|---|---|
-| `tagma.arity:*` | participate | the atom's namespace is exactly `tagma.arity` |
-| `urgent` | absent | no atom names `tagma.arity` or a covering ancestor |
-| `*:*` (the universe atom) / bare `*` | absent | wildcards never count as naming a namespace |
+- **The query's revealed set** is every namespace named by a concrete
+  (non-wildcard) token in *any* atom of the whole query, each revealing its
+  own dot-delimited subtree (the same relation as the hide prefix rule
+  above, applied in the opposite direction). A namespace wildcard atom
+  (`*:key`, `+:key`, bare `*`, `*:*`) names nothing and reveals nothing.
+- **A tag is query-visible** iff its namespace is not hidden, or is covered
+  by the query's revealed set.
+- **Participation.** An item participates in a query iff it has at least
+  one query-visible tag. An item with none does not appear in that query's
+  result under any combination of operators — this is also the universe
+  `not` complements against, not the raw set of every item ever added; a
+  universal query (bare `*`, `*:*`) returns exactly the participating set.
+- **Matching is per-atom.** An atom matches a tag in a hidden namespace only
+  if *that atom itself* — not some other atom elsewhere in the query —
+  explicitly names the namespace (a concrete token, its own dot-subtree).
+  The query's revealed set governs participation only; it never makes a
+  hidden tag matchable by an atom that doesn't itself name it. So in
+  `tagma:foo or *:x`, the `*:x` clause never matches a `tagma.arity:x` tag,
+  even though the sibling `tagma:foo` clause names `tagma` — that naming
+  only affects whether an item carrying `tagma.arity:x` *participates* in
+  the query, never what `*:x` itself is allowed to match.
 
-An item whose only tags fall in a hidden, unreferenced namespace is
-therefore absent from that query's results — not an error, just an empty
-visible tag set. Mental model: a hidden namespace is a dotfile — invisible
-to a bare `ls` (any unreferencing query, universal included), visible to
-`ls -a` or to naming it directly.
+| query | hidden-ns tag | participates? | matched by the non-naming atom? |
+|---|---|---|---|
+| `tagma.arity:*` | `tagma.arity:x=1` | yes | yes — the atom names it itself |
+| `urgent` | `tagma.arity:x=1` (item's only tag) | no | — (item never appears) |
+| `*:*` / bare `*` | any hidden-ns tag | no | — (wildcards reveal nothing) |
+| `tagma:foo or *:x=1` | `tagma.arity:x=1` | yes (revealed by `tagma:foo`) | no — `*:x=1` doesn't name `tagma.arity` |
 
-**Unhiding mirrors hiding: the same dot-delimited-prefix relation, applied
-in the opposite direction, scoped to the whole query.** An atom anywhere in
-a (possibly compound) query that names namespace `X` with a concrete token
-— never a wildcard — unhides `X` and its entire subtree for every atom
-evaluated in *that query*, not just the atom that names it: naming `tagma`
-unhides `tagma.arity` too, including through a different, wildcard, atom
-joined by `and`/`or` in the same query (`tagma:foo or *:x=1` — the first
-clause's reference unhides `tagma.arity` for the second). Naming a leaf like
-`tagma.arity` unhides `tagma.arity` and its own subtree, but not sibling
-`tagma.hide-ns`. This is deliberately symmetric with hiding: a single
-`tagma:*` is enough to surface all of tagma's meta-config for introspection.
+An item whose only tags fall in a hidden, unreferenced namespace therefore
+never appears in that query's results, in any position — not an error, just
+an empty visible tag set, and (since it doesn't participate) excluded from
+what `not` complements against too. Mental model: a hidden namespace is a
+dotfile — invisible to a bare `ls` (any unreferencing query, universal
+included), visible to `ls -a` (participation) only for whichever `ls -a`
+invocation actually names it (matching) — a sibling command naming it
+elsewhere doesn't retroactively make *this* `ls` show it.
 
 - A namespace wildcard atom (`*:key`, `+:key`, bare `*`, `*:*`) never
-  references a namespace — wildcards only ever hide, never unhide.
+  reveals a namespace, for participation or for its own matching —
+  wildcards only ever hide.
 - The store-wide default/override from **Default** above always applies
-  first; per-query referencing is a second, additive way namespaces become
-  visible on top of it — referencing `tagma` doesn't change the stored
-  config, only this query's view of it.
+  first, to both participation and matching; per-query revealing is a
+  second, additive way a namespace becomes visible, but strictly for
+  participation (and for the naming atom's own matching) — it never
+  extends to any other atom's matching in the same query.
 
 **`.` is a separator in namespaces, not in keys.** In a namespace, `.` is
 the dot-delimited hierarchy separator the prefix rule above uses. In a key,

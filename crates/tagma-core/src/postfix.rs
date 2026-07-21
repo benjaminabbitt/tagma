@@ -3,13 +3,17 @@
 //!
 //! Stack entries are never plain id-sets: each is a [`Frame`], an id-set
 //! tagged as either the set itself (`Pos`) or its complement over the
-//! (not-yet-materialized) index universe (`Comp`). `not` just flips the
+//! (not-yet-materialized) query universe (`Comp`). `not` just flips the
 //! tag — O(1), no set walked — and `and`/`or` combine two frames via De
 //! Morgan's laws, so a pattern like `a/b/not/and` (infix `a and not b`)
 //! resolves directly to the set difference `A \ B` without ever computing
-//! `not b`'s complement over the universe. The universe (`Index::all_ids`)
-//! is materialized at most once, only if the final result is still a
-//! `Comp` frame.
+//! `not b`'s complement over the universe. The universe is materialized at
+//! most once, only if the final result is still a `Comp` frame — and, per
+//! the hide-ns visibility rule (SPEC.md §7), it is the *participating* set
+//! (`Index::participating_ids_u32`), not `Index::all_ids`: an item whose
+//! only tags are in a hidden, unreferenced namespace must be absent even
+//! from a `not` complement, so it's excluded from the universe itself
+//! rather than filtered out afterward.
 //!
 //! PLAN.md §9/P4: a `Frame` holds a sorted `Vec<u32>` of interned item ids
 //! (see `index.rs`), not a `BTreeSet<String>` — `and`/`or`/`not` are linear
@@ -169,13 +173,25 @@ enum PfTok {
 /// query, or an unterminated quote are errors.
 ///
 /// Every token is parsed into an atom (or recognized as an operator) in a
-/// first pass, before any evaluation: this both preserves the original
-/// parse-error-fails-fast behavior and lets the hide-ns visibility rule
-/// (SPEC.md §7) be computed query-wide — the set of namespaces named by a
-/// concrete token anywhere in the query, across every atom, not just the
-/// one atom being evaluated — before any atom is matched against the
-/// index. Every atom in the query then evaluates under that same
-/// [`Index::matching_ids_u32_vis`] visibility.
+/// first pass, before any evaluation: this preserves the original
+/// parse-error-fails-fast behavior, and additionally lets the *query-wide
+/// participation* set (SPEC.md §7) be computed — the union of every atom's
+/// own namespace reference across the whole query — before any atom is
+/// evaluated.
+///
+/// Hide-ns visibility (SPEC.md §7) is two separate things here, and this is
+/// the only place both are assembled together: each atom is matched via
+/// [`Index::matching_ids_u32`], which is always *atom-local* — an atom
+/// never matches a hidden-namespace tag just because some other atom in
+/// this same query names that namespace. The query-wide `referenced` set
+/// computed below instead builds the *participation* [`Visibility`] used
+/// only for [`Index::participating_ids_u32`] — the universe `not`
+/// complements against, and what a universal query (`*`, `*:*`) resolves
+/// to. A positive atom match is always a subset of the participating set
+/// (an atom can only match a tag it's itself allowed to see, which is
+/// always at least as visible query-wide as it is atom-locally), so this
+/// split needs no extra intersection anywhere except at the final
+/// `materialize` call below.
 ///
 /// # Errors
 ///
@@ -205,7 +221,7 @@ pub fn eval(postfix: &str, index: &Index) -> Result<Vec<String>, String> {
             _ => None,
         })
         .collect();
-    let vis = index.visibility_for(referenced);
+    let participation_vis = index.visibility_for(referenced);
 
     let mut stack: Vec<Frame> = Vec::new();
     for tok in toks {
@@ -225,7 +241,9 @@ pub fn eval(postfix: &str, index: &Index) -> Result<Vec<String>, String> {
                 stack.push(operand.not());
             }
             PfTok::Atom(atom) => {
-                stack.push(Frame::Pos(index.matching_ids_u32_vis(&atom, &vis)));
+                // Atom-local visibility only (SPEC.md §7): matching never
+                // consults `participation_vis`.
+                stack.push(Frame::Pos(index.matching_ids_u32(&atom)));
             }
         }
     }
@@ -236,7 +254,10 @@ pub fn eval(postfix: &str, index: &Index) -> Result<Vec<String>, String> {
             stack.len()
         ));
     }
-    let ids = stack.pop().unwrap().materialize(|| index.all_ids_u32());
+    let ids = stack
+        .pop()
+        .unwrap()
+        .materialize(|| index.participating_ids_u32(&participation_vis));
     Ok(index.strings_for(&ids))
 }
 
@@ -437,5 +458,48 @@ mod tests {
         assert_eq!(difference(&[1, 2, 3], &[1, 2, 3]), Vec::<u32>::new());
         assert_eq!(difference(&[1, 2, 3], &[]), vec![1, 2, 3]);
         assert_eq!(difference(&[], &[1, 2]), Vec::<u32>::new());
+    }
+
+    // --- hide-ns (SPEC.md §7): participation vs. per-atom matching --------
+
+    #[test]
+    fn not_complements_the_participating_set_not_every_item_ever_added() {
+        // "z"'s only tag is in the hidden, unreferenced "tagma.arity"
+        // namespace: it must not leak into "not urgent" via the complement,
+        // even though it's a perfectly real interned item.
+        let mut idx = Index::new();
+        idx.add_line("z tagma.arity:kind=binary").unwrap();
+        idx.add_line("b urgent").unwrap();
+        idx.add_line("c score=1").unwrap();
+        assert_eq!(eval("urgent/not", &idx).unwrap(), vec!["c".to_string()]);
+    }
+
+    #[test]
+    fn a_sibling_atom_naming_a_namespace_does_not_lend_its_reveal_to_another_atoms_matching() {
+        // "tagma:foo" names "tagma", revealing "tagma.arity" for
+        // *participation* only; the sibling "*:x=1" clause still can't
+        // match "w"'s tagma.arity:x=1 tag, because "*:x=1" never names
+        // "tagma.arity" itself (SPEC.md §7: matching is per-atom).
+        let mut idx = Index::new();
+        idx.add_line("w tagma.arity:x=1 urgent").unwrap();
+        assert_eq!(
+            eval("tagma:foo/*:x=1/or", &idx).unwrap(),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn an_atom_naming_a_hidden_namespace_matches_it_itself_and_reveals_it_for_participation() {
+        // "z" is matched directly by the atom that names its namespace
+        // (per-atom matching succeeds), and that same naming reveals
+        // "tagma.arity" for participation, so "z" survives "and not
+        // urgent" instead of being excluded as a non-participant.
+        let mut idx = Index::new();
+        idx.add_line("z tagma.arity:foo").unwrap();
+        idx.add_line("b urgent").unwrap();
+        assert_eq!(
+            eval("tagma.arity:foo/urgent/not/and", &idx).unwrap(),
+            vec!["z".to_string()]
+        );
     }
 }

@@ -66,10 +66,21 @@ const HIDE_NS_CONFIG_NAMESPACE: &str = "tagma.hide-ns";
 /// explicit `tagma.hide-ns:tagma=false`.
 const HIDE_NS_DEFAULT_HIDDEN: &str = "tagma";
 
-/// Query-scoped hide-ns visibility (SPEC.md §7): the namespaces currently
-/// hidden in this store, and the namespaces the *current query* explicitly
-/// names (by a concrete token, never a wildcard) and therefore unhides,
-/// subtree-wide, for every atom evaluated as part of that query.
+/// Hide-ns visibility (SPEC.md §7): the namespaces currently hidden in this
+/// store, paired with a `referenced` set that reveals (dot-subtree) some of
+/// them back. The same shape serves two *distinct* roles depending on what
+/// `referenced` is built from — callers must not conflate them:
+///
+/// - **Matching** (per atom): `referenced` is that one atom's own explicit
+///   namespace only ([`atom_ns_reference`]/[`Index::matching_ids_u32`]) — a
+///   sibling atom elsewhere in the query contributes nothing here. This is
+///   what an atom is allowed to match against.
+/// - **Participation** (query-wide): `referenced` is the union of every
+///   atom's own namespace across the *whole* query
+///   ([`postfix::eval`]/[`Index::visibility_for`]/[`Index::participating_ids_u32`]).
+///   This governs only whether an item counts as present in the query at
+///   all (including as the universe `not` complements against) — never
+///   what any individual atom matches.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Visibility {
     hidden: BTreeSet<String>,
@@ -77,12 +88,12 @@ pub(crate) struct Visibility {
 }
 
 impl Visibility {
-    /// `true` iff a tag in namespace `ns` should participate in this
-    /// query: the null namespace is always visible; a named namespace is
-    /// visible unless it's covered by a hidden namespace, or it's covered
-    /// by a namespace this query explicitly referenced (unhiding wins over
-    /// hiding, since referencing is what makes a hidden namespace visible
-    /// at all).
+    /// `true` iff a tag in namespace `ns` is visible under this
+    /// [`Visibility`]: the null namespace always is; a named namespace is
+    /// unless it's covered by a hidden namespace, or it's covered by
+    /// `referenced` (whose meaning — an atom's own name, or a whole
+    /// query's — depends on how this [`Visibility`] was built; see the
+    /// type docs).
     fn ns_visible(&self, ns: &Option<String>) -> bool {
         match ns {
             None => true,
@@ -246,11 +257,22 @@ impl Index {
         (iid, true)
     }
 
-    /// Every interned id, as a sorted `Vec<u32>` — the query-path universe.
-    /// Ids are assigned sequentially with no gaps or removals, so this is
-    /// just the contiguous range `0..id_table.len()`.
-    pub(crate) fn all_ids_u32(&self) -> Vec<u32> {
-        (0..self.id_table.len() as u32).collect()
+    /// The ids of items that *participate* in a query under `vis` (SPEC.md
+    /// §7): items with at least one query-visible tag, i.e. a tag whose
+    /// namespace isn't hidden, or is covered by `vis`'s (query-wide)
+    /// referenced set. This is the universe [`postfix::eval`] complements
+    /// `not` against, and what a universal query (`*`, `*:*`) resolves to —
+    /// never every interned id regardless of its tags, since an item whose
+    /// only tags are in a hidden, unreferenced namespace must be absent
+    /// even from a `not` complement. Already sorted, since `tags_by_id` is
+    /// iterated in id order.
+    pub(crate) fn participating_ids_u32(&self, vis: &Visibility) -> Vec<u32> {
+        self.tags_by_id
+            .iter()
+            .enumerate()
+            .filter(|(_, tags)| tags.iter().any(|t| vis.ns_visible(&t.namespace)))
+            .map(|(iid, _)| iid as u32)
+            .collect()
     }
 
     /// Maps interned ids back to their string ids, sorted
@@ -270,30 +292,28 @@ impl Index {
     /// counterpart of [`Self::matching_ids`], used by the postfix VM so the
     /// query path stays in `u32` until the final result.
     ///
-    /// Applies hide-ns visibility (SPEC.md §7) treating `atom` as the whole
-    /// query: only `atom`'s own explicit namespace (if any) counts as
-    /// referenced. [`Self::matching_ids_u32_vis`] is the counterpart used
-    /// when evaluating a full (possibly compound) postfix query, where the
-    /// referenced set spans every atom in it.
+    /// Matching is per-atom (SPEC.md §7): `atom` only ever matches a
+    /// hidden-namespace tag if `atom` itself explicitly names that
+    /// namespace — never because some *other* atom elsewhere in the same
+    /// query names it (that only affects participation, see
+    /// [`Self::participating_ids_u32`]). So the [`Visibility`] built here
+    /// is always local to this one atom, regardless of whether it's called
+    /// standalone ([`Self::matching_ids`]) or as one clause of a compound
+    /// postfix query ([`postfix::eval`]).
     pub(crate) fn matching_ids_u32(&self, atom: &Atom) -> Vec<u32> {
         let vis = self.visibility_for(atom_ns_reference(atom));
-        self.matching_ids_u32_vis(atom, &vis)
-    }
-
-    /// Like [`Self::matching_ids_u32`], but under an explicit, already
-    /// query-wide [`Visibility`] rather than one derived from `atom` alone.
-    pub(crate) fn matching_ids_u32_vis(&self, atom: &Atom, vis: &Visibility) -> Vec<u32> {
         if self.should_scan(atom) {
-            self.scan_matching_ids_u32(atom, vis)
+            self.scan_matching_ids_u32(atom, &vis)
         } else {
-            self.indexed_matching_ids_u32(atom, vis)
+            self.indexed_matching_ids_u32(atom, &vis)
         }
     }
 
-    /// Builds the [`Visibility`] for a query that explicitly names
-    /// `referenced` namespaces (SPEC.md §7): the store's current hidden set
-    /// (see [`Self::hidden_namespaces`]) paired with what this query
-    /// unhides.
+    /// Builds a [`Visibility`] against the store's current hidden set (see
+    /// [`Self::hidden_namespaces`]) paired with `referenced`. `referenced`'s
+    /// meaning is caller-defined — see the [`Visibility`] type docs for the
+    /// two distinct roles ([`Self::matching_ids_u32`]'s atom-local
+    /// reference vs. [`postfix::eval`]'s query-wide one).
     pub(crate) fn visibility_for(&self, referenced: BTreeSet<String>) -> Visibility {
         Visibility {
             hidden: self.hidden_namespaces(),
@@ -360,8 +380,9 @@ impl Index {
     /// `tags_by_id` is iterated in id order, so the result is already a
     /// sorted `Vec<u32>`.
     ///
-    /// Each item's tags are filtered by `vis` (SPEC.md §7) before being
-    /// handed to [`Atom::matches`], so a tag in a hidden, unreferenced
+    /// Each item's tags are filtered by `vis` (SPEC.md §7, always this
+    /// atom's own local visibility — see [`Self::matching_ids_u32`]) before
+    /// being handed to [`Atom::matches`], so a tag in a hidden, unreferenced
     /// namespace is invisible to the match — as if it weren't there at all
     /// — without [`Atom::matches`]'s own signature needing to know about
     /// hide-ns.
@@ -388,14 +409,14 @@ impl Index {
     /// then sorts and dedups once at the end — a single collect-and-sort
     /// rather than hundreds of pairwise linear merges.
     ///
-    /// Each candidate namespace is checked against `vis` (SPEC.md §7)
-    /// before its postings are collected — a hidden, unreferenced
-    /// namespace is simply never expanded into, so its tags never enter
-    /// the result. An atom with a concrete namespace token is unaffected
-    /// by this in practice: naming a namespace always makes it a
-    /// referenced (hence visible) candidate (see [`atom_ns_reference`] /
-    /// [`Self::visibility_for`]), the same as `[Self::matching_ids_u32]`'s
-    /// atom-as-whole-query default.
+    /// Each candidate namespace is checked against `vis` (SPEC.md §7,
+    /// always this one atom's own local visibility — see
+    /// [`Self::matching_ids_u32`]) before its postings are collected — a
+    /// hidden, unreferenced namespace is simply never expanded into, so its
+    /// tags never enter the result. An atom with a concrete namespace token
+    /// is unaffected by this in practice: naming a namespace always makes
+    /// it its own referenced (hence visible) candidate (see
+    /// [`atom_ns_reference`]).
     fn indexed_matching_ids_u32(&self, atom: &Atom, vis: &Visibility) -> Vec<u32> {
         let mut result: Vec<u32> = Vec::new();
         for ns in self.ns_candidates(&atom.ns) {
@@ -533,10 +554,13 @@ impl Index {
 
 /// The namespace an atom by itself "references" for hide-ns purposes
 /// (SPEC.md §7): its own explicit namespace token, if it has one — a `*`/`+`
-/// namespace quantifier never counts. Used to treat a lone atom (e.g. via
-/// [`Index::matching_ids`]/[`Index::matching_ids_u32`]) as the whole query
-/// when no broader postfix context is available; [`postfix::eval`] instead
-/// unions this across every atom in a compound query.
+/// namespace quantifier never counts. [`Index::matching_ids_u32`] uses this
+/// directly, for every atom, always — matching is per-atom, so no other
+/// atom's reference ever contributes here. [`postfix::eval`] additionally
+/// unions the same per-atom references across every atom in a compound
+/// query to build the separate, query-wide *participation* set (SPEC.md
+/// §7) — a different, additive use of the same building block, never fed
+/// back into matching.
 fn atom_ns_reference(atom: &Atom) -> BTreeSet<String> {
     match &atom.ns {
         Some(Pos::Tok(n)) => BTreeSet::from([n.clone()]),
