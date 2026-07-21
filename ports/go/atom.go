@@ -117,6 +117,20 @@ func scanOp(s string) (start, length int, op opKind, found bool, err error) {
 	return 0, 0, 0, false, nil
 }
 
+// atomNsReference returns the namespace a itself explicitly references for
+// hide-ns purposes (SPEC.md §7): its own namespace clause, but only when
+// it's a concrete token — a "*"/"+" namespace quantifier, or no namespace
+// clause at all, references nothing. Used both for per-atom match
+// visibility (always this one atom's own reference — see
+// Index.resolveAtom) and, unioned across every atom in a query, for the
+// separate query-wide participation set (see queryWideNamespaceReferences).
+func atomNsReference(a atom) (string, bool) {
+	if a.ns != nil && a.ns.kind == posTok {
+		return a.ns.tok, true
+	}
+	return "", false
+}
+
 // parseAtom parses the query-atom grammar (SPEC.md §2, PLAN.md §7.2), plus
 // the QUOTING extension (SPEC.md §2): q-ns/q-key/q-value may each be
 // spelled as a qtoken instead of a bare-token (sharing the same token
