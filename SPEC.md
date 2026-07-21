@@ -31,9 +31,14 @@ value-token ::= ("-"? bare-token) | qtoken  /* leading "-" only applies unquoted
 
 /* Reserved characters (never inside a bare-token; legal, literal content
    inside a qtoken): ":" "=" "<" ">" "~" "!" "/" "*" "+" "(" ")" and
-   whitespace. Reserved words (operator names): "and" "or" "not" — also
-   escapable by quoting the whole token (e.g. a key literally "and" may be
-   spelled `"and"`, alongside the existing redundant `and=*` spelling).   */
+   whitespace. Reserved words (operator names): "and" "or" "not", matched
+   CASE-INSENSITIVELY as operators on both the postfix and infix sides
+   ("AND" "And" "OR" "NOT" etc. all lex as operators, exactly like their
+   lowercase spellings) — also escapable by quoting the whole token (e.g. a
+   key literally "and", in any case, may be spelled `"and"`, alongside the
+   existing redundant `and=*` spelling). Quoting always escapes
+   operator-hood: a quoted reserved word (`"and"`, `"AND"`, ...) is never an
+   operator, only ever the literal atom, in every case.                   */
 
 /* ---- write-side tag (concrete tokens only; no "*" or "+") ---- */
 tag         ::= (namespace ":")? key ("=" value)?
@@ -52,24 +57,34 @@ atom        ::= (q-ns ":")? q-key (op q-value)?
 /* ---- postfix query: canonical / wire / stored form ---- */
 postfix     ::= pf-elem ("/" pf-elem)*
 pf-elem     ::= atom | pf-op
-pf-op       ::= "and" | "or" | "not"
+pf-op       ::= "and" | "or" | "not"   /* case-insensitive; see the reserved-words note above */
+/* A postfix query never fails on account of what's left on the stack once
+   evaluated (§5): more than one leftover operand folds together with
+   "and", left-associatively, rather than erroring. */
 
 /* ---- infix query: human frontend, compiles to postfix ---- */
 query       ::= or-expr
 or-expr     ::= and-expr ("or" and-expr)*
-and-expr    ::= not-expr ("and" not-expr)*
+and-expr    ::= juxt-expr ("and" juxt-expr)*
+juxt-expr   ::= not-expr not-expr*    /* juxtaposition: adjacent operands with no explicit "and" between them mean "and" */
 not-expr    ::= "not" not-expr | primary
 primary     ::= atom | "(" query ")"
-/* infix elements are whitespace-separated; precedence: not > and > or */
+/* infix elements are whitespace-separated; precedence: not > and > or;
+   juxtaposition (an omitted "and") binds at the same precedence as an
+   explicit "and", left-associatively, mirroring the postfix leftover-stack
+   fold above so the two forms agree. */
 ```
 
 **Lexing notes**
 
 - Operators lex longest-match first (`>=` before `>`, `!=` before `!`).
 - `temp<-5` lexes as `temp` `<` `-5` — `-` can only lead a value-token.
-- Postfix well-formedness is a stack constraint on top of the grammar:
-  evaluated left to right with `and`/`or` popping two operands and `not`
-  popping one, the sequence must leave exactly one result.
+- Postfix evaluation is a stack machine on top of the grammar: evaluated
+  left to right, `and`/`or` pop two operands and push their combination,
+  `not` pops one and pushes its complement. Unlike stack underflow (still an
+  error), a stack holding more than one result once every token is consumed
+  is not an error: the leftover results fold together with `and`,
+  left-associatively, in stack order (§5).
 
 **Quoting** — a `qtoken` may stand in for a `bare-token` in any of the three
 tag positions (namespace, key, value) and their query-atom counterparts
@@ -134,9 +149,12 @@ An atom denotes the set of items carrying at least one tag that matches it.
   `+` — matches iff some value is present (under any operator).
 - `key=+` is the "key has a value" test; `key=*` is a legal redundant spelling
   of bare `key`.
-- Reserved-word keys: a key literally named `and`, `or`, or `not` cannot be
+- Reserved-word keys: a key literally named `and`, `or`, or `not`, **in any
+  case** (§2, §5: the reserved words match case-insensitively), cannot be
   queried as a bare atom (it would lex as an operator). Its existence test is
-  spelled `and=*` — this is why the redundant `=*` spelling exists.
+  spelled `and=*` (or `AND=*`, etc.) — this is why the redundant `=*`
+  spelling exists — or the key can be reached directly via quoting (§2),
+  e.g. `"and"` or `"AND"`.
 
 ## 4. Operator semantics — casting rule
 
@@ -159,6 +177,31 @@ Postfix is the query plan: atoms resolve to id-sets via the inverted index;
 `and`/`or`/`not` are bitmap intersection/union/complement on a stack.
 Implementations should fuse `x/not/and` patterns into set-difference rather
 than materializing complements.
+
+**Leftover-stack fold.** A non-empty postfix query is never rejected for
+what it leaves on the stack. Once every token is evaluated, exactly one of
+two things is true: exactly one result remains (unchanged from before), or
+more than one does — and in that second case the leftovers fold together
+with `and`, left-associatively, in the order they sit on the stack (bottom
+to top, i.e. the order the atoms/sub-results were originally pushed):
+`a/b` means `a and b`; `a/b/c` means `(a and b) and c`; `a/b/or/c` means
+`(a or b) and c` — the trailing `c` folds onto whatever the `or` already
+reduced to, it does not distribute into it. Stack underflow (an operator
+with too few operands) and an empty query remain errors, unaffected by this
+rule. This mirrors a downstream consumer's own left-associative fold of a
+leftover evaluation stack, and keeps postfix queries assembled by
+concatenation (e.g. `a/b/`-joining a filter list) meaningful without every
+caller having to interleave explicit `and`s.
+
+**Case-insensitive operators.** `and`/`or`/`not` are matched
+case-insensitively as postfix/infix operators (§2) — this makes them
+reserved in *every* case, not just lowercase: a bare, unquoted atom spelled
+`AND`, `And`, `OR`, `Not`, etc. now lexes as the corresponding operator, the
+same way plain `and`/`or`/`not` already did. A quoted spelling (`"and"`,
+`"AND"`, ...) always stays a literal atom — quoting escapes operator-hood
+regardless of case (§2's QUOTING extension), so a key genuinely named `AND`
+is still reachable, spelled `"AND"` (or, via the redundant-`=*` convention,
+`"AND"=*` for its bare existence test).
 
 Index shape (informative): `(ns, key, value) → ids` inverted index with a
 `(ns, key) → ids` level serving bare atoms and `+`/`*` namespace quantifiers.
@@ -187,8 +230,13 @@ served by scan until a value-level index earns its keep.
   grammar don't match numeric operators.
 - **Operator lexing**: longest match first at the earliest position (`>=`
   before `>`, `!=` before `!`; a lone `!` is invalid).
-- **Case sensitivity**: tokens are case-sensitive, including the reserved
-  words `and`/`or`/`not`. Revisit only on user-facing friction.
+- **Case sensitivity**: tokens (namespaces, keys, values) are
+  case-sensitive. **Revisited** for the reserved words: `and`/`or`/`not`
+  are matched case-insensitively as operators (§2, §5) — `AND`/`And`/`OR`/
+  `NOT`/etc. all lex as the corresponding operator — to accept a downstream
+  consumer's grammar; this is the one exception; quoting still always
+  yields a case-sensitive literal atom, in any case, unaffected by this
+  rule.
 
 ## 7. Self-hosted meta-configuration — `tagma.hide-ns`
 

@@ -26,6 +26,13 @@ Feature: Infix query compilation
       | and=*                          | and=*                         |
       | note="hello world"             | note="hello world"            |
       | "a:b"=c and x                  | "a:b"=c/x/and                 |
+      | urgent AND range>4             | urgent/range>4/and            |
+      | urgent And not status=done     | urgent/status=done/not/and    |
+      | a OR b And c                   | a/b/c/and/or                  |
+      | a b                            | a/b/and                       |
+      | a b c                          | a/b/and/c/and                 |
+      | a (b or c)                     | a/b/c/or/and                  |
+      | not a b                        | a/not/b/and                   |
 
   Scenario Outline: compilation failures
     Step arguments are single-quote-delimited so the unterminated-quote row
@@ -39,7 +46,6 @@ Feature: Infix query compilation
       | and a   |
       | (a      |
       | a )     |
-      | a b     |
       | a & b   |
       | not     |
       | a=* or  |

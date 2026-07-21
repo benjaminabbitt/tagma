@@ -125,6 +125,72 @@ Feature: Postfix query matching
     When the query "not not=x" is run
     Then it matches exactly "a b c"
 
+  Scenario Outline: postfix implicit AND — a leftover stack folds with "and" instead of erroring
+    A postfix query that finishes evaluation with more than one operand on
+    the stack no longer errors (SPEC.md §5): the leftovers fold together
+    with "and", left-associatively, in stack order — "urgent/range=5" means
+    the same thing as spelling the "and" out, and a three-operand leftover
+    ("urgent/range=5/status=done") folds as "(urgent and range=5) and
+    status=done". A trailing operand also folds onto whatever an earlier
+    "or" already reduced to, rather than combining some other way.
+    When the postfix query "<postfix>" is run
+    Then it matches exactly "<expected>"
+
+    Examples:
+      | postfix                          | expected |
+      | urgent/range=5                   | a        |
+      | urgent/range=5/and               | a        |
+      | urgent/range=5/status=done       | a        |
+      | lang=fr/score<0/or/range=5       | a        |
+
+  Scenario Outline: postfix operators match in any case
+    "and"/"or"/"not" are reserved operator words in any case (SPEC.md §2) —
+    they no longer have to be spelled lowercase to lex as operators.
+    When the postfix query "<postfix>" is run
+    Then it matches exactly "<expected>"
+
+    Examples:
+      | postfix                          | expected |
+      | urgent/status=done/NOT/AND       | c        |
+      | lang=en/score<0/Or               | a b c    |
+      | urgent/range=5/And               | a        |
+
+  Scenario Outline: infix operators match in any case
+    Same leniency (SPEC.md §2), compiled through the infix frontend.
+    When the query "<infix>" is run
+    Then it matches exactly "<expected>"
+
+    Examples:
+      | infix                          | expected |
+      | urgent AND NOT status=done     | c        |
+      | lang=en OR score<0             | a b c    |
+      | urgent And range=5             | a        |
+      | Not urgent                     | b        |
+
+  Scenario Outline: infix juxtaposition means "and", matching the postfix fold
+    Adjacent operands with no explicit operator between them mean "and"
+    (SPEC.md §2), keeping the infix frontend symmetric with the postfix
+    leftover-stack fold above.
+    When the query "<infix>" is run
+    Then it matches exactly "<expected>"
+
+    Examples:
+      | infix                       | expected |
+      | urgent range=5              | a        |
+      | urgent range=5 status=done  | a        |
+
+  Scenario: a quoted reserved word stays a literal atom instead of becoming an operator
+    Quoting escapes operator-hood (SPEC.md §2): the bare word "and" always
+    lexes as the "and" operator, in any case, but a quoted `"and"` is the
+    literal atom for a key spelled "and" — the same escape hatch the
+    existing "and=*" redundant spelling covers for the unquoted case.
+    Arguments here embed a literal `"`, so they are single-quote-delimited.
+    Given an item "r" tagged "and"
+    When the postfix query '"and"' is run
+    Then it matches exactly "r"
+    When the query '"and"' is run
+    Then it matches exactly "r"
+
   Scenario: a quoted query atom matches a stored value containing a reserved character
     Quoting lets a value contain characters the bare grammar reserves for
     lexing (SPEC.md §2 QUOTING extension); the quoted query atom decodes to

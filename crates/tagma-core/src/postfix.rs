@@ -166,11 +166,22 @@ enum PfTok {
 /// The query is split on unquoted `/` (SPEC.md §2 QUOTING extension: a
 /// `"`-quoted span is opaque to the splitter, so a literal `/` inside a
 /// quoted atom's value survives instead of being mistaken for the
-/// separator). `and`/`or` pop two operands and push their combination per
-/// [`Frame::and`]/[`Frame::or`]; `not` pops one and flips it per
-/// [`Frame::not`]; anything else is parsed as an atom and pushes its match
-/// set. Stack underflow, a final stack size other than one, an empty
-/// query, or an unterminated quote are errors.
+/// separator). A token matches `and`/`or`/`not` case-insensitively (SPEC.md
+/// §2: reserved words match in any case) — a quoted token never collides,
+/// since its text still carries the quotes here, so a quoted reserved word
+/// stays a literal atom. `and`/`or` pop two operands and push their
+/// combination per [`Frame::and`]/[`Frame::or`]; `not` pops one and flips
+/// it per [`Frame::not`]; anything else is parsed as an atom and pushes its
+/// match set. Stack underflow, an empty query, or an unterminated quote are
+/// errors.
+///
+/// A stack holding more than one frame once every token is consumed is no
+/// longer an error (SPEC.md §5): the leftover frames fold together with
+/// `and`, left-associatively in stack order (bottom to top) — `a/b/c`
+/// evaluates as `(a and b) and c`; `a/b/or/c` evaluates as `(a or b) and
+/// c`, the trailing `c` folding onto the `or`'s result. A single leftover
+/// frame is unchanged, and an empty query is still an error, handled above
+/// before any tokenizing happens.
 ///
 /// Every token is parsed into an atom (or recognized as an operator) in a
 /// first pass, before any evaluation: this preserves the original
@@ -203,7 +214,11 @@ pub fn eval(postfix: &str, index: &Index) -> Result<Vec<String>, String> {
 
     let mut toks: Vec<PfTok> = Vec::new();
     for tok in split_unquoted(postfix, '/').map_err(|e| format!("postfix: {e}"))? {
-        toks.push(match tok {
+        // Case-insensitive operator match (SPEC.md §2): a quoted token
+        // (e.g. `"and"`) still carries its quotes here, so it never
+        // lowercases to exactly "and"/"or"/"not" and always falls through
+        // to Atom::parse — quoting escapes operator-hood.
+        toks.push(match tok.to_ascii_lowercase().as_str() {
             "and" => PfTok::And,
             "or" => PfTok::Or,
             "not" => PfTok::Not,
@@ -248,16 +263,24 @@ pub fn eval(postfix: &str, index: &Index) -> Result<Vec<String>, String> {
         }
     }
 
-    if stack.len() != 1 {
-        return Err(format!(
-            "postfix: malformed query, {} result(s) left on stack",
-            stack.len()
-        ));
-    }
-    let ids = stack
-        .pop()
-        .unwrap()
-        .materialize(|| index.participating_ids_u32(&participation_vis));
+    // Every atom pushes one frame and every `and`/`or` pops two and pushes
+    // one (checked above via `pop`, which errors on underflow before this
+    // point is ever reached); `not` pops one and pushes one. So the stack
+    // can never land back at zero once tokenizing has produced at least
+    // one token: an operator-only sequence fails via underflow inside the
+    // loop above, and no successful `and`/`or` application can bring the
+    // stack from one frame down to zero (popping two requires at least two
+    // present, leaving at least one). A non-empty `stack` here is therefore
+    // an invariant, not just the common case.
+    let mut frames = stack.into_iter();
+    let first = frames
+        .next()
+        .expect("non-empty postfix always leaves at least one frame");
+    // SPEC.md §5: a leftover stack of more than one frame folds together
+    // with `and`, left-associatively in stack order (bottom to top) —
+    // exactly `Iterator::fold`'s own left-to-right accumulation.
+    let combined = frames.fold(first, Frame::and);
+    let ids = combined.materialize(|| index.participating_ids_u32(&participation_vis));
     Ok(index.strings_for(&ids))
 }
 
@@ -293,10 +316,62 @@ mod tests {
         assert!(eval("not", &idx).is_err());
     }
 
+    // --- implicit-AND leftover-stack fold (SPEC.md §5) -----------------
+    //
+    // FLIPPED 2026-07-20 (feat/lenient-query): "urgent/range=5" used to be
+    // `trailing_operand_is_an_error` — a two-operand leftover stack was a
+    // hard error. It now folds with "and" instead, so it must equal the
+    // explicit "urgent/range=5/and" form exactly (both empty here: no item
+    // in `fixture()` carries both tags).
+
     #[test]
-    fn trailing_operand_is_an_error() {
+    fn leftover_operand_folds_with_and_instead_of_erroring() {
         let idx = fixture();
-        assert!(eval("urgent/range=5", &idx).is_err());
+        assert_eq!(
+            eval("urgent/range=5", &idx).unwrap(),
+            eval("urgent/range=5/and", &idx).unwrap()
+        );
+        assert_eq!(eval("urgent/range=5", &idx).unwrap(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn three_leftover_operands_fold_left_associatively() {
+        let mut idx = Index::new();
+        idx.add_item(
+            "a",
+            vec![
+                Tag::parse("urgent").unwrap(),
+                Tag::parse("range=5").unwrap(),
+                Tag::parse("status=done").unwrap(),
+            ],
+        );
+        idx.add_item("b", vec![Tag::parse("urgent").unwrap()]);
+        // "(urgent and range=5) and status=done" — only "a" carries all
+        // three.
+        assert_eq!(
+            eval("urgent/range=5/status=done", &idx).unwrap(),
+            vec!["a".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_trailing_operand_folds_onto_an_earlier_ors_result() {
+        let mut idx = Index::new();
+        idx.add_item(
+            "a",
+            vec![
+                Tag::parse("urgent").unwrap(),
+                Tag::parse("range=5").unwrap(),
+            ],
+        );
+        idx.add_item("b", vec![Tag::parse("range=5").unwrap()]);
+        idx.add_item("c", vec![Tag::parse("score=1").unwrap()]);
+        // "urgent/score=1/or" -> {a} ∪ {c} = {a, c}; the leftover
+        // "range=5" ANDs onto that result: {a, c} ∩ {a, b} = {a}.
+        assert_eq!(
+            eval("urgent/score=1/or/range=5", &idx).unwrap(),
+            vec!["a".to_string()]
+        );
     }
 
     // --- QUOTING extension (SPEC.md §2) -------------------------------
@@ -330,6 +405,37 @@ mod tests {
         let mut not_result = eval("urgent/not", &idx).unwrap();
         not_result.sort();
         assert_eq!(not_result, vec!["b"]);
+    }
+
+    // --- case-insensitive operators (SPEC.md §2) ------------------------
+
+    #[test]
+    fn operators_match_in_any_case() {
+        let idx = fixture();
+        assert_eq!(
+            eval("urgent/range=5/AND", &idx).unwrap(),
+            eval("urgent/range=5/and", &idx).unwrap()
+        );
+        let mut or_upper = eval("urgent/range=5/Or", &idx).unwrap();
+        or_upper.sort();
+        assert_eq!(or_upper, vec!["a", "b"]);
+        let mut not_upper = eval("urgent/NOT", &idx).unwrap();
+        not_upper.sort();
+        assert_eq!(not_upper, vec!["b"]);
+    }
+
+    #[test]
+    fn a_quoted_reserved_word_stays_a_literal_atom_not_an_operator() {
+        // Quoting escapes operator-hood (SPEC.md §2): a bare, unquoted
+        // "and" (any case) always lexes as the operator, but a quoted
+        // `"and"` is the literal atom for a key spelled "and". `eval` alone
+        // on a bare "and" would underflow the stack (it's an operator with
+        // no operands); the quoted form must instead resolve as a normal
+        // atom query.
+        let mut idx = Index::new();
+        idx.add_item("r", vec![Tag::parse("and").unwrap()]);
+        assert!(eval("and", &idx).is_err());
+        assert_eq!(eval("\"and\"", &idx).unwrap(), vec!["r".to_string()]);
     }
 
     // --- P3: Pos/Comp fusion algebra -------------------------------------
