@@ -117,18 +117,50 @@ func scanOp(s string) (start, length int, op opKind, found bool, err error) {
 	return 0, 0, 0, false, nil
 }
 
-// atomNsReference returns the namespace a itself explicitly references for
-// hide-ns purposes (SPEC.md §7): its own namespace clause, but only when
-// it's a concrete token — a "*"/"+" namespace quantifier, or no namespace
-// clause at all, references nothing. Used both for per-atom match
-// visibility (always this one atom's own reference — see
-// Index.resolveAtom) and, unioned across every atom in a query, for the
-// separate query-wide participation set (see queryWideNamespaceReferences).
-func atomNsReference(a atom) (string, bool) {
-	if a.ns != nil && a.ns.kind == posTok {
-		return a.ns.tok, true
+// atomReference is what an atom by itself "references" for tagma.hide
+// unhide-by-reference purposes (SPEC.md §7 "Unhide-by-reference"): the
+// (ns, key) pair mirroring the atom's own clauses. nsNull is true when the
+// reference names the null namespace (no namespace clause at all);
+// otherwise ns holds the named namespace. keyAny is true when the
+// reference's key is itself a quantifier ("*"/"+", a "wildcard key" that
+// reveals an exact key-pattern too, mirroring how "*"/"+" already collapse
+// to "any key" for matching itself, SPEC.md §3); otherwise key holds the
+// concrete key token. All fields are comparable, so atomReference is used
+// directly as a set-member/map-key type.
+type atomReference struct {
+	nsNull bool
+	ns     string
+	keyAny bool
+	key    string
+}
+
+// computeAtomReference returns a's reference and true, or a zero value and
+// false iff a references nothing at all — a namespace *quantifier*
+// ("*"/"+") atom never counts as naming, so it contributes no reference at
+// all (not a null-namespace one), unchanged from the retired hide-ns
+// facet. Used both for per-atom match visibility (always this one atom's
+// own reference — see Index.resolveAtom) and, unioned across every atom
+// in a query, for the separate query-wide participation set (see
+// queryWideReferences).
+func computeAtomReference(a atom) (atomReference, bool) {
+	var ref atomReference
+	if a.ns == nil {
+		ref.nsNull = true
+	} else {
+		switch a.ns.kind {
+		case posTok:
+			ref.ns = a.ns.tok
+		default: // posAny, posPresent: a namespace quantifier references nothing
+			return atomReference{}, false
+		}
 	}
-	return "", false
+	switch a.key.kind {
+	case posTok:
+		ref.key = a.key.tok
+	default: // posAny, posPresent: a "wildcard key" reference
+		ref.keyAny = true
+	}
+	return ref, true
 }
 
 // parseAtom parses the query-atom grammar (SPEC.md §2, PLAN.md §7.2), plus

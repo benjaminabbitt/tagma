@@ -20,16 +20,93 @@ type Index struct {
 	items map[string][]Tag
 }
 
-// hideNsConfigNamespace is the reserved namespace hide-ns config tags live
-// in (SPEC.md §7): a config tag is tagma.hide-ns:<ns>=<bool>, so this is
-// the tag's own namespace, not the namespace it configures (which is the
-// tag's key).
-const hideNsConfigNamespace = "tagma.hide-ns"
+// hideConfigNamespace is the reserved namespace tagma.hide config tags live
+// in (SPEC.md §7): a config tag is tagma.hide:<target>=<bool>, so this is
+// the tag's own namespace, not the pattern it configures (which is
+// encoded, first-colon split, in the tag's key — see parseHideTarget).
+const hideConfigNamespace = "tagma.hide"
 
-// hideNsDefaultHidden is the implicit default hide (SPEC.md §7): as if
-// tagma.hide-ns:tagma=true were always present, unless overridden by an
-// explicit tagma.hide-ns:tagma=false.
-const hideNsDefaultHidden = "tagma"
+// hideDefaultTarget is the implicit default hide (SPEC.md §7): as if
+// tagma.hide:"tagma:*"=true were always present — the whole tagma.*
+// family, every key — unless overridden by an explicit
+// tagma.hide:"tagma:*"=false naming the same target.
+const hideDefaultTarget = "tagma:*"
+
+// nsPatternKind distinguishes the three shapes a tagma.hide target's
+// namespace-position pattern can take (SPEC.md §7).
+type nsPatternKind int
+
+const (
+	nsPatternNull  nsPatternKind = iota // the null namespace only — a target with no colon
+	nsPatternAny                        // any namespace, named or null — a "*" ns-pattern
+	nsPatternNamed                      // a named namespace's dot-subtree
+)
+
+// nsPattern is a namespace-position pattern within a tagma.hide target
+// (SPEC.md §7): matches by dot-subtree (a named namespace, exactly as the
+// retired hide-ns facet's own prefix rule did), the null namespace exactly
+// (a target with no colon), or any namespace at all ("*"). name is
+// meaningful only when kind == nsPatternNamed.
+type nsPattern struct {
+	kind nsPatternKind
+	name string
+}
+
+// keyPatternKind distinguishes the two shapes a tagma.hide target's
+// key-position pattern can take (SPEC.md §7).
+type keyPatternKind int
+
+const (
+	keyPatternExact keyPatternKind = iota // one exact key
+	keyPatternAny                         // any key
+)
+
+// keyPattern is a key-position pattern within a tagma.hide target (SPEC.md
+// §7): an exact key, or any key at all ("*"). name is meaningful only when
+// kind == keyPatternExact.
+type keyPattern struct {
+	kind keyPatternKind
+	name string
+}
+
+// hidePattern is one parsed, currently-active tagma.hide pattern (SPEC.md
+// §7): the generalization of the retired hide-ns facet's single
+// hidden-namespace set to ns:key granularity — a tag is hidden iff it
+// matches at least one of these.
+type hidePattern struct {
+	ns  nsPattern
+	key keyPattern
+}
+
+// matches reports whether p hides a tag with namespace ns (nil = the null
+// namespace), key key.
+func (p hidePattern) matches(ns *string, key string) bool {
+	nsOK := false
+	switch p.ns.kind {
+	case nsPatternNull:
+		nsOK = ns == nil
+	case nsPatternAny:
+		nsOK = true
+	case nsPatternNamed:
+		nsOK = ns != nil && covers(*ns, p.ns.name)
+	}
+	if !nsOK {
+		return false
+	}
+	switch p.key.kind {
+	case keyPatternAny:
+		return true
+	default: // keyPatternExact
+		return key == p.key.name
+	}
+}
+
+// covers reports whether ns is covered by root: ns equals root, or ns is a
+// dot-delimited descendant of it (SPEC.md §7 — "." is a hierarchy
+// separator between namespace path components, unlike in keys).
+func covers(ns, root string) bool {
+	return ns == root || (strings.HasPrefix(ns, root) && len(ns) > len(root) && ns[len(root)] == '.')
+}
 
 // arityConfigNamespace is the reserved namespace tagma.arity config tags
 // live in (SPEC.md §8): a config tag is tagma.arity:<target>=<arity>, so
@@ -58,49 +135,92 @@ type arityTarget struct {
 	key       string
 }
 
-// visibility pairs the store's currently-hidden namespaces with a
-// referenced set that reveals (dot-subtree) some of them back. The same
-// shape serves two distinct roles depending on what "referenced" is built
-// from — callers must not conflate them (SPEC.md §7):
+// visibility pairs the store's currently-active tagma.hide patterns with a
+// set of atom references that can reveal (SPEC.md §7 "Unhide-by-reference")
+// a pattern whose own ns/key-pattern that reference is at least as
+// specific as. The same shape serves two distinct roles depending on what
+// references is built from — callers must not conflate them:
 //
-//   - Matching (per atom): referenced is that one atom's own explicit
-//     namespace only (atomNsReference, via Index.resolveAtom) — a sibling
-//     atom elsewhere in the query contributes nothing here.
-//   - Participation (query-wide): referenced is the union of every atom's
-//     own namespace across the whole query (queryWideNamespaceReferences,
-//     via Index.QueryPostfix/Index.participatingIDs). This governs only
+//   - Matching (per atom): references is that one atom's own
+//     (computeAtomReference, via Index.resolveAtom) — a sibling atom
+//     elsewhere in the query contributes nothing here. This is what an
+//     atom is allowed to match against.
+//   - Participation (query-wide): references is the union of every
+//     atom's own across the whole query (queryWideReferences, via
+//     Index.QueryPostfix/Index.participatingIDs). This governs only
 //     whether an item counts as present in the query at all (including as
 //     the universe "not" complements against) — never what any individual
 //     atom matches.
 type visibility struct {
-	hidden     map[string]struct{}
-	referenced map[string]struct{}
+	hidden     []hidePattern
+	references map[atomReference]struct{}
 }
 
-// nsVisible reports whether a tag in namespace ns (nil = the null
-// namespace, always visible) is visible under v: not covered by a hidden
-// namespace, or covered by v's referenced set (whose meaning — an atom's
-// own name, or a whole query's — depends on how v was built; see the
-// visibility type docs).
-func (v visibility) nsVisible(ns *string) bool {
-	if ns == nil {
-		return true
+// tagVisible reports whether a tag (ns, key) is visible under v (SPEC.md
+// §7's "Unhide-by-reference" rule): visible iff every active hide pattern
+// that matches (ns, key) is itself revealed by some reference (whose
+// meaning — an atom's own, or a whole query's — depends on how v was
+// built; see the visibility type docs). A tag hidden by two patterns (e.g.
+// a broad ns-hide and a narrower key-hide) stays hidden unless both are
+// revealed.
+func (v visibility) tagVisible(ns *string, key string) bool {
+	for _, p := range v.hidden {
+		if p.matches(ns, key) && !v.patternRevealed(p) {
+			return false
+		}
 	}
-	return !nsCoveredByAny(*ns, v.hidden) || nsCoveredByAny(*ns, v.referenced)
+	return true
 }
 
-// nsCoveredByAny reports whether ns is covered by some root in roots: ns
-// equals the root, or ns is a dot-delimited descendant of it (SPEC.md §7 —
-// "." is a hierarchy separator between namespace path components, unlike
-// in keys). The same relation serves both the hide-ns prefix rule and its
-// symmetric unhide-by-reference counterpart.
-func nsCoveredByAny(ns string, roots map[string]struct{}) bool {
-	for r := range roots {
-		if ns == r || (strings.HasPrefix(ns, r) && len(ns) > len(r) && ns[len(r)] == '.') {
+// patternRevealed reports whether some reference in v is at least as
+// specific as pattern in both positions (SPEC.md §7 "Unhide-by-reference"):
+// its ns names within pattern's ns-subtree, and its key satisfies
+// pattern's key-pattern.
+func (v visibility) patternRevealed(pattern hidePattern) bool {
+	for ref := range v.references {
+		if nsReveals(ref, pattern.ns) && keyReveals(ref, pattern.key) {
 			return true
 		}
 	}
 	return false
+}
+
+// nsReveals reports whether a reference's namespace is at least as
+// specific as patternNs (SPEC.md §7 "Unhide-by-reference"): the null
+// reference is within the null pattern or Any, never within a named one
+// (null has no subtree to be "within" a named one); a named reference is
+// within Any, or within a Named pattern iff its name is covered (covers)
+// by the pattern's — never within Null (a named reference doesn't name
+// "no namespace").
+func nsReveals(ref atomReference, patternNs nsPattern) bool {
+	if ref.nsNull {
+		return patternNs.kind == nsPatternNull || patternNs.kind == nsPatternAny
+	}
+	switch patternNs.kind {
+	case nsPatternAny:
+		return true
+	case nsPatternNull:
+		return false
+	default: // nsPatternNamed
+		return covers(ref.ns, patternNs.name)
+	}
+}
+
+// keyReveals reports whether a reference's key is at least as specific as
+// patternKey (SPEC.md §7 "Unhide-by-reference"): an ns-level hide
+// (patternKey is Any) is satisfied by any key reference at all; an exact
+// key-pattern is satisfied by the same exact key, or by a wildcard-key
+// reference ("*"/"+" reveal an exact key-pattern too, exactly as a
+// wildcard-key atom's own matching already treats "*"/"+" as equivalent,
+// SPEC.md §3).
+func keyReveals(ref atomReference, patternKey keyPattern) bool {
+	if patternKey.kind == keyPatternAny {
+		return true
+	}
+	if ref.keyAny {
+		return true
+	}
+	return ref.key == patternKey.name
 }
 
 // NewIndex returns an empty Index.
@@ -225,25 +345,24 @@ func (idx *Index) Query(infix string) ([]string, error) {
 // QueryPostfix evaluates an already-compiled postfix query directly
 // (PLAN.md §7.4), returning sorted matching item ids.
 //
-// Every element is parsed up front (queryWideNamespaceReferences), before
-// any atom is evaluated: this preserves parse-error-fails-fast behavior,
-// and additionally lets the query-wide *participation* set (SPEC.md §7) —
-// the union of every atom's own namespace reference across the whole
-// query — be computed once, up front. That set feeds only
-// idx.participatingIDs, which becomes the universe "not" complements
-// against here; each atom is still matched via resolveAtom, which is
-// always atom-local and never consults this query-wide set (see the
-// visibility type docs).
+// Every element is parsed up front (queryWideReferences), before any atom
+// is evaluated: this preserves parse-error-fails-fast behavior, and
+// additionally lets the query-wide *participation* set (SPEC.md §7) — the
+// union of every atom's own reference across the whole query — be
+// computed once, up front. That set feeds only idx.participatingIDs,
+// which becomes the universe "not" complements against here; each atom is
+// still matched via resolveAtom, which is always atom-local and never
+// consults this query-wide set (see the visibility type docs).
 func (idx *Index) QueryPostfix(postfix string) ([]string, error) {
 	elems, err := splitPostfix(postfix)
 	if err != nil {
 		return nil, err
 	}
-	referenced, err := queryWideNamespaceReferences(elems)
+	references, err := queryWideReferences(elems)
 	if err != nil {
 		return nil, err
 	}
-	universe := idx.participatingIDs(idx.visibilityFor(referenced))
+	universe := idx.participatingIDs(idx.visibilityFor(references))
 	result, err := evalPostfix(elems, universe, idx.resolveAtom)
 	if err != nil {
 		return nil, err
@@ -251,16 +370,16 @@ func (idx *Index) QueryPostfix(postfix string) ([]string, error) {
 	return result.sorted(), nil
 }
 
-// queryWideNamespaceReferences returns the union of every atom's own
-// namespace reference (atomNsReference) across all of elems, skipping the
+// queryWideReferences returns the union of every atom's own reference
+// (computeAtomReference) across all of elems, skipping the
 // "and"/"or"/"not" operator tokens (matched case-insensitively, SPEC.md §2
 // — a quoted token, e.g. `"and"`, still carries its quotes here, so it
 // never collides and is always treated as an atom instead): the query-wide
 // *participation* set (SPEC.md §7), never fed back into any individual
 // atom's matching (see resolveAtom, which builds its own atom-local
 // reference instead).
-func queryWideNamespaceReferences(elems []string) (map[string]struct{}, error) {
-	referenced := map[string]struct{}{}
+func queryWideReferences(elems []string) (map[atomReference]struct{}, error) {
+	references := map[atomReference]struct{}{}
 	for _, e := range elems {
 		switch strings.ToLower(e) {
 		case "and", "or", "not":
@@ -270,59 +389,57 @@ func queryWideNamespaceReferences(elems []string) (map[string]struct{}, error) {
 		if err != nil {
 			return nil, fmt.Errorf("tagma: invalid atom %q in postfix query: %w", e, err)
 		}
-		if ns, ok := atomNsReference(a); ok {
-			referenced[ns] = struct{}{}
+		if ref, ok := computeAtomReference(a); ok {
+			references[ref] = struct{}{}
 		}
 	}
-	return referenced, nil
+	return references, nil
 }
 
-// visibilityFor builds a visibility against the store's current hidden set
-// (hiddenNamespaces) paired with referenced. referenced's meaning is
-// caller-defined — see the visibility type docs for the two distinct roles
-// (resolveAtom's atom-local reference vs. QueryPostfix's query-wide one).
-func (idx *Index) visibilityFor(referenced map[string]struct{}) visibility {
-	return visibility{hidden: idx.hiddenNamespaces(), referenced: referenced}
+// visibilityFor builds a visibility against the store's current active
+// tagma.hide patterns (hiddenPatterns) paired with references. references'
+// meaning is caller-defined — see the visibility type docs for the two
+// distinct roles (resolveAtom's atom-local reference vs. QueryPostfix's
+// query-wide one).
+func (idx *Index) visibilityFor(references map[atomReference]struct{}) visibility {
+	return visibility{hidden: idx.hiddenPatterns(), references: references}
 }
 
-// hiddenNamespaces derives the namespaces currently configured hidden
-// (SPEC.md §7): the implicit "tagma" default, adjusted by any
-// tagma.hide-ns:<ns>=<bool> tags read back from the store. hide-ns tags
-// are ordinary tags, not a separate structure, so this scans idx.items
-// like any other atom resolution would — no separate cache or
-// invalidation to maintain. On a namespace with both a "=true" and a
-// "=false" tag on record (possible since this port has no untag/delete
-// operation, so a "changed" setting is only ever additive), hide wins —
-// the fail-safe reading.
-func (idx *Index) hiddenNamespaces() map[string]struct{} {
-	hidden := map[string]struct{}{hideNsDefaultHidden: {}}
-	type verdict struct{ saysHidden, saysVisible bool }
-	targets := map[string]verdict{}
+// hiddenPatterns derives the tagma.hide patterns currently active (SPEC.md
+// §7): the implicit default ("tagma:*", hidden) adjusted by any
+// tagma.hide:<target>=<bool> tags read back from the store. hide tags are
+// ordinary tags, not a separate structure, so this scans idx.items like
+// any other atom resolution would — no separate cache or invalidation to
+// maintain. On a target with both a "=true" and a "=false" tag on record
+// (possible since this port has no untag/delete operation, so a "changed"
+// setting is only ever additive), hide wins — the fail-safe reading
+// (resolveHidePatterns).
+func (idx *Index) hiddenPatterns() []hidePattern {
+	var facts []hideFact
 	for _, tags := range idx.items {
 		for _, t := range tags {
-			if t.Namespace == nil || *t.Namespace != hideNsConfigNamespace || t.Value == nil {
+			if t.Namespace == nil || *t.Namespace != hideConfigNamespace || t.Value == nil {
 				continue
 			}
-			v := targets[t.Key]
 			switch *t.Value {
 			case "true":
-				v.saysHidden = true
+				facts = append(facts, hideFact{target: t.Key, hide: true})
 			case "false":
-				v.saysVisible = true
+				facts = append(facts, hideFact{target: t.Key, hide: false})
 			default:
 				continue // uninterpretable value configures nothing (SPEC.md §7/§4)
 			}
-			targets[t.Key] = v
 		}
 	}
-	for ns, v := range targets {
-		if v.saysHidden {
-			hidden[ns] = struct{}{}
-		} else if v.saysVisible {
-			delete(hidden, ns)
-		}
-	}
-	return hidden
+	return resolveHidePatterns(facts)
+}
+
+// HideConfig returns the current, active tagma.hide pattern set (SPEC.md
+// §7), exposed publicly so a consumer can filter tags for display
+// (TagHidden) outside any query — the same derivation hiddenPatterns
+// performs internally for query-time visibility, wrapped as a HideConfig.
+func (idx *Index) HideConfig() HideConfig {
+	return HideConfig{patterns: idx.hiddenPatterns()}
 }
 
 // arityConfig derives the current tagma.arity config (SPEC.md §8) by
@@ -399,17 +516,17 @@ func arityLookup(config map[arityTarget]arity, ns *string, key string) arity {
 
 // participatingIDs returns the ids of items that *participate* in a query
 // under vis (SPEC.md §7): items with at least one query-visible tag, i.e.
-// a tag whose namespace isn't hidden, or is covered by vis's (query-wide)
-// referenced set. This is the universe QueryPostfix complements "not"
-// against, and what a universal query (*, *:*) resolves to — never every
-// item in the index regardless of its tags, since an item whose only tags
-// are in a hidden, unreferenced namespace must be absent even from a "not"
-// complement.
+// a tag whose (namespace, key) isn't hidden, or is hidden but unhidden by
+// vis's (query-wide) references. This is the universe QueryPostfix
+// complements "not" against, and what a universal query (*, *:*) resolves
+// to — never every item in the index regardless of its tags, since an
+// item whose only tags are hidden and unreferenced must be absent even
+// from a "not" complement.
 func (idx *Index) participatingIDs(vis visibility) idSet {
 	s := make(idSet)
 	for id, tags := range idx.items {
 		for _, t := range tags {
-			if vis.nsVisible(t.Namespace) {
+			if vis.tagVisible(t.Namespace, t.Key) {
 				s[id] = struct{}{}
 				break
 			}
@@ -421,27 +538,28 @@ func (idx *Index) participatingIDs(vis visibility) idSet {
 // resolveAtom parses a postfix element as a query atom and resolves it to
 // the set of item ids carrying at least one tag that matches it.
 //
-// Matching is per-atom (SPEC.md §7): a itself only ever matches a
-// hidden-namespace tag if a itself explicitly names that namespace — never
-// because some other atom elsewhere in the same query names it (that only
-// affects participation, see participatingIDs). So the visibility built
-// here is always local to this one atom's own reference, regardless of
-// whether other atoms in the same compound query name other namespaces.
+// Matching is per-atom (SPEC.md §7): a itself only ever matches a hidden
+// tag if a itself references it clearly enough to unhide it — never
+// because some other atom elsewhere in the same query references it (that
+// only affects participation, see participatingIDs). So the visibility
+// built here is always local to this one atom's own reference, regardless
+// of whether other atoms in the same compound query reference other
+// (ns, key) pairs.
 func (idx *Index) resolveAtom(text string) (idSet, error) {
 	a, err := parseAtom(text)
 	if err != nil {
 		return nil, fmt.Errorf("tagma: invalid atom %q in postfix query: %w", text, err)
 	}
-	referenced := map[string]struct{}{}
-	if ns, ok := atomNsReference(a); ok {
-		referenced[ns] = struct{}{}
+	references := map[atomReference]struct{}{}
+	if ref, ok := computeAtomReference(a); ok {
+		references[ref] = struct{}{}
 	}
-	vis := idx.visibilityFor(referenced)
+	vis := idx.visibilityFor(references)
 	s := make(idSet)
 	for id, tags := range idx.items {
 		visible := make([]Tag, 0, len(tags))
 		for _, t := range tags {
-			if vis.nsVisible(t.Namespace) {
+			if vis.tagVisible(t.Namespace, t.Key) {
 				visible = append(visible, t)
 			}
 		}
@@ -450,4 +568,166 @@ func (idx *Index) resolveAtom(text string) (idSet, error) {
 		}
 	}
 	return s, nil
+}
+
+// firstColonSplit splits target on its first ':' — not applied
+// recursively: everything before the first ':' is the left part,
+// everything after is the right; no ':' means no left part and the whole
+// string is the right. Shared by splitArityTarget (SPEC.md §8's
+// tagma.arity target) and parseHideTarget (SPEC.md §7's tagma.hide
+// target) — both config facets pack a (namespace?, key-or-pattern) pair
+// into one string this same way.
+func firstColonSplit(target string) (nsPart string, hasNs bool, rest string) {
+	if i := strings.IndexByte(target, ':'); i != -1 {
+		return target[:i], true, target[i+1:]
+	}
+	return "", false, target
+}
+
+// parseHideTarget parses a tagma.hide config tag's <target> key into the
+// hidePattern it encodes (SPEC.md §7) via firstColonSplit: no colon pins
+// nsPatternNull; "*" before the colon is nsPatternAny; anything else is
+// nsPatternNamed. After the colon (or the whole string, with no colon),
+// "*" is keyPatternAny; anything else is keyPatternExact. A ns-pattern or
+// key-pattern spelled literally "*" (only reachable by quoting <target> at
+// config-write time) is indistinguishable from the wildcard token here —
+// the same documented-not-solved posture as the colon-in-key case.
+func parseHideTarget(target string) hidePattern {
+	nsPart, hasNs, keyPart := firstColonSplit(target)
+	var ns nsPattern
+	switch {
+	case !hasNs:
+		ns = nsPattern{kind: nsPatternNull}
+	case nsPart == "*":
+		ns = nsPattern{kind: nsPatternAny}
+	default:
+		ns = nsPattern{kind: nsPatternNamed, name: nsPart}
+	}
+	var key keyPattern
+	if keyPart == "*" {
+		key = keyPattern{kind: keyPatternAny}
+	} else {
+		key = keyPattern{kind: keyPatternExact, name: keyPart}
+	}
+	return hidePattern{ns: ns, key: key}
+}
+
+// hideFact is one (target, hide) fact — as if decoded from a single
+// tagma.hide:<target>=<bool> tag: target is the tag's own key (the
+// encoded ns-pattern:key-pattern, or bare key-pattern for the null
+// namespace); hide is true for a "=true" tag, false for a "=false" tag.
+type hideFact struct {
+	target string
+	hide   bool
+}
+
+// resolveHidePatterns resolves the active tagma.hide pattern set (SPEC.md
+// §7) from facts — one per tagma.hide:<target>=<bool> tag on record.
+// Always starts from the implicit default (hideDefaultTarget, hidden). A
+// target with both a true and a false fact on record resolves hidden —
+// the fail-safe reading, mirroring Index.hiddenPatterns/Index.arityConfig's
+// posture — by checking, per target, whether any fact hides it before
+// checking whether any fact un-hides it, so the outcome doesn't depend on
+// fact order.
+func resolveHidePatterns(facts []hideFact) []hidePattern {
+	trueTargets := map[string]struct{}{}
+	falseTargets := map[string]struct{}{}
+	allTargets := map[string]struct{}{}
+	for _, f := range facts {
+		allTargets[f.target] = struct{}{}
+		if f.hide {
+			trueTargets[f.target] = struct{}{}
+		} else {
+			falseTargets[f.target] = struct{}{}
+		}
+	}
+	active := map[string]struct{}{hideDefaultTarget: {}}
+	for target := range allTargets {
+		if _, ok := trueTargets[target]; ok {
+			active[target] = struct{}{}
+		} else if _, ok := falseTargets[target]; ok {
+			delete(active, target)
+		}
+	}
+	patterns := make([]hidePattern, 0, len(active))
+	for target := range active {
+		patterns = append(patterns, parseHideTarget(target))
+	}
+	return patterns
+}
+
+// HideConfig is a derived, active tagma.hide pattern set (SPEC.md §7):
+// every pattern currently hiding something, after the store-wide
+// "hide wins" conflict resolution — the config-derived counterpart of
+// Index.HideConfig. Built via HideConfigFromTags (reading
+// tagma.hide:<target>=<bool> tags back out of any tag collection) or
+// HideConfigFromPatterns (from explicit (target, hide) facts, bypassing
+// tag storage entirely). Used by TagHidden for **display** visibility —
+// unlike query-time visibility, a HideConfig has no notion of a query's
+// referenced set, so nothing ever un-hides a matching pattern here.
+type HideConfig struct {
+	patterns []hidePattern
+}
+
+// HideConfigFromTags derives a HideConfig by reading
+// tagma.hide:<target>=<bool> tags back out of tags — any collection of
+// tags, not necessarily a full Index (e.g. one item's own tags, or a
+// whole store's). Mirrors Index.HideConfig's conflict/default handling
+// exactly, for a caller that only has tags in hand, not an Index to query.
+func HideConfigFromTags(tags []Tag) HideConfig {
+	var facts []hideFact
+	for _, t := range tags {
+		if t.Namespace == nil || *t.Namespace != hideConfigNamespace || t.Value == nil {
+			continue
+		}
+		switch *t.Value {
+		case "true":
+			facts = append(facts, hideFact{target: t.Key, hide: true})
+		case "false":
+			facts = append(facts, hideFact{target: t.Key, hide: false})
+		default:
+			continue // uninterpretable value configures nothing (SPEC.md §7/§4)
+		}
+	}
+	return HideConfig{patterns: resolveHidePatterns(facts)}
+}
+
+// HideFact is one (target, hide) fact — the decoded key and boolean value
+// a tagma.hide:<target>=<bool> tag would carry — for HideConfigFromPatterns.
+type HideFact struct {
+	// Target is the tag's own key: an encoded ns-pattern:key-pattern (or
+	// bare key-pattern for the null namespace), per SPEC.md §7's tagma.hide
+	// target grammar.
+	Target string
+	// Hide is true for a "=true" fact, false for a "=false" fact.
+	Hide bool
+}
+
+// HideConfigFromPatterns builds a HideConfig directly from explicit facts
+// — the decoded key and boolean value a tagma.hide:<target>=<bool> tag
+// would carry — for a caller that already has hide facts in hand and has
+// no tag store to read them back from. Same default/conflict posture as
+// HideConfigFromTags.
+func HideConfigFromPatterns(facts []HideFact) HideConfig {
+	hf := make([]hideFact, len(facts))
+	for i, f := range facts {
+		hf[i] = hideFact{target: f.Target, hide: f.Hide}
+	}
+	return HideConfig{patterns: resolveHidePatterns(hf)}
+}
+
+// TagHidden reports whether tag is hidden under hideConfig (SPEC.md §7):
+// it matches at least one of hideConfig's active patterns. This is
+// **display** visibility, for a consumer filtering an item's tags outside
+// any query — unlike query-time visibility, there is no
+// unhide-by-reference here: a hidden tag stays hidden regardless of
+// anything a caller might otherwise "name," since there is no query to
+// name it in.
+func TagHidden(tag Tag, hideConfig HideConfig) bool {
+	for _, p := range hideConfig.patterns {
+		if p.matches(tag.Namespace, tag.Key) {
+			return true
+		}
+	}
+	return false
 }
