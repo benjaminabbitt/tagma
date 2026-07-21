@@ -56,15 +56,17 @@ use crate::token::split_unquoted_whitespace;
 /// An id-set posting list: sorted, deduplicated interned item ids.
 type PostingList = Vec<u32>;
 
-/// The reserved namespace config tags live in (SPEC.md §7): a config tag
-/// is `tagma.hide-ns:<ns>=<bool>`, so this is the tag's own namespace, not
-/// the namespace it configures (which is the tag's *key*).
-const HIDE_NS_CONFIG_NAMESPACE: &str = "tagma.hide-ns";
+/// The reserved namespace `tagma.hide` config tags live in (SPEC.md §7): a
+/// config tag is `tagma.hide:<target>=<bool>`, so this is the tag's own
+/// namespace, not the pattern it configures (which is encoded, first-colon
+/// split, in the tag's *key* — see [`parse_hide_target`]).
+const HIDE_CONFIG_NAMESPACE: &str = "tagma.hide";
 
 /// The implicit default hide (SPEC.md §7): as if
-/// `tagma.hide-ns:tagma=true` were always present, unless overridden by an
-/// explicit `tagma.hide-ns:tagma=false`.
-const HIDE_NS_DEFAULT_HIDDEN: &str = "tagma";
+/// `tagma.hide:"tagma:*"=true` were always present — the whole `tagma.*`
+/// family, every key — unless overridden by an explicit
+/// `tagma.hide:"tagma:*"=false` naming the same target.
+const HIDE_DEFAULT_TARGET: &str = "tagma:*";
 
 /// The reserved namespace `tagma.arity` config tags live in (SPEC.md §8): a
 /// config tag is `tagma.arity:<target>=<arity>`, so this is the tag's own
@@ -81,51 +83,120 @@ pub(crate) enum Arity {
     Set,
 }
 
-/// Hide-ns visibility (SPEC.md §7): the namespaces currently hidden in this
-/// store, paired with a `referenced` set that reveals (dot-subtree) some of
-/// them back. The same shape serves two *distinct* roles depending on what
-/// `referenced` is built from — callers must not conflate them:
+/// A namespace-position pattern within a `tagma.hide` target (SPEC.md §7):
+/// matches by dot-subtree (a named namespace, exactly as the retired
+/// `hide-ns` facet's own prefix rule did), the null namespace exactly (a
+/// target with no colon), or any namespace at all (`*`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NsPattern {
+    /// The null namespace only — a target with no colon.
+    Null,
+    /// Any namespace, named or null — a `*` ns-pattern.
+    Any,
+    /// A named namespace's dot-subtree.
+    Named(String),
+}
+
+/// A key-position pattern within a `tagma.hide` target (SPEC.md §7): an
+/// exact key, or any key at all (`*`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum KeyPattern {
+    /// Any key.
+    Any,
+    /// One exact key.
+    Exact(String),
+}
+
+/// One parsed, currently-active `tagma.hide` pattern (SPEC.md §7): the
+/// generalization of the retired `hide-ns` facet's single hidden-namespace
+/// set to `ns:key` granularity — a tag is hidden iff it matches at least
+/// one of these.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HidePattern {
+    ns: NsPattern,
+    key: KeyPattern,
+}
+
+impl HidePattern {
+    /// `true` iff this pattern hides a tag with namespace `ns`, key `key`.
+    fn matches(&self, ns: &Option<String>, key: &str) -> bool {
+        let ns_ok = match &self.ns {
+            NsPattern::Null => ns.is_none(),
+            NsPattern::Any => true,
+            NsPattern::Named(n) => ns.as_deref().is_some_and(|c| covers(c, n)),
+        };
+        ns_ok
+            && match &self.key {
+                KeyPattern::Any => true,
+                KeyPattern::Exact(k) => key == k,
+            }
+    }
+}
+
+/// Hide visibility (SPEC.md §7): the `tagma.hide` patterns currently active
+/// in this store, paired with a query's *references*, which unhide
+/// (SPEC.md §7 "Unhide-by-reference") some of what those patterns would
+/// otherwise hide. The same shape serves two *distinct* roles depending on
+/// what the reference sets are built from — callers must not conflate
+/// them:
 ///
-/// - **Matching** (per atom): `referenced` is that one atom's own explicit
-///   namespace only ([`atom_ns_reference`]/[`Index::matching_ids_u32`]) — a
-///   sibling atom elsewhere in the query contributes nothing here. This is
-///   what an atom is allowed to match against.
-/// - **Participation** (query-wide): `referenced` is the union of every
-///   atom's own namespace across the *whole* query
+/// - **Matching** (per atom): the references are that one atom's own
+///   ([`atom_reference`]/[`Index::matching_ids_u32`]) — a sibling atom
+///   elsewhere in the query contributes nothing here. This is what an atom
+///   is allowed to match against.
+/// - **Participation** (query-wide): the references are the union of every
+///   atom's own across the *whole* query
 ///   ([`postfix::eval`]/[`Index::visibility_for`]/[`Index::participating_ids_u32`]).
 ///   This governs only whether an item counts as present in the query at
 ///   all (including as the universe `not` complements against) — never
 ///   what any individual atom matches.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Visibility {
-    hidden: BTreeSet<String>,
-    referenced: BTreeSet<String>,
+    hidden: Vec<HidePattern>,
+    referenced_ns: BTreeSet<String>,
+    referenced_exact: BTreeSet<(Option<String>, String)>,
 }
 
 impl Visibility {
-    /// `true` iff a tag in namespace `ns` is visible under this
-    /// [`Visibility`]: the null namespace always is; a named namespace is
-    /// unless it's covered by a hidden namespace, or it's covered by
-    /// `referenced` (whose meaning — an atom's own name, or a whole
+    /// `true` iff a tag `(ns, key)` is visible under this [`Visibility`]:
+    /// not hidden by any active pattern, or hidden but unhidden by
+    /// reference (whose meaning — an atom's own references, or a whole
     /// query's — depends on how this [`Visibility`] was built; see the
     /// type docs).
-    fn ns_visible(&self, ns: &Option<String>) -> bool {
-        match ns {
-            None => true,
-            Some(n) => !covers_any(n, &self.hidden) || covers_any(n, &self.referenced),
-        }
+    fn tag_visible(&self, ns: &Option<String>, key: &str) -> bool {
+        !self.is_hidden(ns, key) || self.is_referenced(ns, key)
+    }
+
+    fn is_hidden(&self, ns: &Option<String>, key: &str) -> bool {
+        self.hidden.iter().any(|p| p.matches(ns, key))
+    }
+
+    /// SPEC.md §7 "Unhide-by-reference": `(ns, key)` is unhidden if some
+    /// referenced namespace's dot-subtree covers `ns` (naming the ns-subtree
+    /// unhides everything under it, key-level hides included), or if
+    /// `(ns, key)` exactly is one of the exact references (covers the null
+    /// namespace, which has no subtree to name).
+    fn is_referenced(&self, ns: &Option<String>, key: &str) -> bool {
+        matches!(ns, Some(n) if covers_any(n, &self.referenced_ns))
+            || self
+                .referenced_exact
+                .contains(&(ns.clone(), key.to_string()))
     }
 }
 
-/// `true` iff `ns` is covered by some root in `roots`: `ns` equals the
-/// root, or `ns` is a dot-delimited descendant of it (SPEC.md §7 — `.` is
-/// a hierarchy separator between namespace path components, unlike in
-/// keys). The same relation serves both the hide-ns prefix rule and its
-/// symmetric unhide-by-reference counterpart.
+/// `true` iff `ns` is covered by `root`: `ns` equals `root`, or `ns` is a
+/// dot-delimited descendant of it (SPEC.md §7 — `.` is a hierarchy
+/// separator between namespace path components, unlike in keys).
+fn covers(ns: &str, root: &str) -> bool {
+    ns == root || (ns.starts_with(root) && ns.as_bytes().get(root.len()) == Some(&b'.'))
+}
+
+/// `true` iff `ns` is covered by some root in `roots` ([`covers`]). Serves
+/// both a hide pattern's own ns-subtree matching ([`HidePattern::matches`])
+/// and the symmetric unhide-by-reference ns-reference check
+/// ([`Visibility::is_referenced`]).
 fn covers_any(ns: &str, roots: &BTreeSet<String>) -> bool {
-    roots.iter().any(|r| {
-        ns == r || (ns.starts_with(r.as_str()) && ns.as_bytes().get(r.len()) == Some(&b'.'))
-    })
+    roots.iter().any(|r| covers(ns, r))
 }
 
 /// An in-memory tag index: item id -> tags, queryable via infix or postfix.
@@ -334,18 +405,18 @@ impl Index {
 
     /// The ids of items that *participate* in a query under `vis` (SPEC.md
     /// §7): items with at least one query-visible tag, i.e. a tag whose
-    /// namespace isn't hidden, or is covered by `vis`'s (query-wide)
-    /// referenced set. This is the universe [`postfix::eval`] complements
-    /// `not` against, and what a universal query (`*`, `*:*`) resolves to —
-    /// never every interned id regardless of its tags, since an item whose
-    /// only tags are in a hidden, unreferenced namespace must be absent
+    /// `(namespace, key)` isn't hidden, or is hidden but unhidden by `vis`'s
+    /// (query-wide) references. This is the universe [`postfix::eval`]
+    /// complements `not` against, and what a universal query (`*`, `*:*`)
+    /// resolves to — never every interned id regardless of its tags, since
+    /// an item whose only tags are hidden and unreferenced must be absent
     /// even from a `not` complement. Already sorted, since `tags_by_id` is
     /// iterated in id order.
     pub(crate) fn participating_ids_u32(&self, vis: &Visibility) -> Vec<u32> {
         self.tags_by_id
             .iter()
             .enumerate()
-            .filter(|(_, tags)| tags.iter().any(|t| vis.ns_visible(&t.namespace)))
+            .filter(|(_, tags)| tags.iter().any(|t| vis.tag_visible(&t.namespace, &t.key)))
             .map(|(iid, _)| iid as u32)
             .collect()
     }
@@ -367,16 +438,17 @@ impl Index {
     /// counterpart of [`Self::matching_ids`], used by the postfix VM so the
     /// query path stays in `u32` until the final result.
     ///
-    /// Matching is per-atom (SPEC.md §7): `atom` only ever matches a
-    /// hidden-namespace tag if `atom` itself explicitly names that
-    /// namespace — never because some *other* atom elsewhere in the same
-    /// query names it (that only affects participation, see
+    /// Matching is per-atom (SPEC.md §7): `atom` only ever matches a hidden
+    /// tag if `atom` itself references it clearly enough to unhide it —
+    /// never because some *other* atom elsewhere in the same query
+    /// references it (that only affects participation, see
     /// [`Self::participating_ids_u32`]). So the [`Visibility`] built here
     /// is always local to this one atom, regardless of whether it's called
     /// standalone ([`Self::matching_ids`]) or as one clause of a compound
     /// postfix query ([`postfix::eval`]).
     pub(crate) fn matching_ids_u32(&self, atom: &Atom) -> Vec<u32> {
-        let vis = self.visibility_for(atom_ns_reference(atom));
+        let (ns_ref, exact_ref) = atom_reference(atom);
+        let vis = self.visibility_for(ns_ref, exact_ref);
         if self.should_scan(atom) {
             self.scan_matching_ids_u32(atom, &vis)
         } else {
@@ -384,56 +456,72 @@ impl Index {
         }
     }
 
-    /// Builds a [`Visibility`] against the store's current hidden set (see
-    /// [`Self::hidden_namespaces`]) paired with `referenced`. `referenced`'s
-    /// meaning is caller-defined — see the [`Visibility`] type docs for the
-    /// two distinct roles ([`Self::matching_ids_u32`]'s atom-local
-    /// reference vs. [`postfix::eval`]'s query-wide one).
-    pub(crate) fn visibility_for(&self, referenced: BTreeSet<String>) -> Visibility {
+    /// Builds a [`Visibility`] against the store's current active hide
+    /// patterns (see [`Self::hidden_patterns`]) paired with `referenced_ns`/
+    /// `referenced_exact`. Their meaning is caller-defined — see the
+    /// [`Visibility`] type docs for the two distinct roles
+    /// ([`Self::matching_ids_u32`]'s atom-local references vs.
+    /// [`postfix::eval`]'s query-wide ones).
+    pub(crate) fn visibility_for(
+        &self,
+        referenced_ns: BTreeSet<String>,
+        referenced_exact: BTreeSet<(Option<String>, String)>,
+    ) -> Visibility {
         Visibility {
-            hidden: self.hidden_namespaces(),
-            referenced,
+            hidden: self.hidden_patterns(),
+            referenced_ns,
+            referenced_exact,
         }
     }
 
-    /// The namespaces currently configured hidden (SPEC.md §7): the
-    /// implicit `tagma` default, adjusted by any `tagma.hide-ns:<ns>=<bool>`
-    /// tags read back from the store. hide-ns tags are ordinary tags, not a
-    /// separate structure, so this reads the same `keys_by_ns` /
-    /// `by_ns_key_value` registries every other atom does — no separate
-    /// cache or invalidation to maintain. On a namespace with both a
-    /// `=true` and a `=false` tag on record (possible since this reference
-    /// core has no untag/delete operation, so a "changed" setting is only
-    /// ever additive), hide wins — the fail-safe reading.
-    fn hidden_namespaces(&self) -> BTreeSet<String> {
-        let mut hidden = BTreeSet::new();
-        hidden.insert(HIDE_NS_DEFAULT_HIDDEN.to_string());
-        let config_ns = Some(HIDE_NS_CONFIG_NAMESPACE.to_string());
+    /// The `tagma.hide` patterns currently active (SPEC.md §7): the implicit
+    /// default (`tagma:*`, hidden) adjusted by any
+    /// `tagma.hide:<target>=<bool>` tags read back from the store. hide tags
+    /// are ordinary tags, not a separate structure, so this reads the same
+    /// `keys_by_ns` / `by_ns_key_value` registries every other atom does —
+    /// no separate cache or invalidation to maintain. On a target with both
+    /// a `=true` and a `=false` tag on record (possible since this
+    /// reference core has no untag/delete operation, so a "changed" setting
+    /// is only ever additive), hide wins — the fail-safe reading
+    /// ([`resolve_hide_patterns`]).
+    fn hidden_patterns(&self) -> Vec<HidePattern> {
+        let config_ns = Some(HIDE_CONFIG_NAMESPACE.to_string());
+        let mut facts: Vec<(String, bool)> = Vec::new();
         if let Some(targets) = self.keys_by_ns.get(&config_ns) {
             for target in targets {
-                let says_hidden = self.by_ns_key_value.contains_key(&(
+                if self.by_ns_key_value.contains_key(&(
                     config_ns.clone(),
                     target.clone(),
                     "true".to_string(),
-                ));
-                let says_visible = self.by_ns_key_value.contains_key(&(
+                )) {
+                    facts.push((target.clone(), true));
+                }
+                if self.by_ns_key_value.contains_key(&(
                     config_ns.clone(),
                     target.clone(),
                     "false".to_string(),
-                ));
-                if says_hidden {
-                    hidden.insert(target.clone());
-                } else if says_visible {
-                    hidden.remove(target);
+                )) {
+                    facts.push((target.clone(), false));
                 }
             }
         }
-        hidden
+        resolve_hide_patterns(facts.iter().map(|(t, h)| (t.as_str(), *h)))
+    }
+
+    /// The current, active `tagma.hide` pattern set (SPEC.md §7), exposed
+    /// publicly so a consumer can filter tags for **display**
+    /// ([`tag_hidden`]) outside any query — the same derivation
+    /// [`Self::hidden_patterns`] performs internally for query-time
+    /// visibility, wrapped as a [`HideConfig`].
+    pub fn hide_config(&self) -> HideConfig {
+        HideConfig {
+            patterns: self.hidden_patterns(),
+        }
     }
 
     /// The current `tagma.arity` config (SPEC.md §8), derived by reading
     /// `tagma.arity:<target>=<arity>` tags back out of the store — the same
-    /// self-hosted pattern as [`Self::hidden_namespaces`]: an internal read
+    /// self-hosted pattern as [`Self::hidden_patterns`]: an internal read
     /// of `keys_by_ns` / `by_ns_key_value` that bypasses the query-time
     /// hide (`tagma.arity` is itself under the hidden `tagma` family).
     ///
@@ -441,7 +529,7 @@ impl Index {
     /// `(namespace?, key)` pair; [`split_target`] recovers the pair via a
     /// first-colon split. On a target with both a `=scalar` and a `=set` tag
     /// on record (possible since this reference core has no untag/delete
-    /// operation), `scalar` wins — the same fail-safe posture as hide-ns's
+    /// operation), `scalar` wins — the same fail-safe posture as `hide`'s
     /// hide-wins rule. A target whose only recorded value is neither
     /// `scalar` nor `set` configures nothing and is omitted, so lookups fall
     /// through to the `Set` default.
@@ -499,10 +587,9 @@ impl Index {
     ///
     /// Each item's tags are filtered by `vis` (SPEC.md §7, always this
     /// atom's own local visibility — see [`Self::matching_ids_u32`]) before
-    /// being handed to [`Atom::matches`], so a tag in a hidden, unreferenced
-    /// namespace is invisible to the match — as if it weren't there at all
-    /// — without [`Atom::matches`]'s own signature needing to know about
-    /// hide-ns.
+    /// being handed to [`Atom::matches`], so a hidden, unreferenced tag is
+    /// invisible to the match — as if it weren't there at all — without
+    /// [`Atom::matches`]'s own signature needing to know about `hide`.
     fn scan_matching_ids_u32(&self, atom: &Atom, vis: &Visibility) -> Vec<u32> {
         self.tags_by_id
             .iter()
@@ -510,7 +597,7 @@ impl Index {
             .filter(|(_, tags)| {
                 let visible: Vec<Tag> = tags
                     .iter()
-                    .filter(|t| vis.ns_visible(&t.namespace))
+                    .filter(|t| vis.tag_visible(&t.namespace, &t.key))
                     .cloned()
                     .collect();
                 atom.matches(&visible)
@@ -526,21 +613,23 @@ impl Index {
     /// then sorts and dedups once at the end — a single collect-and-sort
     /// rather than hundreds of pairwise linear merges.
     ///
-    /// Each candidate namespace is checked against `vis` (SPEC.md §7,
+    /// Each candidate `(ns, key)` pair is checked against `vis` (SPEC.md §7,
     /// always this one atom's own local visibility — see
     /// [`Self::matching_ids_u32`]) before its postings are collected — a
-    /// hidden, unreferenced namespace is simply never expanded into, so its
-    /// tags never enter the result. An atom with a concrete namespace token
-    /// is unaffected by this in practice: naming a namespace always makes
-    /// it its own referenced (hence visible) candidate (see
-    /// [`atom_ns_reference`]).
+    /// hidden, unreferenced `(ns, key)` is simply never expanded into, so
+    /// its tags never enter the result. The check is per-key, not per-ns
+    /// only, since a hide pattern may target one key within an otherwise
+    /// visible namespace. An atom with a concrete namespace token is
+    /// unaffected by this in practice: naming a namespace always makes it
+    /// its own ns-reference (hence visible) candidate (see
+    /// [`atom_reference`]).
     fn indexed_matching_ids_u32(&self, atom: &Atom, vis: &Visibility) -> Vec<u32> {
         let mut result: Vec<u32> = Vec::new();
         for ns in self.ns_candidates(&atom.ns) {
-            if !vis.ns_visible(&ns) {
-                continue;
-            }
             for key in self.key_candidates(&ns, &atom.key) {
+                if !vis.tag_visible(&ns, &key) {
+                    continue;
+                }
                 self.collect_ns_key(&ns, &key, &atom.value, &mut result);
             }
         }
@@ -669,20 +758,36 @@ impl Index {
     }
 }
 
-/// The namespace an atom by itself "references" for hide-ns purposes
-/// (SPEC.md §7): its own explicit namespace token, if it has one — a `*`/`+`
-/// namespace quantifier never counts. [`Index::matching_ids_u32`] uses this
-/// directly, for every atom, always — matching is per-atom, so no other
-/// atom's reference ever contributes here. [`postfix::eval`] additionally
-/// unions the same per-atom references across every atom in a compound
-/// query to build the separate, query-wide *participation* set (SPEC.md
-/// §7) — a different, additive use of the same building block, never fed
-/// back into matching.
-fn atom_ns_reference(atom: &Atom) -> BTreeSet<String> {
-    match &atom.ns {
-        Some(Pos::Tok(n)) => BTreeSet::from([n.clone()]),
-        _ => BTreeSet::new(),
+/// What an atom by itself "references" for `tagma.hide` unhide-by-reference
+/// purposes (SPEC.md §7 "Unhide-by-reference"): its own concrete namespace
+/// token (the ns-reference — a `*`/`+` namespace quantifier never counts),
+/// plus, when its key clause is *also* a concrete token (never `*`/`+`),
+/// the exact `(namespace, key)` pair it names (the exact-reference — this
+/// is what lets a null-namespace atom, which has no namespace token to
+/// contribute an ns-reference, still unhide a null-namespace key-level
+/// hide). [`Index::matching_ids_u32`] uses this directly, for every atom,
+/// always — matching is per-atom, so no other atom's reference ever
+/// contributes here. [`postfix::eval`] additionally unions the same
+/// per-atom references across every atom in a compound query to build the
+/// separate, query-wide *participation* set (SPEC.md §7) — a different,
+/// additive use of the same building block, never fed back into matching.
+pub(crate) fn atom_reference(
+    atom: &Atom,
+) -> (BTreeSet<String>, BTreeSet<(Option<String>, String)>) {
+    let mut ns_ref = BTreeSet::new();
+    let ns_concrete: Option<Option<String>> = match &atom.ns {
+        None => Some(None),
+        Some(Pos::Tok(n)) => {
+            ns_ref.insert(n.clone());
+            Some(Some(n.clone()))
+        }
+        _ => None,
+    };
+    let mut exact_ref = BTreeSet::new();
+    if let (Some(ns_val), Pos::Tok(k)) = (ns_concrete, &atom.key) {
+        exact_ref.insert((ns_val, k.clone()));
     }
+    (ns_ref, exact_ref)
 }
 
 /// Looks up `(ns, key)`'s declared arity in a config built by
@@ -699,22 +804,150 @@ fn arity_lookup(
         .unwrap_or_default()
 }
 
-/// Splits a `tagma.arity` config tag's `<target>` key into the target
-/// `(namespace?, key)` pair it encodes (SPEC.md §8): a **first-colon
-/// split**, not applied recursively — everything before the first `:` is
-/// the target namespace, everything after is the target key; no `:` means a
-/// null target namespace and the whole string is the target key. A target
-/// key that itself contains a `:` (only reachable by quoting `<target>` at
-/// config-write time) is indistinguishable from a namespace separator here
-/// — a documented limitation, not disambiguated.
-fn split_target(target: &str) -> (Option<String>, String) {
-    match target.find(':') {
-        Some(idx) => (
-            Some(target[..idx].to_string()),
-            target[idx + 1..].to_string(),
-        ),
-        None => (None, target.to_string()),
+/// A **first-colon split**, not applied recursively: everything before the
+/// first `:` is the left part, everything after is the right; no `:` means
+/// no left part and the whole string is the right. Shared by
+/// [`split_target`] (SPEC.md §8's `tagma.arity` target) and
+/// [`parse_hide_target`] (SPEC.md §7's `tagma.hide` target) — both config
+/// facets pack a `(namespace?, key-or-pattern)` pair into one string this
+/// same way.
+fn first_colon_split(s: &str) -> (Option<&str>, &str) {
+    match s.find(':') {
+        Some(idx) => (Some(&s[..idx]), &s[idx + 1..]),
+        None => (None, s),
     }
+}
+
+/// Splits a `tagma.arity` config tag's `<target>` key into the target
+/// `(namespace?, key)` pair it encodes (SPEC.md §8) via [`first_colon_split`].
+/// A target key that itself contains a `:` (only reachable by quoting
+/// `<target>` at config-write time) is indistinguishable from a namespace
+/// separator here — a documented limitation, not disambiguated.
+fn split_target(target: &str) -> (Option<String>, String) {
+    let (ns, key) = first_colon_split(target);
+    (ns.map(str::to_string), key.to_string())
+}
+
+/// Parses a `tagma.hide` config tag's `<target>` key into the [`HidePattern`]
+/// it encodes (SPEC.md §7) via the same [`first_colon_split`] `tagma.arity`
+/// uses for its own target: no colon pins [`NsPattern::Null`]; `*` before
+/// the colon is [`NsPattern::Any`]; anything else is [`NsPattern::Named`].
+/// After the colon (or the whole string, with no colon), `*` is
+/// [`KeyPattern::Any`]; anything else is [`KeyPattern::Exact`]. A
+/// ns-pattern or key-pattern spelled literally `*` (only reachable by
+/// quoting `<target>` at config-write time) is indistinguishable from the
+/// wildcard token here — the same documented-not-solved posture as the
+/// colon-in-key case.
+fn parse_hide_target(target: &str) -> HidePattern {
+    let (ns_str, key_str) = first_colon_split(target);
+    let ns = match ns_str {
+        None => NsPattern::Null,
+        Some("*") => NsPattern::Any,
+        Some(n) => NsPattern::Named(n.to_string()),
+    };
+    let key = if key_str == "*" {
+        KeyPattern::Any
+    } else {
+        KeyPattern::Exact(key_str.to_string())
+    };
+    HidePattern { ns, key }
+}
+
+/// Resolves the active `tagma.hide` pattern set (SPEC.md §7) from a sequence
+/// of `(target, hide)` facts — one per `tagma.hide:<target>=<bool>` tag on
+/// record (`hide` is `true` for a `=true` tag, `false` for `=false`; an
+/// uninterpretable value tag is never passed in — it configures nothing).
+/// Always starts from the implicit default ([`HIDE_DEFAULT_TARGET`],
+/// hidden). A target with both a `true` and a `false` fact on record
+/// resolves hidden — the fail-safe reading, mirroring
+/// [`Index::hidden_patterns`]/[`Index::arity_config`]'s posture — by
+/// checking, per target, whether *any* fact hides it before checking
+/// whether any fact un-hides it, so the outcome doesn't depend on fact
+/// order.
+fn resolve_hide_patterns<'a>(facts: impl Iterator<Item = (&'a str, bool)>) -> Vec<HidePattern> {
+    let mut true_targets: BTreeSet<String> = BTreeSet::new();
+    let mut false_targets: BTreeSet<String> = BTreeSet::new();
+    let mut all_targets: BTreeSet<String> = BTreeSet::new();
+    for (target, hide) in facts {
+        all_targets.insert(target.to_string());
+        if hide {
+            true_targets.insert(target.to_string());
+        } else {
+            false_targets.insert(target.to_string());
+        }
+    }
+    let mut active: BTreeSet<String> = BTreeSet::from([HIDE_DEFAULT_TARGET.to_string()]);
+    for target in &all_targets {
+        if true_targets.contains(target) {
+            active.insert(target.clone());
+        } else if false_targets.contains(target) {
+            active.remove(target);
+        }
+    }
+    active.iter().map(|t| parse_hide_target(t)).collect()
+}
+
+/// A derived, active `tagma.hide` pattern set (SPEC.md §7): every pattern
+/// currently hiding something, after the store-wide "hide wins" conflict
+/// resolution — the config-derived counterpart of [`Index::hide_config`].
+/// Built via [`HideConfig::from_tags`] (reading `tagma.hide:<target>=<bool>`
+/// tags back out of any tag collection) or [`HideConfig::from_patterns`]
+/// (from explicit `(target, hide)` facts, bypassing tag storage entirely).
+/// Used by [`tag_hidden`] for **display** visibility — unlike query-time
+/// visibility ([`Visibility`]), a [`HideConfig`] has no notion of a query's
+/// referenced set, so nothing ever un-hides a matching pattern here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HideConfig {
+    patterns: Vec<HidePattern>,
+}
+
+impl HideConfig {
+    /// Derives a [`HideConfig`] by reading `tagma.hide:<target>=<bool>` tags
+    /// back out of `tags` — any collection of tags, not necessarily a full
+    /// [`Index`] (e.g. one item's own tags, or a whole store's). Mirrors
+    /// [`Index::hide_config`]'s conflict/default handling exactly, for a
+    /// caller that only has tags in hand, not an [`Index`] to query.
+    pub fn from_tags<'a>(tags: impl IntoIterator<Item = &'a Tag>) -> HideConfig {
+        let facts: Vec<(String, bool)> = tags
+            .into_iter()
+            .filter(|t| t.namespace.as_deref() == Some(HIDE_CONFIG_NAMESPACE))
+            .filter_map(|t| {
+                let hide = match t.value.as_deref() {
+                    Some("true") => true,
+                    Some("false") => false,
+                    _ => return None,
+                };
+                Some((t.key.clone(), hide))
+            })
+            .collect();
+        HideConfig {
+            patterns: resolve_hide_patterns(facts.iter().map(|(t, h)| (t.as_str(), *h))),
+        }
+    }
+
+    /// Builds a [`HideConfig`] directly from explicit `(<target>, hide)`
+    /// facts — the decoded key and boolean value a
+    /// `tagma.hide:<target>=<bool>` tag would carry — for a caller that
+    /// already has hide facts in hand and has no tag store to read them
+    /// back from. Same default/conflict posture as [`Self::from_tags`].
+    pub fn from_patterns<'a>(facts: impl IntoIterator<Item = (&'a str, bool)>) -> HideConfig {
+        HideConfig {
+            patterns: resolve_hide_patterns(facts.into_iter()),
+        }
+    }
+}
+
+/// `true` iff `tag` is hidden under `hide_config` (SPEC.md §7): it matches
+/// at least one of `hide_config`'s active patterns. This is **display**
+/// visibility, for a consumer filtering an item's tags outside any query —
+/// unlike query-time visibility, there is no unhide-by-reference here: a
+/// hidden tag stays hidden regardless of anything a caller might otherwise
+/// "name," since there is no query to name it in.
+pub fn tag_hidden(tag: &Tag, hide_config: &HideConfig) -> bool {
+    hide_config
+        .patterns
+        .iter()
+        .any(|p| p.matches(&tag.namespace, &tag.key))
 }
 
 /// Pushes `id` into posting list `v` (kept sorted and deduplicated).
@@ -1042,7 +1275,7 @@ mod tests {
         assert_eq!(indexed, vec![0, 1, 2]);
     }
 
-    // --- hide-ns (SPEC.md §7) — internals not otherwise pinned by the
+    // --- hide (SPEC.md §7) — internals not otherwise pinned by the
     // conformance suite -----------------------------------------------------
 
     #[test]
@@ -1056,52 +1289,183 @@ mod tests {
         assert!(!covers_any("tagmaZ", &roots));
     }
 
+    fn hidden(idx: &Index, tag_str: &str) -> bool {
+        tag_hidden(&Tag::parse(tag_str).unwrap(), &idx.hide_config())
+    }
+
     #[test]
-    fn hidden_namespaces_defaults_to_tagma_with_no_config_tags_at_all() {
+    fn parse_hide_target_recognizes_wildcards_and_the_null_namespace() {
+        assert_eq!(
+            parse_hide_target("tagma:*"),
+            HidePattern {
+                ns: NsPattern::Named("tagma".to_string()),
+                key: KeyPattern::Any,
+            }
+        );
+        assert_eq!(
+            parse_hide_target("triage:cwe"),
+            HidePattern {
+                ns: NsPattern::Named("triage".to_string()),
+                key: KeyPattern::Exact("cwe".to_string()),
+            }
+        );
+        assert_eq!(
+            parse_hide_target("*:secret"),
+            HidePattern {
+                ns: NsPattern::Any,
+                key: KeyPattern::Exact("secret".to_string()),
+            }
+        );
+        assert_eq!(
+            parse_hide_target("secret"),
+            HidePattern {
+                ns: NsPattern::Null,
+                key: KeyPattern::Exact("secret".to_string()),
+            }
+        );
+        assert_eq!(
+            parse_hide_target("*"),
+            HidePattern {
+                ns: NsPattern::Null,
+                key: KeyPattern::Any,
+            }
+        );
+    }
+
+    #[test]
+    fn hide_config_defaults_to_hiding_the_whole_tagma_family_every_key() {
         let idx = Index::new();
-        assert_eq!(
-            idx.hidden_namespaces(),
-            BTreeSet::from(["tagma".to_string()])
-        );
+        assert!(hidden(&idx, "tagma.arity:kind=binary"));
+        assert!(hidden(&idx, "tagma:foo"));
+        assert!(!hidden(&idx, "urgent"));
     }
 
     #[test]
-    fn hidden_namespaces_explicit_false_removes_the_default() {
+    fn hide_config_explicit_false_on_the_default_target_unhides_the_whole_family() {
         let mut idx = Index::new();
-        idx.add_line("cfg tagma.hide-ns:tagma=false").unwrap();
-        assert_eq!(idx.hidden_namespaces(), BTreeSet::new());
+        idx.add_line("cfg tagma.hide:\"tagma:*\"=false").unwrap();
+        assert!(!hidden(&idx, "tagma.arity:kind=binary"));
+        assert!(!hidden(&idx, "tagma:foo"));
     }
 
     #[test]
-    fn hidden_namespaces_explicit_true_adds_a_user_namespace() {
+    fn hide_config_explicit_true_hides_a_user_namespace_every_key() {
         let mut idx = Index::new();
-        idx.add_line("cfg tagma.hide-ns:triage=true").unwrap();
-        assert_eq!(
-            idx.hidden_namespaces(),
-            BTreeSet::from(["tagma".to_string(), "triage".to_string()])
-        );
+        idx.add_line("cfg tagma.hide:\"triage:*\"=true").unwrap();
+        assert!(hidden(&idx, "triage:impact=high"));
+        assert!(hidden(&idx, "triage:type=bug"));
+        assert!(hidden(&idx, "triage.sub:x=1"));
+        assert!(!hidden(&idx, "urgent"));
     }
 
     #[test]
-    fn hidden_namespaces_conflicting_true_and_false_hides() {
+    fn hide_config_per_key_hide_leaves_sibling_keys_under_the_same_namespace_visible() {
+        let mut idx = Index::new();
+        idx.add_line("cfg tagma.hide:\"triage:cwe\"=true").unwrap();
+        assert!(hidden(&idx, "triage:cwe=79"));
+        assert!(!hidden(&idx, "triage:type=bug"));
+    }
+
+    #[test]
+    fn hide_config_null_namespace_key_hide_does_not_touch_a_named_namespace() {
+        let mut idx = Index::new();
+        idx.add_line("cfg tagma.hide:secret=true").unwrap();
+        assert!(hidden(&idx, "secret=shh"));
+        assert!(!hidden(&idx, "ns:secret=shh"));
+    }
+
+    #[test]
+    fn hide_config_any_namespace_wildcard_key_hide_reaches_every_namespace() {
+        let mut idx = Index::new();
+        idx.add_line("cfg tagma.hide:\"*:secret\"=true").unwrap();
+        assert!(hidden(&idx, "secret=shh"));
+        assert!(hidden(&idx, "ns:secret=shh"));
+        assert!(!hidden(&idx, "secret2=shh"));
+    }
+
+    #[test]
+    fn hide_config_conflicting_true_and_false_on_the_same_target_hides() {
         // No untag/delete operation exists yet (SPEC.md §7), so both tags
         // can coexist on record; hide is the documented fail-safe winner.
         let mut idx = Index::new();
-        idx.add_line("cfg1 tagma.hide-ns:triage=true").unwrap();
-        idx.add_line("cfg2 tagma.hide-ns:triage=false").unwrap();
-        assert!(idx.hidden_namespaces().contains("triage"));
+        idx.add_line("cfg1 tagma.hide:\"triage:*\"=true").unwrap();
+        idx.add_line("cfg2 tagma.hide:\"triage:*\"=false").unwrap();
+        assert!(hidden(&idx, "triage:impact=high"));
     }
 
     #[test]
-    fn hidden_namespaces_ignores_an_uninterpretable_value() {
+    fn hide_config_overlapping_targets_are_not_reconciled_by_specificity() {
+        // A broader "hide" target and a narrower "un-hide" target for the
+        // *same* tag are different targets, not a conflict on one target
+        // (SPEC.md §7): the broader hide still wins, since a tag is hidden
+        // if it matches *any* active pattern.
         let mut idx = Index::new();
-        idx.add_line("cfg tagma.hide-ns:triage=maybe").unwrap();
+        idx.add_line("cfg1 tagma.hide:\"triage:*\"=true").unwrap();
+        idx.add_line("cfg2 tagma.hide:\"triage:cwe\"=false")
+            .unwrap();
+        assert!(hidden(&idx, "triage:cwe=79"));
+    }
+
+    #[test]
+    fn hide_config_ignores_an_uninterpretable_value() {
+        let mut idx = Index::new();
+        idx.add_line("cfg tagma.hide:\"triage:*\"=maybe").unwrap();
         // Neither "true" nor "false": configures nothing, per SPEC.md §7's
-        // "no errors, no coercion surprises" style.
-        assert_eq!(
-            idx.hidden_namespaces(),
-            BTreeSet::from(["tagma".to_string()])
-        );
+        // "no errors, no coercion surprises" style; the default still
+        // stands.
+        assert!(!hidden(&idx, "triage:impact=high"));
+        assert!(hidden(&idx, "tagma.arity:kind=binary"));
+    }
+
+    // --- HideConfig public API (SPEC.md §7's display predicate) -----------
+
+    #[test]
+    fn hide_config_from_tags_matches_index_hide_config() {
+        let mut idx = Index::new();
+        idx.add_line("cfg tagma.hide:\"triage:cwe\"=true").unwrap();
+        idx.add_line("a triage:cwe=79 triage:type=bug").unwrap();
+
+        // Build a HideConfig purely from a bag of tags (no Index at all) —
+        // the shape a downstream consumer like taskloom would have.
+        let all_tags: Vec<Tag> = vec![
+            Tag::parse("tagma.hide:\"triage:cwe\"=true").unwrap(),
+            Tag::parse("triage:cwe=79").unwrap(),
+            Tag::parse("triage:type=bug").unwrap(),
+        ];
+        let cfg = HideConfig::from_tags(&all_tags);
+        assert!(tag_hidden(&Tag::parse("triage:cwe=79").unwrap(), &cfg));
+        assert!(!tag_hidden(&Tag::parse("triage:type=bug").unwrap(), &cfg));
+        // Agrees with the Index-derived config for the same facts.
+        assert_eq!(cfg, idx.hide_config());
+    }
+
+    #[test]
+    fn hide_config_from_patterns_builds_directly_from_explicit_facts() {
+        let cfg = HideConfig::from_patterns([("triage:cwe", true)]);
+        assert!(tag_hidden(&Tag::parse("triage:cwe=79").unwrap(), &cfg));
+        assert!(!tag_hidden(&Tag::parse("triage:type=bug").unwrap(), &cfg));
+        // The implicit tagma default still applies.
+        assert!(tag_hidden(
+            &Tag::parse("tagma.arity:kind=binary").unwrap(),
+            &cfg
+        ));
+    }
+
+    #[test]
+    fn hide_config_from_patterns_hide_wins_regardless_of_fact_order() {
+        let cfg_true_last = HideConfig::from_patterns([("k", false), ("k", true)]);
+        let cfg_false_last = HideConfig::from_patterns([("k", true), ("k", false)]);
+        let tag = Tag::parse("k=1").unwrap();
+        assert!(tag_hidden(&tag, &cfg_true_last));
+        assert!(tag_hidden(&tag, &cfg_false_last));
+    }
+
+    #[test]
+    fn tag_hidden_is_display_visibility_with_no_unhide_by_reference() {
+        // Unlike query-time visibility, there is no query here to reference
+        // anything with — a hidden tag simply stays hidden.
+        let cfg = HideConfig::from_patterns([("triage:cwe", true)]);
+        assert!(tag_hidden(&Tag::parse("triage:cwe=79").unwrap(), &cfg));
     }
 
     // --- arity (SPEC.md §8) — internals not otherwise pinned by the

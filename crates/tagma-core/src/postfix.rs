@@ -9,11 +9,11 @@
 //! resolves directly to the set difference `A \ B` without ever computing
 //! `not b`'s complement over the universe. The universe is materialized at
 //! most once, only if the final result is still a `Comp` frame — and, per
-//! the hide-ns visibility rule (SPEC.md §7), it is the *participating* set
+//! the `hide` visibility rule (SPEC.md §7), it is the *participating* set
 //! (`Index::participating_ids_u32`), not `Index::all_ids`: an item whose
-//! only tags are in a hidden, unreferenced namespace must be absent even
-//! from a `not` complement, so it's excluded from the universe itself
-//! rather than filtered out afterward.
+//! only tags are hidden and unreferenced must be absent even from a `not`
+//! complement, so it's excluded from the universe itself rather than
+//! filtered out afterward.
 //!
 //! PLAN.md §9/P4: a `Frame` holds a sorted `Vec<u32>` of interned item ids
 //! (see `index.rs`), not a `BTreeSet<String>` — `and`/`or`/`not` are linear
@@ -24,8 +24,8 @@
 
 use std::collections::BTreeSet;
 
-use crate::atom::{Atom, Pos};
-use crate::index::Index;
+use crate::atom::Atom;
+use crate::index::{atom_reference, Index};
 use crate::token::split_unquoted;
 
 /// A stack entry: a sorted, deduplicated `Vec<u32>` of interned item ids,
@@ -187,22 +187,21 @@ enum PfTok {
 /// first pass, before any evaluation: this preserves the original
 /// parse-error-fails-fast behavior, and additionally lets the *query-wide
 /// participation* set (SPEC.md §7) be computed — the union of every atom's
-/// own namespace reference across the whole query — before any atom is
-/// evaluated.
+/// own references ([`atom_reference`]) across the whole query — before any
+/// atom is evaluated.
 ///
-/// Hide-ns visibility (SPEC.md §7) is two separate things here, and this is
+/// `hide` visibility (SPEC.md §7) is two separate things here, and this is
 /// the only place both are assembled together: each atom is matched via
 /// [`Index::matching_ids_u32`], which is always *atom-local* — an atom
-/// never matches a hidden-namespace tag just because some other atom in
-/// this same query names that namespace. The query-wide `referenced` set
-/// computed below instead builds the *participation* [`Visibility`] used
-/// only for [`Index::participating_ids_u32`] — the universe `not`
-/// complements against, and what a universal query (`*`, `*:*`) resolves
-/// to. A positive atom match is always a subset of the participating set
-/// (an atom can only match a tag it's itself allowed to see, which is
-/// always at least as visible query-wide as it is atom-locally), so this
-/// split needs no extra intersection anywhere except at the final
-/// `materialize` call below.
+/// never matches a hidden tag just because some other atom in this same
+/// query references it. The query-wide reference sets computed below
+/// instead build the *participation* [`Visibility`] used only for
+/// [`Index::participating_ids_u32`] — the universe `not` complements
+/// against, and what a universal query (`*`, `*:*`) resolves to. A positive
+/// atom match is always a subset of the participating set (an atom can
+/// only match a tag it's itself allowed to see, which is always at least as
+/// visible query-wide as it is atom-locally), so this split needs no extra
+/// intersection anywhere except at the final `materialize` call below.
 ///
 /// # Errors
 ///
@@ -226,17 +225,16 @@ pub fn eval(postfix: &str, index: &Index) -> Result<Vec<String>, String> {
         });
     }
 
-    let referenced: BTreeSet<String> = toks
-        .iter()
-        .filter_map(|t| match t {
-            PfTok::Atom(a) => match &a.ns {
-                Some(Pos::Tok(n)) => Some(n.clone()),
-                _ => None,
-            },
-            _ => None,
-        })
-        .collect();
-    let participation_vis = index.visibility_for(referenced);
+    let mut referenced_ns: BTreeSet<String> = BTreeSet::new();
+    let mut referenced_exact: BTreeSet<(Option<String>, String)> = BTreeSet::new();
+    for t in &toks {
+        if let PfTok::Atom(a) = t {
+            let (ns_ref, exact_ref) = atom_reference(a);
+            referenced_ns.extend(ns_ref);
+            referenced_exact.extend(exact_ref);
+        }
+    }
+    let participation_vis = index.visibility_for(referenced_ns, referenced_exact);
 
     let mut stack: Vec<Frame> = Vec::new();
     for tok in toks {
@@ -566,7 +564,7 @@ mod tests {
         assert_eq!(difference(&[], &[1, 2]), Vec::<u32>::new());
     }
 
-    // --- hide-ns (SPEC.md §7): participation vs. per-atom matching --------
+    // --- hide (SPEC.md §7): participation vs. per-atom matching -----------
 
     #[test]
     fn not_complements_the_participating_set_not_every_item_ever_added() {

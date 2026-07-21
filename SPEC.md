@@ -238,112 +238,236 @@ served by scan until a value-level index earns its keep.
   yields a case-sensitive literal atom, in any case, unaffected by this
   rule.
 
-## 7. Self-hosted meta-configuration — `tagma.hide-ns`
+## 7. Self-hosted meta-configuration — `tagma.hide`
 
 tagma configures itself using its own tag model: reserved `tagma.*`
 namespaces carry meta-configuration tags, written and read exactly like
-ordinary tags. `hide-ns` is the first such feature: per-namespace visibility
-control over ordinary queries.
+ordinary tags. `hide` is the first such feature: pattern-based visibility
+control over ordinary queries, at `ns:key` granularity. **This section
+replaces the retired namespace-only `tagma.hide-ns` facet outright — it is
+a rename plus a generalization, not an addition alongside it.** See
+"Renamed from `hide-ns`" at the end of this section for the migration.
 
-**Config tag form.** `tagma.hide-ns:<ns>=<bool>` declares whether namespace
-`<ns>` — the tag's key — is hidden; `<bool>` is the literal token `true` or
-`false` (case-sensitive; any other value configures nothing, per §4's "no
-errors, no coercion surprises" style). `<ns>` is quoted (§2) when it needs to
-be, e.g. `tagma.hide-ns:"weird:ns"=true`.
+**Config tag form.** `tagma.hide:<target>=<bool>` declares whether the
+pattern encoded in `<target>` — the tag's own key — is hidden; `<bool>` is
+the literal token `true` or `false` (case-sensitive; any other value
+configures nothing, per §4's "no errors, no coercion surprises" style).
 
-**Config is stored as tags, and read back as tags.** hide-ns tags live in the
-ordinary tag store, never a separate structure; the hide configuration is
-*derived* at query time by reading `tagma.hide-ns:*` tags back out.
-Implementations may cache the derived result for query performance but must
-rebuild or invalidate it whenever a hide-ns tag is added. A hide-ns tag's
-effect is store-wide and unconditional — it need not be attached to any
-particular item, and once present it governs every subsequent query, not
-only ones that reference it. Because this reference core has no untag/delete
-operation, a namespace's hide-ns tags are append-only, so `<ns>` may end up
-with both a `=true` and a `=false` tag on record; on that conflict, hide wins
-(the fail-safe reading).
+**Target encoding — a first-colon split**, the same convention §8's
+`tagma.arity` target uses for its own `(namespace?, key)` pair: `<target>`
+is `<ns-pattern>:<key-pattern>` (quoted, §2, whenever it needs to be — e.g.
+`tagma.hide:"tagma:*"=true`, quoted because the target contains a literal
+`:`), or `<key-pattern>` alone, with no colon, for a pattern pinned to the
+**null namespace** (e.g. `tagma.hide:secret=true`). Recovering the pattern
+from `<target>` is not applied recursively: a `<key-pattern>` that itself
+contains a `:` is only reachable by quoting `<target>` at config-write time,
+and is indistinguishable from a namespace separator at read time — the same
+documented (not solved) limitation §8 already carries for its own target
+grammar. Similarly, a literal ns- or key-pattern spelled exactly `*` is only
+reachable by quoting (`bare-token`'s charset never admits `*`, §2), and is
+indistinguishable at read time from the wildcard token below — also
+documented, not solved.
 
-**Default.** tagma behaves as if an implicit `tagma.hide-ns:tagma=true` is
-always present: the entire `tagma.*` meta-family — including hide-ns's own
-config tags — is hidden by default. An explicit `tagma.hide-ns:tagma=false`
-un-hides it, store-wide.
+**The pattern grammar.** A hide pattern is `<ns-pattern>:<key-pattern>` (or
+bare `<key-pattern>` for the null namespace):
 
-**Prefix match is dot-delimited, in namespaces only.** Hiding namespace `N`
-hides `N` itself and every namespace `N.<anything>`, recursively — `.` is a
-genuine hierarchy separator between namespace path components, not a
-lexical prefix match:
+- **ns-pattern** matches a tag's namespace by **dot-subtree** — the same
+  relation the retired `hide-ns` facet used: `<ns-pattern>` covers a tag's
+  namespace `C` iff `C == <ns-pattern>` or `C` starts with `<ns-pattern>`
+  immediately followed by `.`. The literal token `*` as ns-pattern means
+  **any** namespace, named or null. A `<target>` with no colon pins the
+  pattern to the **null namespace only** — an exact match against "no
+  namespace," not a subtree match (the null namespace has no subtree to
+  recurse into).
+- **key-pattern** matches a tag's key **exactly**, or, spelled `*`, matches
+  **any** key.
 
-| hidden | covers | does not cover |
-|---|---|---|
-| `tagma` | `tagma`, `tagma.arity`, `tagma.hide-ns`, `tagma.arity.sub` | `tagmax`, `tagma-foo`, `tagmaZ` |
+A tag is **hidden** iff it matches at least one currently active hide
+pattern — the ns-side (subtree, null, or any) *and* the key-side (exact, or
+any) both satisfied. This subsumes the retired `hide-ns` facet exactly:
+`tagma.hide:"tagma:*"=true` hides the same set `tagma.hide-ns:tagma=true`
+did (the whole `tagma.*` family, every key). It adds two things `hide-ns`
+couldn't express: a **per-key** hide within one namespace
+(`tagma.hide:"triage:cwe"=true` hides only that one key, leaving sibling
+keys under `triage` untouched), and a **cross-namespace** per-key hide
+(`tagma.hide:"*:secret"=true` hides a key named `secret` under every
+namespace, including the null one). Value-level hiding is out of scope —
+`ns:key` is the finest grain this rework adds.
 
-Formally: namespace `C` is covered by hidden namespace `N` iff `C == N` or
-`C` starts with `N` immediately followed by `.`.
+| target | hides |
+|---|---|
+| `"tagma:*"` | `tagma.*` family, every key (the default; ≡ old `hide-ns:tagma=true`) |
+| `"triage:*"` | `triage.*` subtree, every key (≡ old `hide-ns:triage=true`) |
+| `"triage:cwe"` | only key `cwe` under `triage`'s subtree; `triage:type` stays visible |
+| `"*:secret"` | key `secret` under every namespace, named or null |
+| `secret` (no colon) | key `secret` **only** when the tag's namespace is null |
+| `*` (no colon) | every null-namespace tag, any key |
 
-**Visibility rule.** Visibility is decided in two separate steps that must
-not be conflated: whether an item *participates* in a query at all, and,
-independently, whether one particular *atom* is allowed to match one
-particular tag. Only the first is query-wide; the second is always local to
-the one atom doing the matching.
+**Config is stored as tags, and read back as tags**, exactly as `hide-ns`
+worked: hide tags live in the ordinary tag store, never a separate
+structure; the hide configuration is *derived* at query (or display) time by
+reading `tagma.hide:*` tags back out. Implementations may cache the derived
+result for query performance but must rebuild or invalidate it whenever a
+hide tag is added. A hide tag's effect is store-wide and unconditional — it
+need not be attached to any particular item, and once present it governs
+every subsequent query, not only ones that reference it. Because this
+reference core has no untag/delete operation, one `<target>` may end up with
+both a `=true` and a `=false` tag on record; on that conflict, **hide wins**
+(the fail-safe reading) — this reconciliation is per exact `<target>`
+string only. Two *different* targets that happen to overlap (e.g. a broad
+`"tagma:*"=true` and a narrower `"tagma:foo"=false`) are never reconciled by
+specificity: a tag is hidden if it matches **any** currently-active pattern,
+full stop — a narrower target explicitly un-hiding a subset that a broader
+target still hides does not carve out an exception. Nothing in this rework
+required specificity-based tie-breaking among *different* targets, so none
+was added; flagged here as a real modeling choice, not an oversight.
 
-- **The query's revealed set** is every namespace named by a concrete
-  (non-wildcard) token in *any* atom of the whole query, each revealing its
-  own dot-delimited subtree (the same relation as the hide prefix rule
-  above, applied in the opposite direction). A namespace wildcard atom
-  (`*:key`, `+:key`, bare `*`, `*:*`) names nothing and reveals nothing.
-- **A tag is query-visible** iff its namespace is not hidden, or is covered
-  by the query's revealed set.
+**Default.** tagma behaves as if an implicit `tagma.hide:"tagma:*"=true` is
+always present: the entire `tagma.*` meta-family — including `hide`'s own
+config tags — is hidden by default, at every key. An explicit
+`tagma.hide:"tagma:*"=false` un-hides it, store-wide.
+
+**Visibility rule.** Visibility is still decided in the two separate steps
+`hide-ns` established, unchanged in shape, generalized in grain: whether an
+item *participates* in a query at all (query-wide), and, independently,
+whether one particular *atom* is allowed to match one particular tag
+(always local to that one atom).
+
 - **Participation.** An item participates in a query iff it has at least
   one query-visible tag. An item with none does not appear in that query's
   result under any combination of operators — this is also the universe
   `not` complements against, not the raw set of every item ever added; a
   universal query (bare `*`, `*:*`) returns exactly the participating set.
-- **Matching is per-atom.** An atom matches a tag in a hidden namespace only
-  if *that atom itself* — not some other atom elsewhere in the query —
-  explicitly names the namespace (a concrete token, its own dot-subtree).
-  The query's revealed set governs participation only; it never makes a
-  hidden tag matchable by an atom that doesn't itself name it. So in
-  `tagma:foo or *:x`, the `*:x` clause never matches a `tagma.arity:x` tag,
-  even though the sibling `tagma:foo` clause names `tagma` — that naming
-  only affects whether an item carrying `tagma.arity:x` *participates* in
-  the query, never what `*:x` itself is allowed to match.
+- **Matching is per-atom.** An atom matches a hidden tag only if *that atom
+  itself* — not some other atom elsewhere in the query — references it
+  clearly enough to unhide it (see "Unhide-by-reference" immediately
+  below). The query's revealed set governs participation only; it never
+  makes a hidden tag matchable by an atom that doesn't itself reference it
+  clearly enough.
 
-| query | hidden-ns tag | participates? | matched by the non-naming atom? |
+**Unhide-by-reference — the rule this rework had to decide; flagged
+prominently for review before it reaches the Go/Python/JS ports.**
+`hide-ns` had one reveal primitive: naming a namespace concretely unhides
+its whole dot-subtree. Generalizing to `ns:key` hides raises a genuine
+question `hide-ns` never had to answer: does naming *just the namespace*
+(e.g. querying `triage:type`) unhide a *key-level* hide underneath it (e.g.
+one declared by `tagma.hide:"triage:cwe"=true`), even though the atom never
+names `cwe` at all?
+
+**Chosen rule: yes.** Naming the ns-subtree unhides everything under it —
+both ns-level and key-level hides alike; naming the exact `ns:key` pair
+*additionally* unhides a key-level hide even when there is no ns name to
+lean on at all (chiefly the null-namespace case, where there is no
+namespace token to name). Formally, a query/atom *references* two things:
+
+- **ns-reference**: the concrete (non-wildcard) namespace token an atom
+  itself names, if any — exactly `hide-ns`'s own reveal primitive,
+  unchanged. A namespace quantifier (`*:key`, `+:key`) never contributes
+  one.
+- **exact-reference**: the `(namespace, key)` pair an atom itself names,
+  when *both* its namespace clause (a concrete token, or absent/null) *and*
+  its key clause (a concrete token, never `*`/`+`) are pinned down. A
+  namespace or key quantifier never contributes one.
+
+A hidden tag `(ns, key)` is **unhidden by reference** `R` iff `ns`'s
+dot-subtree is covered by some namespace `R` names, **or** `(ns, key)`
+exactly is one of `R`'s exact-references. Participation's `R` is the union
+of every atom's own references across the whole query; one atom's own
+matching uses only its own references, never a sibling's (unchanged from
+`hide-ns`).
+
+*Edge case, confirmed deliberately*: `triage:type` (an atom naming only ns
+`triage`, key `type`) **does** unhide a `triage:cwe`-level hide — same
+ns-subtree, different key — because naming the ns is enough on its own; the
+atom does not additionally have to name `cwe`. This was chosen over the
+alternative — "a key-level hide is only unhidden by referencing that ns
+*or* that exact key" reads the same on paper, but would have made naming
+`triage` alone *insufficient* to reveal a `triage:cwe` hide, which is not
+what was chosen — for three reasons:
+
+1. It is a strict, additive generalization of `hide-ns`'s existing mental
+   model ("naming a namespace reveals its whole subtree") rather than a new,
+   second, narrower reveal concept a caller must learn alongside it. A
+   two-tier *hide* (ns-level, key-level) paired with a *one-tier* reveal
+   (ns-subtree, plus the exact-pair only where there is no ns to name at
+   all) is simpler to hold in mind than a two-tier hide paired with a
+   matching two-tier reveal.
+2. It keeps `not`/participation reasoning identical in shape to `hide-ns`'s
+   own worked table below — only the grain of what counts as "hidden"
+   changed, not the shape of what counts as "revealed."
+3. The exact-reference clause exists only to cover ground the ns-reference
+   clause structurally cannot reach (the null namespace has no subtree to
+   name) — not to compete with or narrow it for named namespaces.
+
+| query atom | hidden tag | participates? | matched by *this* atom? |
 |---|---|---|---|
-| `tagma.arity:*` | `tagma.arity:x=1` | yes | yes — the atom names it itself |
-| `urgent` | `tagma.arity:x=1` (item's only tag) | no | — (item never appears) |
-| `*:*` / bare `*` | any hidden-ns tag | no | — (wildcards reveal nothing) |
-| `tagma:foo or *:x=1` | `tagma.arity:x=1` | yes (revealed by `tagma:foo`) | no — `*:x=1` doesn't name `tagma.arity` |
+| `triage:*` | `triage:cwe=79` (key-level hide, `"triage:cwe"=true`) | yes — ns-reference `triage` | yes — the atom names `triage`, key wildcarded |
+| `urgent` | `triage:cwe=79` (item's only tag) | no | — (item never appears) |
+| `*:*` / bare `*` | any hidden tag | no | — (quantifiers reveal nothing) |
+| `triage:foo or *:x=1` | `triage:x=1` (hidden via `"triage:*"=true`) | yes (revealed by `triage:foo`'s ns-reference) | no — `*:x=1` never itself names `triage` |
+| `secret` (null ns) | `secret=shh` (hidden via bare `secret=true`) | yes — exact-reference `(None, "secret")` | yes |
+| `triage:type` | `triage:cwe=79` (hidden via `"triage:cwe"=true`) | yes — ns-reference `triage` covers the whole subtree, key-level hides included | n/a — `triage:type`'s own key clause is `type`, so it was never going to match a `cwe`-keyed tag regardless of hide; this row exists to confirm `triage:cwe=79` still counts toward *participation* |
 
-An item whose only tags fall in a hidden, unreferenced namespace therefore
+An item whose only tags fall in a hidden, unreferenced pattern therefore
 never appears in that query's results, in any position — not an error, just
 an empty visible tag set, and (since it doesn't participate) excluded from
-what `not` complements against too. Mental model: a hidden namespace is a
-dotfile — invisible to a bare `ls` (any unreferencing query, universal
-included), visible to `ls -a` (participation) only for whichever `ls -a`
-invocation actually names it (matching) — a sibling command naming it
-elsewhere doesn't retroactively make *this* `ls` show it.
+what `not` complements against too. The "dotfile" mental model from
+`hide-ns` still applies unchanged: a hidden namespace or key is invisible to
+a bare `ls`, visible to `ls -a` only for whichever `ls -a` invocation
+actually references it clearly enough — a sibling command referencing it
+elsewhere doesn't retroactively make *this* one show it.
 
-- A namespace wildcard atom (`*:key`, `+:key`, bare `*`, `*:*`) never
-  reveals a namespace, for participation or for its own matching —
-  wildcards only ever hide.
+- A namespace or key quantifier atom never contributes a reference, for
+  participation or for its own matching — quantifiers only ever hide (by
+  matching a hide pattern's own `*`), never reveal.
 - The store-wide default/override from **Default** above always applies
   first, to both participation and matching; per-query revealing is a
-  second, additive way a namespace becomes visible, but strictly for
-  participation (and for the naming atom's own matching) — it never
+  second, additive way a tag becomes visible, but strictly for
+  participation (and for the referencing atom's own matching) — it never
   extends to any other atom's matching in the same query.
 
-**`.` is a separator in namespaces, not in keys.** In a namespace, `.` is
-the dot-delimited hierarchy separator the prefix rule above uses. In a key,
-`.` is an ordinary token character — already legal in `bare-token`'s
-charset (§2), and often used by convention to suggest hierarchy (`a.b.c` as
-a key) — to which tagma applies no splitting semantics: a key is compared
-only for exact equality (§3-4), opaque end to end. This is a deliberate
-asymmetry: namespaces get real hierarchy semantics via hide-ns; keys do
-not. The tokenizer itself is unchanged — `.` remains lexically an ordinary
-bare-token character in both positions; the separator meaning is purely
-semantic, applied only by hide-ns's prefix matching, never by the lexer or
-by key comparison.
+**`.` is a separator in namespaces, not in keys.** Unchanged from `hide-ns`:
+in a namespace, `.` is the dot-delimited hierarchy separator the ns-pattern
+prefix rule uses; in a key, `.` is an ordinary token character, opaque end
+to end, compared only for exact equality (§3-4). This asymmetry is
+unaffected by generalizing to per-key hides: a hide pattern's key-pattern is
+still either exact or `*`, never itself dot-subtree matched. The tokenizer
+itself is unchanged — `.` remains lexically an ordinary bare-token
+character in both positions; the separator meaning is purely semantic,
+applied only by the ns-pattern's prefix matching, never by the lexer or by
+key comparison.
+
+**Display predicate — for filtering outside any query.** The visibility
+rule above (hide + unhide-by-reference) is inherently query-shaped:
+"unhide-by-reference" only makes sense relative to a query that might
+reference something. A consumer that just wants to filter an item's tags
+for **display** — e.g. rendering a task's tag list, independent of any
+search — has no query to reference anything with, so this rework adds a
+second, simpler predicate alongside the query-time rule rather than fitting
+display awkwardly into it.
+
+**A tag is display-hidden iff it matches at least one currently active hide
+pattern — full stop, no unhide-by-reference.** This is deliberately *more*
+conservative than query-time visibility: a tag a query could reveal by
+naming it is still display-hidden, because display filtering has no query
+naming anything. The reference implementation exposes this as a pure
+function over a tag and a derived hide-pattern set, so a caller (e.g. a
+downstream consumer filtering a task's tags for display) can ask the
+question without running a query at all. See the Rust reference's
+`tag_hidden`/`HideConfig` (crate `tagma-core`) for the exact public shape;
+the Go/Python/JS ports mirror it in their own idiom as a separate, later
+task.
+
+**Renamed from `hide-ns`.** This section replaces the namespace-only
+`tagma.hide-ns:<ns>=<bool>` facet outright — it is not additive, and this is
+an intentional breaking config change: a store carrying `tagma.hide-ns:*`
+config tags must be re-written as `tagma.hide:*` ones (a
+`tagma.hide-ns:<ns>=<bool>` tag becomes `tagma.hide:"<ns>:*"=<bool>`); the
+old facet's tags are not read by the new one — they are now just ordinary
+(if invisible-by-default, since they live under `tagma.*`) tags with no
+special meaning. tagma's stated posture is to break old users rather than
+carry a legacy reading (no backward-compat shims); re-init is the
+documented upgrade path.
 
 ## 8. Self-hosted meta-configuration — `tagma.arity`
 
@@ -351,7 +475,7 @@ tagma configures itself using its own tag model (§7): `arity` is the second
 self-hosted meta-feature, declaring how many values a given target key may
 hold per item. Its config tags live in namespace `tagma.arity`, itself under
 the `tagma` family, so they are hidden by §7's default with no
-special-casing required — like hide-ns, arity config is *derived* by reading
+special-casing required — like `hide`, arity config is *derived* by reading
 `tagma.arity:*` tags directly back out of the store, bypassing the
 query-time hide.
 
@@ -359,7 +483,7 @@ query-time hide.
 the target key encoded in `<target>` — the config tag's own key, not its
 value. `<arity>` is the literal token `scalar` or `set` (case-sensitive; any
 other value configures nothing, per §4's "no errors, no coercion surprises"
-style, mirroring hide-ns's `<bool>` handling in §7).
+style, mirroring `hide`'s `<bool>` handling in §7).
 
 **Target encoding — a first-colon split.** `<target>` packs the target
 `(namespace?, key)` pair into one string, quoted (§2) whenever it needs to
@@ -403,10 +527,10 @@ declaration governs writes that happen after tagma has that declaration on
 record. Retroactively collapsing values that were already written under the
 old (`set`, or undeclared) reading before the `scalar` declaration landed is
 out of scope for this reference core — deferred, the same posture as
-hide-ns's append-only config (§7).
+`hide`'s append-only config (§7).
 
 **Conflicting declarations.** Because this reference core has no
 untag/delete operation, a target key's arity config is append-only, so
 `<target>` may end up with both a `=scalar` and a `=set` tag on record; on
-that conflict, `scalar` wins — the same fail-safe posture as hide-ns's
+that conflict, `scalar` wins — the same fail-safe posture as `hide`'s
 hide-wins rule (§7), the more restrictive reading taking precedence.

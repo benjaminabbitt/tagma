@@ -10,5 +10,5 @@ pub mod tag;
 pub mod token;
 
 pub use atom::{Atom, Op, Pos};
-pub use index::Index;
+pub use index::{tag_hidden, HideConfig, Index};
 pub use tag::Tag;
