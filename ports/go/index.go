@@ -253,13 +253,16 @@ func (idx *Index) QueryPostfix(postfix string) ([]string, error) {
 
 // queryWideNamespaceReferences returns the union of every atom's own
 // namespace reference (atomNsReference) across all of elems, skipping the
-// "and"/"or"/"not" operator tokens: the query-wide *participation* set
-// (SPEC.md §7), never fed back into any individual atom's matching (see
-// resolveAtom, which builds its own atom-local reference instead).
+// "and"/"or"/"not" operator tokens (matched case-insensitively, SPEC.md §2
+// — a quoted token, e.g. `"and"`, still carries its quotes here, so it
+// never collides and is always treated as an atom instead): the query-wide
+// *participation* set (SPEC.md §7), never fed back into any individual
+// atom's matching (see resolveAtom, which builds its own atom-local
+// reference instead).
 func queryWideNamespaceReferences(elems []string) (map[string]struct{}, error) {
 	referenced := map[string]struct{}{}
 	for _, e := range elems {
-		switch e {
+		switch strings.ToLower(e) {
 		case "and", "or", "not":
 			continue
 		}

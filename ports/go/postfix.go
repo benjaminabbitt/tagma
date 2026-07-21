@@ -73,15 +73,27 @@ func splitPostfix(postfix string) ([]string, error) {
 	return parts, nil
 }
 
-// evalPostfix runs the postfix stack VM (PLAN.md §7.4) over elems.
-// "and"/"or" pop two operand sets and push their intersection/union;
-// "not" pops one and pushes its complement over universe; anything else is
-// an atom, resolved to a match set via resolve. Stack underflow or a final
-// stack size != 1 is an error.
+// evalPostfix runs the postfix stack VM (PLAN.md §7.4; SPEC.md §5) over
+// elems. "and"/"or" match case-insensitively (SPEC.md §2: reserved words
+// match in any case) and pop two operand sets, pushing their
+// intersection/union; a quoted token (e.g. `"and"`) still carries its
+// quotes here, so it never collides and always falls through to resolve as
+// a literal atom — quoting escapes operator-hood. "not" (also
+// case-insensitive) pops one and pushes its complement over universe;
+// anything else is an atom, resolved to a match set via resolve. Stack
+// underflow is still an error.
+//
+// A stack holding more than one set once every element is consumed is no
+// longer an error (SPEC.md §5): the leftover sets fold together with
+// "and" (intersect), left-associatively in stack order (bottom to top) —
+// "a/b/c" evaluates as "(a and b) and c". A single leftover set is
+// unchanged. (An empty elems is rejected earlier by splitPostfix, and no
+// successful and/or/not application can ever bring a non-empty stack back
+// down to zero, so stack is always non-empty here.)
 func evalPostfix(elems []string, universe idSet, resolve func(atomText string) (idSet, error)) (idSet, error) {
 	var stack []idSet
 	for _, e := range elems {
-		switch e {
+		switch lower := strings.ToLower(e); lower {
 		case "and", "or":
 			if len(stack) < 2 {
 				return nil, fmt.Errorf("tagma: postfix stack underflow at %q", e)
@@ -89,7 +101,7 @@ func evalPostfix(elems []string, universe idSet, resolve func(atomText string) (
 			b := stack[len(stack)-1]
 			a := stack[len(stack)-2]
 			stack = stack[:len(stack)-2]
-			if e == "and" {
+			if lower == "and" {
 				stack = append(stack, a.intersect(b))
 			} else {
 				stack = append(stack, a.union(b))
@@ -111,8 +123,12 @@ func evalPostfix(elems []string, universe idSet, resolve func(atomText string) (
 			stack = append(stack, set)
 		}
 	}
-	if len(stack) != 1 {
-		return nil, fmt.Errorf("tagma: postfix left %d values on the stack, want 1", len(stack))
+	if len(stack) == 0 {
+		return nil, fmt.Errorf("tagma: postfix stack underflow: no operand produced")
 	}
-	return stack[0], nil
+	result := stack[0]
+	for _, s := range stack[1:] {
+		result = result.intersect(s)
+	}
+	return result, nil
 }

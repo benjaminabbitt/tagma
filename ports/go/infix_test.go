@@ -19,6 +19,10 @@ func TestCompile(t *testing.T) {
 		{"*:lang=en and not status=done", "*:lang=en/status=done/not/and"},
 		{"*", "*"},
 		{"and=*", "and=*"},
+		// --- lenient grammar (SPEC.md §2, feat/lenient-query) -----------
+		{"urgent AND range>4", "urgent/range>4/and"}, // case-insensitive operators
+		{"a b", "a/b/and"},                           // juxtaposition means "and"
+		{"a b c", "a/b/and/c/and"},                   // juxtaposition is left-associative
 	}
 	for _, c := range cases {
 		t.Run(c.infix, func(t *testing.T) {
@@ -34,9 +38,14 @@ func TestCompile(t *testing.T) {
 }
 
 // TestCompileFailures transcribes PLAN.md Appendix B.3.
+//
+// FLIPPED 2026-07-20 (feat/lenient-query): "a b" used to be in this list —
+// juxtaposition (SPEC.md §2) now compiles it as "a and b" instead of
+// rejecting it (see TestCompile's "a b" case, mirroring the Rust
+// reference's compile.rs test split).
 func TestCompileFailures(t *testing.T) {
 	cases := []string{
-		"a and", "and a", "(a", "a )", "a b", "a & b", "not", "a=* or",
+		"a and", "and a", "(a", "a )", "a & b", "not", "a=* or",
 	}
 	for _, in := range cases {
 		t.Run(in, func(t *testing.T) {
