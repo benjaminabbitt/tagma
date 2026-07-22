@@ -7,6 +7,38 @@
 //! `Error`s carrying the core's `String` message. This crate is built with
 //! wasm-bindgen but, per PLAN.md W1, must also compile cleanly for native
 //! targets (the shared workspace runs `cargo clippy/test --workspace`).
+//!
+//! # Panic freedom (enforced — task oily-wheat)
+//!
+//! `wasm32-unknown-unknown` builds with `panic = "abort"`, so the
+//! `catch_unwind` backstop that protects `tagma-ffi` is *inert* here: a
+//! panic anywhere in this crate aborts the WebAssembly instance, with no
+//! catchable exception and no error return for the host JS to act on. This
+//! crate's guarantee can therefore only ever be "never panics", not
+//! "catches panics".
+//!
+//! The `deny`s below are what make that a checked property rather than a
+//! promise: every construct that can panic — `unwrap`, `expect`, `panic!`,
+//! `unreachable!`, `todo!`, `unimplemented!`, indexing, and string slicing —
+//! is a hard error in this crate. Errors must be returned as
+//! `Result<_, JsValue>` and surface in JS as a thrown `Error`.
+//!
+//! Enforced by `just lint-wasm` (part of `just check`), which passes the
+//! same denials on the command line so the gate survives even if these
+//! attributes are removed, and again by the workspace-wide `just lint`
+//! through the attributes themselves. If a future test module needs
+//! `unwrap`, put `#[allow(clippy::unwrap_used)]` on that module alone —
+//! never widen the crate-level deny, which is the whole gate.
+#![deny(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    clippy::indexing_slicing,
+    clippy::string_slice
+)]
 
 use tagma_core::tag::Tag;
 use wasm_bindgen::prelude::*;
