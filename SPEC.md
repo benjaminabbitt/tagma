@@ -581,8 +581,17 @@ Per-port renderings of the same four-valued type:
 
 **Contract.** A `TypeComparator` implementation MUST be **pure and
 deterministic** (the same pair always yields the same result) and MUST
-**NOT panic** — tagma-core cannot safely guard a foreign callback against
-unwinding, so a panicking comparator's behavior is implementation-defined.
+**NOT panic** (or, in a host language, raise across the registration
+boundary) — an implementation does not guard each individual comparator
+call, so a panicking comparator's effect on the *result* of the query it
+interrupts is implementation-defined. It must never, however, be undefined
+behavior: an implementation that exposes comparator registration across a
+foreign-function boundary MUST contain the unwind at that boundary and
+report it through its ordinary error channel rather than letting it escape
+into the host's frames. The C ABI does this for every entry point (see
+"Panic safety" in `include/tagma.h`), which is what makes registering a
+host comparator through it safe to specify at all.
+
 For every pair of values it does *not* return `NotComparable` for, an
 implementation MUST satisfy the standard ordering-relation properties:
 
@@ -642,7 +651,7 @@ fail an evaluation instead of simply not matching:
 | declared type name has no registered comparator | ignore the declaration, fall back to §6 numeric grammar |
 | comparator returns `NotComparable` | atom does not match that tag |
 | conflicting declarations on the target | fall back to §6 numeric grammar |
-| comparator panics | contract violation (see Contract above); behavior implementation-defined |
+| comparator panics | contract violation (see Contract above); query result implementation-defined, but never undefined behavior — an FFI boundary MUST contain the unwind and surface it as an error |
 
 **Precedence — an explicit declaration trumps the numeric grammar.** When
 a relational operator (`>` `>=` `<` `<=`) compares a tag's value against

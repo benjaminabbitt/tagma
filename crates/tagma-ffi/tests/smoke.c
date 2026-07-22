@@ -34,6 +34,48 @@ int main(void) {
     assert(strlen(err) > 0);
     tagma_str_free(err);
 
+    /* Panic safety (task tasty-snub): caller-controlled invalid input must
+     * produce a defined error return, not a Rust panic unwinding across the
+     * ABI. Non-UTF-8 bytes are the case any C caller can trigger today; if
+     * this ever regresses the process aborts here rather than asserting. */
+    const char *not_utf8 = "a\xff\xfe" "b";
+
+    assert(tagma_index_add(idx, not_utf8) == -1);
+    assert(tagma_query(idx, not_utf8) == NULL);
+    assert(tagma_query_postfix(idx, not_utf8) == NULL);
+    assert(tagma_compile(not_utf8) == NULL);
+
+    char *utf8_err = tagma_last_error();
+    assert(utf8_err != NULL);
+    assert(strstr(utf8_err, "UTF-8") != NULL);
+    tagma_str_free(utf8_err);
+
+    /* Null pointers and null handles, at the ABI rather than in Rust tests. */
+    assert(tagma_index_add(idx, NULL) == -1);
+    assert(tagma_query(idx, NULL) == NULL);
+    assert(tagma_query_postfix(idx, NULL) == NULL);
+    assert(tagma_compile(NULL) == NULL);
+    assert(tagma_index_add(NULL, "a urgent") == -1);
+    assert(tagma_query(NULL, "urgent") == NULL);
+    assert(tagma_query_postfix(NULL, "urgent") == NULL);
+    tagma_index_free(NULL);
+    tagma_str_free(NULL);
+
+    /* An interior NUL cannot reach the library through a C string at all --
+     * the argument simply ends early -- so this is a well-formed short query,
+     * not an error. The interior-NUL hazard is on the way out, covered by the
+     * Rust unit tests over to_c_string. */
+    char *truncated = tagma_compile("a or b\0 and c");
+    assert(truncated != NULL);
+    assert(strcmp(truncated, "a/b/or") == 0);
+    tagma_str_free(truncated);
+
+    /* The index is still usable after all of the above. */
+    char *still_good = tagma_query(idx, "note");
+    assert(still_good != NULL);
+    assert(strcmp(still_good, "c") == 0);
+    tagma_str_free(still_good);
+
     tagma_index_free(idx);
 
     return 0;
