@@ -2,13 +2,12 @@
  *
  * Panic safety
  * ------------
- * No function declared here can unwind a Rust panic into your frames.
- * Letting a panic escape an `extern "C"` function is undefined behaviour, so
- * every entry point catches one at the boundary and reports it as an
- * ordinary failure: -1 for the int-returning functions, NULL for the
- * pointer-returning ones, with a message retrievable from
- * tagma_last_error() prefixed `ffi: panic in <function>:`. No entry point
- * calls abort() on a caller mistake.
+ * No function declared here can unwind a Rust panic into your frames, and
+ * none of them can abort your process because of one. Every entry point
+ * catches a panic at the boundary and reports it as an ordinary failure:
+ * -1 for the int-returning functions, NULL for the pointer-returning ones,
+ * with a message retrievable from tagma_last_error() prefixed
+ * `ffi: panic in <function>:`.
  *
  * Invalid input is a defined error, not a panic and not undefined
  * behaviour. A null string pointer, a null or missing index handle, bytes

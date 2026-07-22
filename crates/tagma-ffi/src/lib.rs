@@ -7,8 +7,13 @@
 //!
 //! # Panic safety
 //!
-//! Letting a Rust panic unwind out of an `extern "C"` function is undefined
-//! behaviour. Every entry point in this crate is therefore wrapped in
+//! A Rust panic must never reach an `extern "C"` boundary. Historically it
+//! was undefined behaviour; since Rust 1.81 the compiler inserts an
+//! abort-on-unwind shim, so today it instead kills the host process. Either
+//! way it is unacceptable in a library: a caller has no way to recover, and
+//! a panic reachable from caller-controlled input is a denial of service.
+//!
+//! Every entry point in this crate is therefore wrapped in
 //! [`std::panic::catch_unwind`] (see [`guard`]): a panic that reaches the
 //! ABI boundary is converted into that function's ordinary failure value
 //! (`-1`, or `NULL` for the string-returning ones) with the panic message
