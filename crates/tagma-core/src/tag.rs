@@ -50,14 +50,14 @@ impl Tag {
         };
 
         let namespace = match ns_part {
-            Some(ns) => Some(parse_component(ns, false)?),
+            Some(ns) => Some(parse_component(ns)?),
             None => None,
         };
 
-        let key = parse_component(key_part, false)?;
+        let key = parse_component(key_part)?;
 
         let value = match value_part {
-            Some(v) => Some(parse_component(v, true)?),
+            Some(v) => Some(parse_component(v)?),
             None => None,
         };
 
@@ -103,6 +103,25 @@ mod tests {
     }
 
     #[test]
+    fn signed_tokens_are_ordinary_tokens_in_every_position() {
+        // SPEC.md §2: both signs are in the bare-token charset, so a
+        // leading "-" is no longer special-cased into the value position
+        // alone. "-key" used to be a parse error and is now an ordinary
+        // key — a strictly newly-accepted input, nothing that parsed
+        // before changes.
+        assert_eq!(Tag::parse("-key"), Ok(t(None, "-key", None)));
+        assert_eq!(Tag::parse("+key"), Ok(t(None, "+key", None)));
+        assert_eq!(
+            Tag::parse("version=1.0.0+build.5"),
+            Ok(t(None, "version", Some("1.0.0+build.5")))
+        );
+        assert_eq!(Tag::parse("k=+1"), Ok(t(None, "k", Some("+1"))));
+        // A WHOLE-token quantifier is still not a write-side value.
+        assert!(Tag::parse("k=+").is_err());
+        assert!(Tag::parse("k=*").is_err());
+    }
+
+    #[test]
     fn invalid_tags() {
         for s in [
             "=5",
@@ -112,7 +131,6 @@ mod tests {
             "*",
             "ns:*=5",
             "key=+",
-            "-key",
             ".key",
             "a b",
             "a=b=c",

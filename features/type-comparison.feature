@@ -64,6 +64,31 @@ Feature: Client-loadable type comparison — tagma.type
     When the query 'v<="1.0.0+a"' is run
     Then it matches exactly "a b"
 
+  Scenario: build metadata is ignored in precedence, written UNQUOTED
+    The point of admitting `+` inside a bare token (SPEC.md §2): SemVer
+    2.0.0 §10 REQUIRES `+` for build metadata, so a `semver`-typed target
+    that could only be fed the quoted spelling was broken from the user's
+    side. Both values below are written and queried bare, and the §10
+    "build metadata is ignored when determining version precedence" rule
+    puts `1.0.0+build.5` and `1.0.0` at exactly the same rank.
+    Given an item "cfg" tagged "tagma.type:v=semver"
+    Given an item "a" tagged "v=1.0.0+build.5"
+    Given an item "b" tagged "v=1.0.0"
+    When the query "v>=1.0.0+build.5" is run
+    Then it matches exactly "a b"
+    When the query "v<=1.0.0+build.5" is run
+    Then it matches exactly "a b"
+    When the query "v>=1.0.0" is run
+    Then it matches exactly "a b"
+    When the query "v<=1.0.0" is run
+    Then it matches exactly "a b"
+    When the query "v>1.0.0" is run
+    Then it matches exactly ""
+    When the query "v<1.0.0" is run
+    Then it matches exactly ""
+    When the query "v>1.0.0-rc.1+build.5" is run
+    Then it matches exactly "a b"
+
   Scenario: an unregistered type name still orders numeral values via the plain numeric grammar
     Given an item "cfg" tagged "tagma.type:n=nonexistent-type"
     Given an item "a" tagged "n=3"

@@ -94,6 +94,22 @@ lint-wasm:
 test:
     cargo test --workspace
 
+# Go-port unit tests (ports/go/*_test.go). `conformance-go` runs only
+# -run TestConformance, and `test` above runs only the cargo workspace, so
+# without this recipe the port's own unit tests — the ones that pin
+# port-local details the shared features can't express, e.g. parse-error
+# wording — are never executed by any runner, and ltk redirects a bare
+# `go test` here. -count=1 for the same reason conformance-go uses it.
+test-go:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ ! -d ports/go ]; then
+        echo "SKIP: ports/go not yet built"
+        exit 0
+    fi
+    cd ports/go
+    go test -count=1 ./...
+
 # --- conformance ---------------------------------------------------------
 
 # Fan out to every conformance-* harness whose artifact currently exists;

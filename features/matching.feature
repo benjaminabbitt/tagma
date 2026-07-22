@@ -245,3 +245,112 @@ Feature: Postfix query matching
     Then it matches exactly "h"
     When the query "urgent" is run
     Then it matches exactly "a c h"
+
+  Scenario: a "+"-containing value is one bare token, queryable unquoted
+    `+` is a quantifier only as a WHOLE token (SPEC.md §2), so
+    `1.0.0+build.5` lexes as a single bare value token — no quotes needed
+    to write it, and none needed to match it exactly. The `~` pattern
+    below shows `+` is literal content there too (only `.` is special);
+    the postfix run shows the wire form is unaffected.
+    Given an item "v1" tagged "version=1.0.0+build.5"
+    Given an item "v2" tagged "version=1.0.0"
+    When the query "version=1.0.0+build.5" is run
+    Then it matches exactly "v1"
+    When the query "version!=1.0.0+build.5" is run
+    Then it matches exactly "v2"
+    When the query "version~1.0.0+build.." is run
+    Then it matches exactly "v1"
+    When the postfix query "version=1.0.0+build.5" is run
+    Then it matches exactly "v1"
+
+  Scenario: a bare "+"-containing value round-trips through the quoted spelling
+    Quoting is syntax, not data (SPEC.md §2): now that the bare charset
+    admits `+`, the quoted and unquoted spellings of the same value are
+    the same tag, and either query form finds either spelling.
+    Given an item "v1" tagged "version=1.0.0+build.5"
+    Given an item "v2" tagged 'version="1.0.0+build.5"'
+    When the query "version=1.0.0+build.5" is run
+    Then it matches exactly "v1 v2"
+    When the query 'version="1.0.0+build.5"' is run
+    Then it matches exactly "v1 v2"
+
+  Scenario: a lone "+" is still the quantifier in every position it is legal in
+    The rule is whole-token-scoped: admitting `+` into the bare charset
+    leaves the quantifier readings of a standalone `+` — namespace
+    (any named), key (any), value (present) — exactly as they were.
+    When the query "+" is run
+    Then it matches exactly "a b c"
+    When the query "+:+" is run
+    Then it matches exactly "a b"
+    When the query "+:+=+" is run
+    Then it matches exactly "a"
+    When the query "range=+" is run
+    Then it matches exactly "a b"
+    Given an item "v1" tagged "version=1.0.0+build.5"
+    When the query "version=+" is run
+    Then it matches exactly "v1"
+
+  Scenario: a signed numeral lexes AND compares as a numeral
+    SPEC.md §2 puts both signs in the bare-token charset and §6's numeral
+    grammar carries the same pair, so `+1` is not merely writable — it
+    orders. A value that lexed as a numeral but failed to compare as one
+    would be a silent no-match, the failure class this rule exists to
+    remove. `=` stays string equality, so `k=+1` and `k=1` remain distinct
+    tags even though both answer `k>=1` — the same asymmetry `-0` and `0`
+    already have.
+    Given an item "p" tagged "k=+1"
+    Given an item "q" tagged "k=1"
+    Given an item "r" tagged "z=-0"
+    Given an item "s" tagged "z=0"
+    When the query "k>=1" is run
+    Then it matches exactly "p q"
+    When the query "k<=1" is run
+    Then it matches exactly "p q"
+    When the query "k>0" is run
+    Then it matches exactly "p q"
+    When the query "k>1" is run
+    Then it matches exactly ""
+    When the query "k=1" is run
+    Then it matches exactly "q"
+    When the query "k=+1" is run
+    Then it matches exactly "p"
+    When the query "z=0" is run
+    Then it matches exactly "s"
+    When the query "z>=0" is run
+    Then it matches exactly "r s"
+    When the query "z<=0" is run
+    Then it matches exactly "r s"
+
+  Scenario: a quoted signed numeral compares as a numeral, exactly like the bare spelling
+    Quoting escapes the CHARSET, not the value: `k="+1"` and `k=+1` both
+    store the value `+1`, so both must order identically. This scenario
+    pins a DELIBERATE behaviour change. Before signs entered §6's numeral
+    grammar, `k="+1"` was the only way to write a leading `+`. It parsed,
+    yet silently matched no relational operator, because §6 accepted only
+    a leading `-`. That was the silent-no-match failure this rule
+    removes, so the change is a fix rather than a regression; it is pinned
+    here because no fixture previously exercised either behaviour.
+    Given an item "qp" tagged 'k="+1"'
+    Given an item "bp" tagged "k=+1"
+    Given an item "one" tagged "k=1"
+    When the query "k>=1" is run
+    Then it matches exactly "bp one qp"
+    When the query "k<=1" is run
+    Then it matches exactly "bp one qp"
+    When the query "k=+1" is run
+    Then it matches exactly "bp qp"
+    When the query 'k="+1"' is run
+    Then it matches exactly "bp qp"
+
+
+  Scenario: a leading sign needs no special case in any of the three positions
+    `value-token`'s old `("-"? bare-token)` patch is gone (SPEC.md §2), so
+    a sign is an ordinary token character in the namespace and key
+    positions too, on the tag side and the query side alike.
+    Given an item "t" tagged "-ns:+key=-1"
+    When the query "-ns:+key=-1" is run
+    Then it matches exactly "t"
+    When the query "-ns:+key" is run
+    Then it matches exactly "t"
+    When the query "+:+key=+" is run
+    Then it matches exactly "t"

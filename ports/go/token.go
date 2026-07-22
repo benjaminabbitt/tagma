@@ -7,20 +7,54 @@ import (
 	"unicode/utf8"
 )
 
-// isTokenStart reports whether b may start a token: [A-Za-z0-9_].
-func isTokenStart(b byte) bool {
-	return (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') || b == '_'
-}
-
-// isTokenRest reports whether b may continue a token: [A-Za-z0-9_.-].
-func isTokenRest(b byte) bool {
-	return isTokenStart(b) || b == '.' || b == '-'
-}
-
-// isToken reports whether s matches the grammar's token production:
+// isTokenChar reports whether b is in the bare-token charset, minus the
+// continuation-only '.': [A-Za-z0-9_+-].
 //
-//	token ::= [A-Za-z0-9_] [A-Za-z0-9_.-]*
+// '*' is deliberately absent: unlike '+', it has no must-have literal use,
+// and `k=v*` written in the hope of a prefix match is better met with a
+// loud parse error than with a literal that silently matches nothing
+// (SPEC.md §2). That is a UX judgement, not a grammar one — the
+// whole-token quantifier rule below already keeps a lone '*' unambiguous —
+// so admitting it later is exactly this one line: add `|| b == '*'`.
+func isTokenChar(b byte) bool {
+	return (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') ||
+		b == '_' || b == '-' || b == '+'
+}
+
+// isTokenStart reports whether b may start a token: [A-Za-z0-9_+-].
+func isTokenStart(b byte) bool {
+	return isTokenChar(b)
+}
+
+// isTokenRest reports whether b may continue a token: [A-Za-z0-9_.+-].
+func isTokenRest(b byte) bool {
+	return isTokenChar(b) || b == '.'
+}
+
+// isQuantifier reports whether s is one of the whole-token quantifiers "*"
+// (any-or-absent) or "+" (any-but-present) — the sole reason a string
+// otherwise inside the bare charset is not a bare-token (SPEC.md §2).
+func isQuantifier(s string) bool {
+	return s == "*" || s == "+"
+}
+
+// isToken reports whether s matches the grammar's bare-token production:
+//
+//	bare-token ::= ( [A-Za-z0-9_+-] [A-Za-z0-9_.+-]* ) - ( "*" | "+" )
+//
+// Both signs are ordinary token characters in every position, so "-1",
+// "+1", "a-b" and "1.0.0+build.5" (SemVer 2.0.0 §10 build metadata) are all
+// single bare tokens. The one carve-out is the quantifier rule: '*' and '+'
+// are quantifiers when, and only when, they constitute the ENTIRE token.
+// '.' remains continuation-only.
+//
+// This one predicate serves token and value-token alike — value-token's old
+// ("-"? bare-token) patch existed purely to re-admit a leading '-', and has
+// no job now that the charset carries both signs itself.
 func isToken(s string) bool {
+	if isQuantifier(s) {
+		return false
+	}
 	if len(s) == 0 || !isTokenStart(s[0]) {
 		return false
 	}
@@ -32,52 +66,52 @@ func isToken(s string) bool {
 	return true
 }
 
-// isValueToken reports whether s matches the grammar's value-token
-// production:
-//
-//	value-token ::= "-"? token   /* leading "-" admits negative numbers */
-func isValueToken(s string) bool {
-	if len(s) == 0 {
-		return false
-	}
-	if s[0] == '-' {
-		return isToken(s[1:])
-	}
-	return isToken(s)
-}
-
 // parseComponent parses a single (possibly-quoted) grammar component — a
 // namespace, key, or value substring already split out by the caller — per
 // SPEC.md §2's QUOTING extension:
 //
 //	token       ::= bare-token | qtoken
-//	value-token ::= ("-"? bare-token) | qtoken
+//	value-token ::= bare-token | qtoken
+//
+// The two are the same production now that SPEC.md §2 collapsed
+// value-token's leading-sign patch into the bare charset, so one validator
+// serves all three positions on both the tag and query sides.
 //
 // A leading '"' is decoded as a qtoken and must consume s exactly (no
 // trailing content after the closing quote); the decoded content is the
 // canonical value, with no further charset check — reserved characters and
 // whitespace are legal literal content inside a quote. Anything else is
-// validated as a bare token (allowLeadingDash selects the value-token
-// charset, which admits a leading '-').
-func parseComponent(s string, allowLeadingDash bool) (string, error) {
+// validated as a bare token.
+func parseComponent(s string) (string, error) {
 	if len(s) > 0 && s[0] == '"' {
 		content, consumed, err := decodeQuotedPrefix(s)
 		if err != nil {
 			return "", err
 		}
 		if consumed != len(s) {
-			return "", fmt.Errorf("token: invalid quoted component %q", s)
+			return "", fmt.Errorf("token: invalid quoted component %q: a component "+
+				"is either wholly quoted or wholly bare, never a mix — quote the "+
+				"whole of it, doubling any inner `\"`, i.e. %s", s, quoteSuggestion(s))
 		}
 		return content, nil
 	}
-	ok := isToken(s)
-	if allowLeadingDash {
-		ok = isValueToken(s)
-	}
-	if !ok {
-		return "", fmt.Errorf("token: invalid component %q", s)
+	if !isToken(s) {
+		return "", fmt.Errorf("token: invalid component %q: a bare token is "+
+			"[A-Za-z0-9_+-] followed by any of [A-Za-z0-9_.+-], and is never "+
+			`just "*" or "+" (those are the quantifiers); any other character `+
+			"(`:` `=` `<` `>` `~` `!` `/` `*` `(` `)` or whitespace) is reserved "+
+			"and must be quoted — write %s instead to store the text literally",
+			s, quoteSuggestion(s))
 	}
 	return s, nil
+}
+
+// quoteSuggestion renders s as the qtoken that would carry it literally —
+// wrapped in '"' with every inner '"' doubled (SPEC.md §2) — so a parse
+// error can hand the caller the exact spelling that works, instead of only
+// naming what went wrong.
+func quoteSuggestion(s string) string {
+	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 }
 
 // decodeQuotedPrefix decodes a '"'-delimited qtoken beginning at the start
@@ -114,7 +148,9 @@ func decodeQuotedPrefix(s string) (content string, consumed int, err error) {
 		// The real closing quote.
 		return out.String(), after, nil
 	}
-	return "", 0, fmt.Errorf("token: unterminated quote in %q", s)
+	return "", 0, fmt.Errorf("token: unterminated quote in %q: every `\"` opens "+
+		"a span that must be closed; a literal `\"` inside a quoted token is "+
+		"written doubled (`\"\"`)", s)
 }
 
 // findUnquoted scans s left to right, skipping '"'-quoted spans (SPEC.md

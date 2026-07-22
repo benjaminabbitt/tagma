@@ -69,21 +69,21 @@ func ParseTag(s string) (Tag, error) {
 
 	t := Tag{}
 	if hasNs {
-		ns, err := parseComponent(nsPart, false)
+		ns, err := parseComponent(nsPart)
 		if err != nil {
 			return Tag{}, fmt.Errorf("tagma: invalid namespace in tag %q: %w", s, err)
 		}
 		t.Namespace = &ns
 	}
 
-	key, err := parseComponent(keyPart, false)
+	key, err := parseComponent(keyPart)
 	if err != nil {
 		return Tag{}, fmt.Errorf("tagma: invalid key in tag %q: %w", s, err)
 	}
 	t.Key = key
 
 	if hasValue {
-		v, err := parseComponent(valuePart, true)
+		v, err := parseComponent(valuePart)
 		if err != nil {
 			return Tag{}, fmt.Errorf("tagma: invalid value in tag %q: %w", s, err)
 		}

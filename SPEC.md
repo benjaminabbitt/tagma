@@ -24,14 +24,19 @@ A **tag** is a triple `(namespace?, key, value?)`:
 
 ```ebnf
 /* ---- lexical ---- */
-bare-token  ::= [A-Za-z0-9_] [A-Za-z0-9_.-]*
+bare-token  ::= ( [A-Za-z0-9_+-] [A-Za-z0-9_.+-]* ) - ( "*" | "+" )
 qtoken      ::= '"' ( '""' | [^"] )* '"'    /* '""' escapes one literal '"' */
 token       ::= bare-token | qtoken
-value-token ::= ("-"? bare-token) | qtoken  /* leading "-" only applies unquoted */
+value-token ::= bare-token | qtoken         /* identical to token; see below */
 
 /* Reserved characters (never inside a bare-token; legal, literal content
-   inside a qtoken): ":" "=" "<" ">" "~" "!" "/" "*" "+" "(" ")" and
-   whitespace. Reserved words (operator names): "and" "or" "not", matched
+   inside a qtoken): ":" "=" "<" ">" "~" "!" "/" "*" "(" ")" and
+   whitespace. Both SIGNS are ordinary token characters in every
+   position — "." is the one continuation-only character — and the sole
+   rule about the quantifiers is the "- ( "*" | "+" )" above: they are
+   quantifiers when, and ONLY when, they constitute the entire token
+   (see the "signs and quantifiers" note below). Reserved words
+   (operator names): "and" "or" "not", matched
    CASE-INSENSITIVELY as operators on both the postfix and infix sides
    ("AND" "And" "OR" "NOT" etc. all lex as operators, exactly like their
    lowercase spellings) — also escapable by quoting the whole token (e.g. a
@@ -40,7 +45,8 @@ value-token ::= ("-"? bare-token) | qtoken  /* leading "-" only applies unquoted
    operator-hood: a quoted reserved word (`"and"`, `"AND"`, ...) is never an
    operator, only ever the literal atom, in every case.                   */
 
-/* ---- write-side tag (concrete tokens only; no "*" or "+") ---- */
+/* ---- write-side tag (concrete tokens only; a whole-token "*"/"+" is
+   the quantifier, so neither is ever a write-side token) ---- */
 tag         ::= (namespace ":")? key ("=" value)?
 namespace   ::= token
 key         ::= token
@@ -78,13 +84,43 @@ primary     ::= atom | "(" query ")"
 **Lexing notes**
 
 - Operators lex longest-match first (`>=` before `>`, `!=` before `!`).
-- `temp<-5` lexes as `temp` `<` `-5` — `-` can only lead a value-token.
-- Postfix evaluation is a stack machine on top of the grammar: evaluated
-  left to right, `and`/`or` pop two operands and push their combination,
-  `not` pops one and pushes its complement. Unlike stack underflow (still an
-  error), a stack holding more than one result once every token is consumed
-  is not an error: the leftover results fold together with `and`,
-  left-associatively, in stack order (§5).
+- `temp<-5` lexes as `temp` `<` `-5`: the operator scan finds the earliest
+  unquoted operator, so the `<` is taken first and the `-` is left inside
+  the value token. No sign is ever a separator, so this is unaffected by
+  either sign being an ordinary token character (next note).
+- **Signs and quantifiers.** `+` and `-` are ordinary `bare-token`
+  characters wherever `[A-Za-z0-9_]` is: `-1`, `+1`, `a-b`, `-key` and
+  `1.0.0+build.5` (SemVer 2.0.0 §10 build metadata) are each a single
+  token, needing neither quotes nor a per-position carve-out. `.` remains
+  continuation-only.
+  The **only** rule about `*` and `+` is that they are quantifiers when,
+  and only when, they constitute the *entire* token. That is exactly how
+  `*` has always behaved; stating it once is what lets the charset simply
+  contain `+`. A position holds exactly one token, so `1.0.0+build.5` has
+  no competing parse, while `k=+` is still the quantifier.
+  This **deletes** a special case rather than adding one: `value-token`
+  used to read `("-"? bare-token)` purely to re-admit a leading `-` that
+  the charset excluded. With both signs in the charset that patch has no
+  job, and `value-token` is now the same production as `token` — one
+  validator for all three positions, on the tag side and the query side
+  alike. Net: one fewer special case than before, with `-1`, `+1` and
+  `1.0.0+build.5` legal as a side effect rather than as three carve-outs.
+  `*` is **not** in the charset. That is a UX judgement, not a grammar
+  one — the whole-token rule above would keep a lone `*` unambiguous just
+  as it does `+` — but someone writing `k=v*` in the hope of a prefix
+  match gets a loud parse error today, whereas admitting `*` would give
+  them a literal that silently matches nothing. `+` has a must-have
+  literal use (SemVer §10); `*` has none.
+  The relaxation is **monotonic**: it only newly-accepts input that was a
+  parse error before. No sign is a grammar *separator*, so how any string
+  splits into tokens is untouched; only the charset check applied to an
+  already-delimited component loosens. The one behavioural consequence
+  beyond newly-accepted input is that a value spelled with a leading `+`
+  before a numeral — reachable today only by quoting, e.g. `k="+1"` —
+  now compares numerically under `>` `>=` `<` `<=` instead of never
+  matching, because §6's numeral grammar carries the same sign pair (a
+  value that *lexes* as a numeral must also *compare* as one, or it
+  becomes a silent no-match).
 
 **Quoting** — a `qtoken` may stand in for a `bare-token` in any of the three
 tag positions (namespace, key, value) and their query-atom counterparts
@@ -225,9 +261,15 @@ served by scan until a value-level index earns its keep.
   (e.g. a literal `:` or `/`), not the pattern language itself — a
   literal-dot-only match is still unexpressible in v1 (accepted). Full
   regex support for `~` remains genuinely deferred.
-- **Numeric grammar (v1)**: `-? [0-9]+ ("." [0-9]+)?`, compared as IEEE-754
-  doubles. No exponents, hex, or leading `+` (reserved). Values outside this
-  grammar don't match numeric operators.
+- **Numeric grammar (v1)**: `[-+]? [0-9]+ ("." [0-9]+)?`, compared as
+  IEEE-754 doubles. No exponents or hex. This is simply what a number
+  looks like, and it carries the same sign pair the `bare-token` charset
+  does (§2) — a value that *lexes* as a signed numeral also *compares* as
+  one, so `k>=1` matches a stored `k=+1`. Values outside this grammar
+  don't match numeric operators.
+  `=` remains string equality throughout (§4), so `k=+1` and `k=1` are
+  distinct tags while both answer `k>=1` — the same asymmetry `-0` and `0`
+  already have.
 - **Operator lexing**: longest match first at the earliest position (`>=`
   before `>`, `!=` before `!`; a lone `!` is invalid).
 - **Case sensitivity**: tokens (namespaces, keys, values) are

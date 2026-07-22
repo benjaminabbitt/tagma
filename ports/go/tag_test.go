@@ -43,7 +43,7 @@ func TestParseTagValid(t *testing.T) {
 // TestParseTagInvalid transcribes PLAN.md Appendix B.1 (invalid rows).
 func TestParseTagInvalid(t *testing.T) {
 	cases := []string{
-		"=5", ":key", "ns:", "key=", "*", "ns:*=5", "key=+", "-key", ".key",
+		"=5", ":key", "ns:", "key=", "*", "ns:*=5", "key=+", ".key",
 		"a b", "a=b=c", "a:b:c", "key=va~lue", "",
 	}
 	for _, in := range cases {

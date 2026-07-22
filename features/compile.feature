@@ -8,6 +8,10 @@ Feature: Infix query compilation
     Step arguments are single-quote-delimited (the other legal {string}
     delimiter) so the quoted-atom rows below can embed literal `"`
     characters with no escaping.
+    A `+` inside a bare token is literal content and survives compilation
+    untouched (`version=1.0.0+build.5`, `v=+1`), while a lone `+` in any
+    position is still the quantifier (`+:+=+`) — SPEC.md §2. Both spellings
+    coexist in one query, and `(`/`)` on the infix side disturb neither.
     When the query '<infix>' is compiled
     Then the postfix is '<postfix>'
 
@@ -33,10 +37,18 @@ Feature: Infix query compilation
       | a b c                          | a/b/and/c/and                 |
       | a (b or c)                     | a/b/c/or/and                  |
       | not a b                        | a/not/b/and                   |
+      | version=1.0.0+build.5          | version=1.0.0+build.5         |
+      | +:+=+                          | +:+=+                         |
+      | v=1.0.0+b and v=+              | v=1.0.0+b/v=+/and             |
+      | (v=1.0.0+b or v=+) and not v=* | v=1.0.0+b/v=+/or/v=*/not/and  |
+      | v=+1                           | v=+1                          |
+      | v=+build                       | v=+build                      |
+      | -key or +key                   | -key/+key/or                  |
 
   Scenario Outline: compilation failures
     Step arguments are single-quote-delimited so the unterminated-quote row
-    below can embed a literal `"` with no escaping.
+    below can embed a literal `"` with no escaping. `v=1.0*0` pins that
+    `*`, unlike `+`, is not in the bare-token charset at all (SPEC.md §2).
     When the query '<infix>' is compiled
     Then compilation fails
 
@@ -50,3 +62,4 @@ Feature: Infix query compilation
       | not     |
       | a=* or  |
       | note="unterminated |
+      | v=1.0*0  |
