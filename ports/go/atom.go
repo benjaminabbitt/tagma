@@ -50,20 +50,19 @@ type atom struct {
 }
 
 // parsePos parses a single atom position: "*" -> Any, "+" -> Present, else
-// a validated token (bare, per the value-token charset admitting a leading
-// '-' when allowLeadingDash is set, or a qtoken decoded to its canonical
-// content — SPEC.md §2 QUOTING extension). A *quoted* "*"/"+" is the
+// a validated token (bare, or a qtoken decoded to its canonical content —
+// SPEC.md §2 QUOTING extension). A *quoted* "*"/"+" is the
 // literal one-character token, not the quantifier: quoting always turns
 // syntax into data, never the reverse — parseComponent only sees the
 // decode path once s no longer matches the bare "*"/"+" spelling exactly.
-func parsePos(s string, allowLeadingDash bool) (pos, error) {
+func parsePos(s string) (pos, error) {
 	switch s {
 	case "*":
 		return pos{kind: posAny}, nil
 	case "+":
 		return pos{kind: posPresent}, nil
 	}
-	tok, err := parseComponent(s, allowLeadingDash)
+	tok, err := parseComponent(s)
 	if err != nil {
 		return pos{}, err
 	}
@@ -199,14 +198,14 @@ func parseAtom(s string) (atom, error) {
 
 	var a atom
 	if hasNs {
-		p, err := parsePos(nsPart, false)
+		p, err := parsePos(nsPart)
 		if err != nil {
 			return atom{}, fmt.Errorf("tagma: invalid namespace in atom %q: %w", s, err)
 		}
 		a.ns = &p
 	}
 
-	keyPos, err := parsePos(keyPart, false)
+	keyPos, err := parsePos(keyPart)
 	if err != nil {
 		return atom{}, fmt.Errorf("tagma: invalid key in atom %q: %w", s, err)
 	}
@@ -215,7 +214,7 @@ func parseAtom(s string) (atom, error) {
 	a.hasOp = hasOp
 	a.op = op
 	if hasOp {
-		valPos, err := parsePos(valuePart, true)
+		valPos, err := parsePos(valuePart)
 		if err != nil {
 			return atom{}, fmt.Errorf("tagma: invalid value in atom %q: %w", s, err)
 		}

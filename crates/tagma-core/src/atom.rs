@@ -79,12 +79,12 @@ impl Atom {
         };
 
         let ns = match ns_part {
-            Some(p) => Some(parse_q_pos(p, false)?),
+            Some(p) => Some(parse_q_pos(p)?),
             None => None,
         };
-        let key = parse_q_pos(key_part, false)?;
+        let key = parse_q_pos(key_part)?;
         let value = match op_value {
-            Some((op, v)) => Some((op, parse_q_pos(v, true)?)),
+            Some((op, v)) => Some((op, parse_q_pos(v)?)),
             None => None,
         };
 
@@ -166,11 +166,11 @@ impl Atom {
 /// decoded to its canonical content — SPEC.md §2 QUOTING extension). Note
 /// a *quoted* `"*"`/`"+"` is the literal one-character token, not the
 /// quantifier: quoting always turns syntax into data.
-fn parse_q_pos(s: &str, allow_leading_dash: bool) -> Result<Pos, String> {
+fn parse_q_pos(s: &str) -> Result<Pos, String> {
     match s {
         "*" => Ok(Pos::Any),
         "+" => Ok(Pos::Present),
-        _ => parse_component(s, allow_leading_dash).map(Pos::Tok),
+        _ => parse_component(s).map(Pos::Tok),
     }
 }
 
@@ -217,9 +217,11 @@ fn find_operator(s: &str) -> Result<Option<(usize, Op, usize)>, String> {
     Ok(None)
 }
 
-/// Parses a value under the v1 numeric grammar `-?[0-9]+(\.[0-9]+)?`
-/// (SPEC.md §6), returning `None` for anything outside it (no exponents,
-/// hex, or leading `+`).
+/// Parses a value under the v1 numeric grammar `[-+]?[0-9]+(\.[0-9]+)?`
+/// (SPEC.md §6), returning `None` for anything outside it (no exponents
+/// or hex). Both signs are accepted, matching the `bare-token` charset
+/// that lets either be written: a value that lexes as a numeral must also
+/// *compare* as one, or it would silently match no relational operator.
 ///
 /// `pub(crate)`: also used by the inverted index (`index.rs`) to evaluate
 /// numeric-range operators over distinct-value posting lists without
@@ -227,7 +229,7 @@ fn find_operator(s: &str) -> Result<Option<(usize, Op, usize)>, String> {
 pub(crate) fn parse_numeral(s: &str) -> Option<f64> {
     let bytes = s.as_bytes();
     let mut i = 0;
-    if i < bytes.len() && bytes[i] == b'-' {
+    if i < bytes.len() && (bytes[i] == b'-' || bytes[i] == b'+') {
         i += 1;
     }
     let digits_start = i;
@@ -250,6 +252,7 @@ pub(crate) fn parse_numeral(s: &str) -> Option<f64> {
     if i != bytes.len() {
         return None;
     }
+    // Rust's f64 parser accepts a leading "+"; Go's ParseFloat does too.
     s.parse::<f64>().ok()
 }
 
@@ -412,6 +415,48 @@ mod tests {
     fn numeric_ops_handle_negative_values() {
         let a = Atom::parse("score<0").unwrap();
         assert!(a.matches(&[tag(None, "score", Some("-3"))]));
+    }
+
+    #[test]
+    fn signed_numerals_compare_numerically_but_stay_distinct_under_equality() {
+        // SPEC.md §2/§6: both signs are ordinary bare-token characters,
+        // and the numeral grammar is [-+]?[0-9]+(\.[0-9]+)? — a value that
+        // LEXES as a numeral must also COMPARE as one, or every relational
+        // operator would silently miss it.
+        let plus_one = [tag(None, "k", Some("+1"))];
+        assert!(Atom::parse("k>=1").unwrap().matches(&plus_one));
+        assert!(Atom::parse("k<=1").unwrap().matches(&plus_one));
+        assert!(Atom::parse("k>0").unwrap().matches(&plus_one));
+        assert!(!Atom::parse("k>1").unwrap().matches(&plus_one));
+        // "=" is string equality, so "+1" and "1" are distinct tags —
+        // exactly what "-0" vs "0" already does today (below).
+        assert!(!Atom::parse("k=1").unwrap().matches(&plus_one));
+        assert!(Atom::parse("k=+1").unwrap().matches(&plus_one));
+
+        let minus_zero = [tag(None, "k", Some("-0"))];
+        assert!(!Atom::parse("k=0").unwrap().matches(&minus_zero));
+        assert!(Atom::parse("k>=0").unwrap().matches(&minus_zero));
+        assert!(Atom::parse("k<=0").unwrap().matches(&minus_zero));
+
+        // The sign is symmetric across the tag and query sides: it is one
+        // bare-token production now, so an atom may carry it too.
+        assert_eq!(
+            Atom::parse("k=+1").unwrap().value,
+            Some((Op::Eq, Pos::Tok("+1".to_string())))
+        );
+    }
+
+    #[test]
+    fn parse_numeral_accepts_both_signs_and_still_rejects_non_numerals() {
+        assert_eq!(parse_numeral("+1"), Some(1.0));
+        assert_eq!(parse_numeral("+1.5"), Some(1.5));
+        assert_eq!(parse_numeral("-1.5"), Some(-1.5));
+        assert_eq!(parse_numeral("1"), Some(1.0));
+        assert_eq!(parse_numeral("+"), None);
+        assert_eq!(parse_numeral("++1"), None);
+        assert_eq!(parse_numeral("+-1"), None);
+        assert_eq!(parse_numeral("1.0.0+build.5"), None);
+        assert_eq!(parse_numeral("+1e3"), None);
     }
 
     #[test]

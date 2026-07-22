@@ -4,8 +4,24 @@
 //! operators, the postfix `/`) skip over quoted spans instead of matching
 //! inside them.
 
-/// Returns `true` if `s` is a valid `token`: `[A-Za-z0-9_][A-Za-z0-9_.-]*`.
+/// Returns `true` if `s` is a valid `bare-token` (SPEC.md §2):
+/// `( [A-Za-z0-9_+-] [A-Za-z0-9_.+-]* ) - ( "*" | "+" )`.
+///
+/// Both signs are ordinary token characters in every position, so `-1`,
+/// `+1`, `a-b` and `1.0.0+build.5` (SemVer 2.0.0 §10 build metadata) are
+/// all single bare tokens. The one carve-out is the quantifier rule:
+/// `*` and `+` are quantifiers when, and only when, they constitute the
+/// *entire* token, so neither is ever a one-character bare token. `.`
+/// remains continuation-only.
+///
+/// This one predicate serves `token` and `value-token` alike —
+/// `value-token`'s old `("-"? bare-token)` patch existed purely to
+/// re-admit a leading `-`, and has no job now that the charset carries
+/// both signs itself.
 pub fn is_token(s: &str) -> bool {
+    if is_quantifier(s) {
+        return false;
+    }
     let mut chars = s.chars();
     match chars.next() {
         Some(c) if is_token_start(c) => {}
@@ -14,56 +30,78 @@ pub fn is_token(s: &str) -> bool {
     chars.all(is_token_continue)
 }
 
-/// Returns `true` if `s` is a valid `value-token`: `"-"? token`.
-pub fn is_value_token(s: &str) -> bool {
-    match s.strip_prefix('-') {
-        Some(rest) => is_token(rest),
-        None => is_token(s),
-    }
+/// Returns `true` if `s` is one of the whole-token quantifiers `*`
+/// (any-or-absent) or `+` (any-but-present) — the sole reason a string
+/// otherwise inside the bare charset is not a `bare-token` (SPEC.md §2).
+fn is_quantifier(s: &str) -> bool {
+    s == "*" || s == "+"
 }
 
+/// The bare-token charset, minus the continuation-only `.`.
+///
+/// `*` is deliberately absent: unlike `+`, it has no must-have literal
+/// use, and `k=v*` written in the hope of a prefix match is better met
+/// with a loud parse error than with a literal that silently matches
+/// nothing (SPEC.md §2). That is a UX judgement, not a grammar one — the
+/// quantifier rule above already keeps a *whole-token* `*` unambiguous —
+/// so admitting it later is exactly this one line: add `|| c == '*'`.
 fn is_token_start(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '_'
+    c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '+'
 }
 
 fn is_token_continue(c: char) -> bool {
-    is_token_start(c) || c == '.' || c == '-'
+    is_token_start(c) || c == '.'
 }
 
 /// Parses a single (possibly-quoted) grammar component — a namespace, key,
 /// or value substring already split out by the caller — per SPEC.md §2's
-/// QUOTING extension: `token ::= bare-token | qtoken` /
-/// `value-token ::= ("-"? bare-token) | qtoken`.
+/// QUOTING extension: `token ::= bare-token | qtoken`, and since SPEC.md
+/// §2 collapsed `value-token`'s leading-sign patch into the bare charset,
+/// `value-token ::= bare-token | qtoken` is now the same production — one
+/// validator serves all three positions on both the tag and query sides.
 ///
 /// A leading `"` is decoded as a `qtoken` and must consume `s` exactly
 /// (no trailing content after the closing quote); the decoded content is
 /// the canonical value, with no further charset check — reserved
 /// characters and whitespace are legal literal content inside a quote.
-/// Anything else is validated as a bare token (`allow_leading_dash`
-/// selects the `value-token` charset, which admits a leading `-`).
+/// Anything else is validated as a bare token.
 ///
 /// # Errors
 ///
 /// Returns a `String` naming the invalid or unterminated component.
-pub(crate) fn parse_component(s: &str, allow_leading_dash: bool) -> Result<String, String> {
+pub(crate) fn parse_component(s: &str) -> Result<String, String> {
     if s.starts_with('"') {
         let (content, len) = decode_quoted_prefix(s)?;
         if len != s.len() {
-            return Err(format!("token: invalid quoted component {s:?}"));
+            return Err(format!(
+                "token: invalid quoted component {s:?}: a component is either \
+                 wholly quoted or wholly bare, never a mix — quote the whole \
+                 of it, doubling any inner `\"`, i.e. {}",
+                quote_suggestion(s)
+            ));
         }
         Ok(content)
+    } else if is_token(s) {
+        Ok(s.to_string())
     } else {
-        let ok = if allow_leading_dash {
-            is_value_token(s)
-        } else {
-            is_token(s)
-        };
-        if ok {
-            Ok(s.to_string())
-        } else {
-            Err(format!("token: invalid component {s:?}"))
-        }
+        Err(format!(
+            "token: invalid component {s:?}: a bare token is \
+                 [A-Za-z0-9_+-] followed by any of [A-Za-z0-9_.+-], and is \
+                 never just \"*\" or \"+\" (those are the quantifiers); any \
+                 other character (`:` `=` `<` `>` `~` `!` `/` `*` `(` `)` or \
+                 whitespace) is reserved and must be quoted — write {} instead \
+                 to store the text literally",
+            quote_suggestion(s)
+        ))
     }
+}
+
+/// Renders `s` as the `qtoken` that would carry it literally — wrapped in
+/// `"` with every inner `"` doubled (SPEC.md §2) — so a parse error can
+/// hand the caller the exact spelling that works, instead of only naming
+/// what went wrong.
+fn quote_suggestion(s: &str) -> String {
+    format!("\"{}\"", s.replace('"', "\"\""))
 }
 
 /// Decodes a `"`-delimited `qtoken` beginning at the start of `s`
@@ -100,7 +138,10 @@ pub(crate) fn decode_quoted_prefix(s: &str) -> Result<(String, usize), String> {
             return Ok((out, after));
         }
     }
-    Err(format!("token: unterminated quote in {s:?}"))
+    Err(format!(
+        "token: unterminated quote in {s:?}: every `\"` opens a span that must \
+         be closed; a literal `\"` inside a quoted token is written doubled (`\"\"`)"
+    ))
 }
 
 /// Scans `s` left to right, skipping `"`-quoted spans (SPEC.md §2), and
@@ -180,7 +221,7 @@ pub(crate) fn split_unquoted(s: &str, sep: char) -> Result<Vec<&str>, String> {
 /// ARCHITECTURE.md, [`crate::Index::add_line`]) and — since fixtures need
 /// the same tokenization — by the conformance harness's own
 /// `Given an item {string} tagged {string}` tag-list argument. `pub`
-/// (alongside [`is_token`]/[`is_value_token`]) so both call sites, in and
+/// (alongside [`is_token`]) so both call sites, in and
 /// out of this crate, share one implementation.
 ///
 /// # Errors
@@ -247,36 +288,70 @@ mod tests {
     }
 
     #[test]
-    fn tokens_reject_leading_dot_or_dash() {
+    fn tokens_reject_a_leading_dot() {
+        // "." is the one continuation-only character; both signs are
+        // ordinary token characters in every position (SPEC.md §2).
         assert!(!is_token(".key"));
-        assert!(!is_token("-key"));
+        assert!(is_token("-key"));
+        assert!(is_token("+key"));
     }
 
     #[test]
     fn tokens_reject_reserved_chars() {
         for s in [
-            ":key", "key:", "key=v", "key<", "key>", "key~", "key!", "key/", "key*", "key+",
-            "key(", "key)", "a b",
+            ":key", "key:", "key=v", "key<", "key>", "key~", "key!", "key/", "key*", "key(",
+            "key)", "a b",
         ] {
             assert!(!is_token(s), "expected {s:?} to be rejected");
         }
     }
 
+    // --- signs are ordinary token characters (SPEC.md §2) -------------
+
     #[test]
-    fn value_tokens_admit_leading_dash() {
-        assert!(is_value_token("-5"));
-        assert!(is_value_token("5"));
-        assert!(is_value_token("-2.0.0-rc1"));
+    fn tokens_admit_both_signs_in_every_position() {
+        // The point of the change: SemVer 2.0.0 §10 build metadata, plus
+        // signed numerals, fall out of one charset instead of three
+        // carve-outs.
+        for s in [
+            "1.0.0+build.5",
+            "-1.0.0+build.5",
+            "+1",
+            "-1",
+            "+1.5",
+            "key+",
+            "a+b+c",
+            "a-b",
+            "-",
+            "--",
+            "+-",
+        ] {
+            assert!(is_token(s), "expected {s:?} to be a valid token");
+        }
     }
 
     #[test]
-    fn value_tokens_reject_lone_dash() {
-        assert!(!is_value_token("-"));
+    fn a_whole_token_quantifier_is_never_a_bare_token() {
+        // The single remaining rule about "*" and "+": they are
+        // quantifiers when, and only when, they are the entire token.
+        assert!(!is_token("+"));
+        assert!(!is_token("*"));
     }
 
     #[test]
-    fn value_tokens_reject_empty() {
-        assert!(!is_value_token(""));
+    fn star_is_not_admitted_into_the_charset_alongside_the_signs() {
+        assert!(!is_token("1.0.0*build"));
+        assert!(!is_token("*x"));
+    }
+
+    #[test]
+    fn value_tokens_are_plain_tokens_now() {
+        // value-token ::= bare-token | qtoken — the ("-"? ...) patch is
+        // gone, so a signed value needs no separate production.
+        assert!(is_token("-5"));
+        assert!(is_token("5"));
+        assert!(is_token("-2.0.0-rc1"));
+        assert!(!is_token(""));
     }
 
     // --- QUOTING extension (SPEC.md §2) -------------------------------
@@ -326,21 +401,32 @@ mod tests {
 
     #[test]
     fn parse_component_bare_unchanged() {
-        assert_eq!(parse_component("urgent", false).unwrap(), "urgent");
-        assert_eq!(parse_component("-5", true).unwrap(), "-5");
-        assert!(parse_component("va~lue", false).is_err());
+        assert_eq!(parse_component("urgent").unwrap(), "urgent");
+        assert_eq!(parse_component("-5").unwrap(), "-5");
+        assert_eq!(parse_component("+5").unwrap(), "+5");
+        assert!(parse_component("va~lue").is_err());
+    }
+
+    #[test]
+    fn parse_component_error_names_quoting_and_shows_the_working_spelling() {
+        let err = parse_component("a/b").unwrap_err();
+        assert!(err.contains("quoted"), "{err}");
+        assert!(err.contains("\"a/b\""), "{err}");
+        // The suggestion is itself a valid qtoken, inner quotes doubled.
+        let err = parse_component("a\"b/c").unwrap_err();
+        assert!(err.contains("\"a\"\"b/c\""), "{err}");
     }
 
     #[test]
     fn parse_component_quoted_decodes_and_requires_full_consumption() {
-        assert_eq!(parse_component("\"3.5\"", true).unwrap(), "3.5");
-        assert_eq!(parse_component("\"a:b\"", false).unwrap(), "a:b");
-        assert_eq!(parse_component("\"\"", true).unwrap(), "");
+        assert_eq!(parse_component("\"3.5\"").unwrap(), "3.5");
+        assert_eq!(parse_component("\"a:b\"").unwrap(), "a:b");
+        assert_eq!(parse_component("\"\"").unwrap(), "");
         // Trailing content after the closing quote is not a valid
         // component (a token is either fully bare or fully quoted, never
         // a mix).
-        assert!(parse_component("\"ab\"cd", false).is_err());
-        assert!(parse_component("\"ab", false).is_err());
+        assert!(parse_component("\"ab\"cd").is_err());
+        assert!(parse_component("\"ab").is_err());
     }
 
     #[test]

@@ -6,9 +6,11 @@ import (
 )
 
 // numericPattern is the v1 numeric grammar (SPEC.md §6, PLAN.md §7.5):
-// -?[0-9]+(\.[0-9]+)?, compared as IEEE-754 doubles. No exponents, hex, or
-// leading '+'.
-var numericPattern = regexp.MustCompile(`^-?[0-9]+(\.[0-9]+)?$`)
+// [-+]?[0-9]+(\.[0-9]+)?, compared as IEEE-754 doubles. No exponents or
+// hex. Both signs are accepted, matching the bare-token charset that lets
+// either be written: a value that lexes as a numeral must also COMPARE as
+// one, or it would silently match no relational operator.
+var numericPattern = regexp.MustCompile(`^[-+]?[0-9]+(\.[0-9]+)?$`)
 
 // atomMatchesAny reports whether some tag in tags satisfies a — the atom
 // matching truth table, PLAN.md §7.5. tc carries SPEC.md §9's typed-
