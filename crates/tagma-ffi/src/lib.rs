@@ -86,7 +86,10 @@ fn guard<T>(what: &str, on_panic: T, f: impl FnOnce() -> T + UnwindSafe) -> T {
         Err(payload) => {
             // The panic unwound past whatever borrow it was holding, so the
             // thread-local is free to write again here.
-            set_last_error(format!("ffi: panic in {what}: {}", panic_message(&*payload)));
+            set_last_error(format!(
+                "ffi: panic in {what}: {}",
+                panic_message(&*payload)
+            ));
             on_panic
         }
     }

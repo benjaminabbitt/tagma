@@ -1,3 +1,33 @@
+/* tagma C ABI.
+ *
+ * Panic safety
+ * ------------
+ * No function declared here can unwind a Rust panic into your frames.
+ * Letting a panic escape an `extern "C"` function is undefined behaviour, so
+ * every entry point catches one at the boundary and reports it as an
+ * ordinary failure: -1 for the int-returning functions, NULL for the
+ * pointer-returning ones, with a message retrievable from
+ * tagma_last_error() prefixed `ffi: panic in <function>:`. No entry point
+ * calls abort() on a caller mistake.
+ *
+ * Invalid input is a defined error, not a panic and not undefined
+ * behaviour. A null string pointer, a null or missing index handle, bytes
+ * that are not valid UTF-8, and a malformed query all take the normal error
+ * return; the caught-panic path exists only as a backstop for genuine bugs
+ * in tagma or in a client-supplied extension. Two things remain the
+ * caller's responsibility and are still undefined behaviour if violated: a
+ * handle or string pointer that is dangling, already freed, or not one
+ * tagma returned (tagma cannot detect this), and use of one index handle
+ * from several threads at once.
+ *
+ * Extensions must not panic. A future client-registered type comparator
+ * (SPEC.md section 9) that panics is a contract violation on the client's
+ * side; tagma will contain the unwind and turn it into an error return here
+ * rather than corrupt the stack, but it may leave the operation's result
+ * unspecified. Report errors through the documented return values instead.
+ */
+
+
 #ifndef TAGMA_H
 #define TAGMA_H
 
@@ -11,6 +41,8 @@
 /**
  * Creates a new, empty index and returns an opaque owning handle to it.
  * The caller must eventually pass the handle to [`tagma_index_free`].
+ * Returns `NULL` if construction fails (see [`tagma_last_error`]). Never
+ * unwinds.
  */
 void *tagma_index_new(void);
 
@@ -23,6 +55,9 @@ void *tagma_index_new(void);
  * `handle`, if non-null, must be a still-live pointer previously returned
  * by [`tagma_index_new`], not already freed, and not used again after this
  * call.
+ *
+ * Never unwinds: a panic while dropping the index is caught and recorded
+ * for [`tagma_last_error`].
  */
 void tagma_index_free(void *handle);
 
@@ -76,7 +111,10 @@ char *tagma_compile(const char *q);
 /**
  * Returns a newly allocated copy of the last error message recorded on
  * this thread, or `NULL` if there is none. Free the result with
- * [`tagma_str_free`].
+ * [`tagma_str_free`]. Never unwinds.
+ *
+ * A caught panic from any other entry point is reported through this same
+ * channel, prefixed `ffi: panic in <function>:`.
  */
 char *tagma_last_error(void);
 
@@ -90,6 +128,8 @@ char *tagma_last_error(void);
  * `s`, if non-null, must be a still-live pointer previously returned by
  * one of this crate's string-returning functions, not already freed, and
  * not used again after this call.
+ *
+ * Never unwinds.
  */
 void tagma_str_free(char *s);
 
