@@ -12,7 +12,8 @@ use tagma_core::{infix, token, Index, Tag, TypeComparator};
 /// compile, and query/match operations. `#[derive(World)]` builds a fresh
 /// world per scenario via `Default::default()`; [`Default`] is implemented
 /// by hand below (rather than derived) so every fresh [`Index`] comes with
-/// [`SemverComparator`] pre-registered — see the manual impl for why.
+/// [`SemverComparator`] and [`VersionComparator`] pre-registered — see the
+/// manual impl for why.
 #[derive(Debug, World)]
 pub struct TagmaWorld {
     index: Index,
@@ -25,14 +26,22 @@ impl Default for TagmaWorld {
     fn default() -> Self {
         let mut index = Index::default();
         // SPEC.md §9 (client-loadable type comparison): tagma-core itself
-        // ships no semver knowledge. This registration is the test
-        // fixture `features/type-comparison.feature` exercises — every
-        // scenario gets a fresh Index with "semver" already registered,
-        // via ordinary `Given`/`When` steps (a `tagma.type:<target>=semver`
+        // ships no semver/version knowledge. These registrations are the
+        // test fixtures `features/type-comparison.feature` exercises —
+        // every scenario gets a fresh Index with both already registered,
+        // via ordinary `Given`/`When` steps (a `tagma.type:<target>=<name>`
         // tag write, then a relational query), with no new step
         // vocabulary needed (docs/steps.md's frozen ten steps are
         // untouched by this feature).
         index.register_type("semver", Arc::new(SemverComparator));
+        // VersionComparator: a second, deliberately different fixture from
+        // SemverComparator — simple dotted-integer-tuple comparison, no
+        // X.Y.Z-shape requirement, no pre-release/build grammar — used by
+        // the "explicit declaration takes precedence" scenario (SPEC.md
+        // §9 "Precedence"), which needs a comparator that accepts
+        // `1.9`/`1.10` (two components; SemverComparator's strict
+        // three-component core would reject them as unparseable).
+        index.register_type("version", Arc::new(VersionComparator));
         TagmaWorld {
             index,
             last_tag: None,
@@ -40,6 +49,33 @@ impl Default for TagmaWorld {
             last_match: None,
         }
     }
+}
+
+/// Test fixture only: a plain dotted-integer-tuple version comparator —
+/// `1.9` < `1.10` (component-wise numeric comparison, not string/float
+/// comparison), with a shorter tuple that's a prefix of a longer one
+/// sorting first (`1.2` < `1.2.1`), same as [`Vec`]'s derived
+/// lexicographic [`Ord`]. Deliberately simpler than [`SemverComparator`]
+/// — no fixed arity, no pre-release/build-metadata grammar — specifically
+/// so it accepts `1.9`/`1.10`, which are *also* both parseable under
+/// tagma's own §6 numeric grammar as the floats `1.9`/`1.1`. That overlap
+/// is the whole point: it demonstrates SPEC.md §9 "Precedence" — a
+/// declared, registered comparator is used exclusively, so `1.10 > 1.9`
+/// (version order) on a declared target, even though the numeric grammar
+/// alone would say `1.10 < 1.9` (float order) on an undeclared one.
+struct VersionComparator;
+
+impl TypeComparator for VersionComparator {
+    fn compare(&self, a: &str, b: &str) -> Option<Ordering> {
+        Some(parse_version(a)?.cmp(&parse_version(b)?))
+    }
+}
+
+fn parse_version(s: &str) -> Option<Vec<u64>> {
+    if s.is_empty() {
+        return None;
+    }
+    s.split('.').map(|p| p.parse::<u64>().ok()).collect()
 }
 
 /// Test fixture only (SemVer 2.0.0, <https://semver.org/#spec-item-11>):

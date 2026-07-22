@@ -644,25 +644,79 @@ fail an evaluation instead of simply not matching:
 | conflicting declarations on the target | fall back to §6 numeric grammar |
 | comparator panics | contract violation (see Contract above); behavior implementation-defined |
 
-**Monotonicity.** Adopted from SPARQL 1.1's operator-extensibility model
-(§17.3.1): a registered extension function is only ever invoked in place
-of what would otherwise be a **type error** — it may *add* a match where
-there was previously none, but it may **never change an existing result**.
-Concretely: both sides of a relational comparison are tried under the §6
-numeric grammar *first*, unconditionally; only when that grammar fails to
-interpret at least one side does a declared, registered `TypeComparator`
-get a chance to interpret the pair instead. A pair the numeric grammar
-already compares successfully is therefore never re-routed to a
-`TypeComparator`, and can never change as a result of a client declaring a
-type or registering a comparator — **registering a comparator can never
-break an existing query.**
+**Precedence — an explicit declaration trumps the numeric grammar.** When
+a relational operator (`>` `>=` `<` `<=`) compares a tag's value against
+an atom's literal value:
+
+1. If the tag's `(namespace, key)` target has a non-conflicting
+   `tagma.type` declaration **and** a comparator is registered under that
+   declared name, the comparator is used **exclusively**: the atom matches
+   iff the comparator's result satisfies the operator, and if the
+   comparator returns `NotComparable` — including because a value isn't
+   well-formed for that type — the atom does not match. The §6 numeric
+   grammar is **not** consulted for this pair, even if both values happen
+   to also parse as numerals.
+2. Otherwise — no declaration, a declaration naming an unregistered type,
+   or a conflicting declaration (see above) — comparison falls back to the
+   §6 numeric grammar, exactly as if this section didn't exist.
+
+Declaring `tagma.type` is an **opt-in to typed semantics for that
+target**, and typed semantics take precedence over any syntactic
+resemblance to a numeral. Concretely: `1.9` and `1.10` both parse under
+§6's grammar as floats, so an undeclared target orders them `1.10 < 1.9`.
+But if that target is declared and registered as, say, a `version` type
+whose comparator treats `.`-separated components as an ordered tuple
+(the ordinary reading for a version number), the declared comparator's
+order governs instead — `1.10 > 1.9` — because the declaration says so.
+Numeric-shaped is not the same claim as numeric-meaning, and an explicit
+declaration resolves that ambiguity in the declarer's favor, not the
+grammar's.
+
+**Monotonicity.** This holds in a narrower, but still useful, form than a
+first read of "extension" might suggest:
+
+- **For undeclared targets — the overwhelming majority of any store —
+  monotonicity holds unconditionally.** Case 2 above governs an undeclared
+  target regardless of what comparators are registered or under what
+  names; registering a `TypeComparator` can never perturb a query over a
+  target nobody declared a type for. Registering an extension is always
+  safe with respect to the rest of the store.
+- **For a *declared* target, a `tagma.type` declaration MAY change a
+  result the numeric grammar alone would have produced — and that is the
+  point of declaring it, not a side effect to be suppressed.** The
+  declaration is explicit and visible in the data (SPEC.md §7's
+  self-hosted-config posture: config lives as ordinary, readable tags, not
+  hidden machinery); a client who writes `tagma.type:v=version` is asking
+  for `v`'s ordering to change, on that target only.
+
+An earlier draft of this section tried the opposite precedence — numeric
+grammar first, unconditionally, with typed comparison only a fallback
+when parsing failed — specifically to keep the stronger, SPARQL-style
+monotonicity guarantee below intact. That was wrong: it let numeric
+interpretation silently override an explicit declaration whenever a value
+happened to also be numeral-shaped, which is exactly the `1.9`/`1.10`
+case above — the declaration is ignored precisely where it was written to
+matter. This section chooses a correct answer for declared targets over
+preserving a monotonicity guarantee for them; the guarantee that survives
+(undeclared targets are never affected) is the one that matters in
+practice, since typed comparison is opt-in, per target, by construction.
 
 **Prior art.**
 
-- **SPARQL 1.1 §17.3.1, Operator Extensibility** — the closest prior art: a
-  pluggable `<` for datatypes SPARQL doesn't know natively, invoked only in
-  place of what would otherwise be a type error. This section's
-  monotonicity rule is that invariant, restated for tagma.
+- **SPARQL 1.1 §17.3.1, Operator Extensibility** — prior art for the
+  *mechanism*: a pluggable `<` for a datatype SPARQL doesn't know
+  natively, registered by an implementation or client. This section
+  **deliberately diverges from SPARQL's own precedence rule**: SPARQL only
+  invokes an extension function in place of what would otherwise be a type
+  error, so a built-in interpretation that succeeds always wins over an
+  extension. tagma instead lets an explicit `tagma.type` declaration take
+  precedence over its own built-in numeric grammar whenever a comparator
+  is registered for it (see "Precedence" above) — the declaration is what
+  the client explicitly asked for, and letting a syntactic coincidence
+  silently override it produces wrong orderings (§6's grammar has no
+  concept of `1.10 > 1.9`). §17.3.1 is cited here for the
+  registration/pluggable-ordering idea, not for its precedence rule, which
+  this section does not follow.
   <https://www.w3.org/TR/sparql11-query/#operatorExtensibility>
 - **SPARQL 1.1 §15.1, ORDER BY** — "SPARQL does not define a total
   ordering of all possible RDF terms"; an unsupported datatype's relative

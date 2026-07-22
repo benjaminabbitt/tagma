@@ -96,32 +96,33 @@ func opMatches(op opKind, tagValue, atomValue string, ns *string, key string, tc
 	return false
 }
 
-// relationalMatches implements '>' '>=' '<' '<=' (SPEC.md §4, §9): both
-// sides are tried under the v1 numeric grammar first — the existing,
-// unconditional behavior — so a pair the numeric grammar already compares
-// is never re-routed to a TypeComparator and can never change as a result
-// of a client declaring a type or registering a comparator (SPEC.md §9's
-// monotonicity invariant). Only when at least one side fails to parse as
-// a numeral does tc (if non-nil at all — see the typeCtx doc) get a
-// chance to interpret the pair via the target's declared, registered
-// comparator; that comparator's own NotComparable (ok == false) result is
-// itself a no-match, same as any other uninterpretable value (SPEC.md
-// §4's casting rule, extended by §9).
+// relationalMatches implements '>' '>=' '<' '<=' (SPEC.md §4, §9).
+//
+// SPEC.md §9 "Precedence": if the tag's (ns, key) target has a declared,
+// registered TypeComparator (tc.comparatorFor finds one — a nil tc, or
+// one with no matching declaration, unregistered name, or conflicting
+// declaration all report !ok, see the typeCtx doc), it is used
+// exclusively — the v1 numeric grammar is never consulted for this pair,
+// even when both values also happen to parse as numerals, and the
+// comparator's own NotComparable (ok == false) result is itself a
+// no-match, same as any other uninterpretable value (SPEC.md §4's casting
+// rule, extended by §9). Only when there is no declared, registered
+// comparator for this target does this fall back to the numeric grammar,
+// requiring both sides to parse as numerals.
 func relationalMatches(op opKind, tagValue, atomValue string, ns *string, key string, tc *typeCtx) bool {
-	if tv, ok1 := parseNumeric(tagValue); ok1 {
-		if av, ok2 := parseNumeric(atomValue); ok2 {
-			return applyOp(op, cmpFloat(tv, av))
+	if cmp, ok := tc.comparatorFor(ns, key); ok {
+		result, ok := cmp.Compare(tagValue, atomValue)
+		if !ok {
+			return false // NotComparable (SPEC.md §9)
 		}
+		return applyOp(op, result)
 	}
-	cmp, ok := tc.comparatorFor(ns, key)
-	if !ok {
+	tv, ok1 := parseNumeric(tagValue)
+	av, ok2 := parseNumeric(atomValue)
+	if !ok1 || !ok2 {
 		return false
 	}
-	result, ok := cmp.Compare(tagValue, atomValue)
-	if !ok {
-		return false // NotComparable (SPEC.md §9)
-	}
-	return applyOp(op, result)
+	return applyOp(op, cmpFloat(tv, av))
 }
 
 // cmpFloat is the numeric grammar's own three-way compare, in the same

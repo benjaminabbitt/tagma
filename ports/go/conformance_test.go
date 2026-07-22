@@ -54,14 +54,67 @@ type conformanceState struct {
 func (c *conformanceState) reset() {
 	idx := tagma.NewIndex()
 	// SPEC.md §9 (client-loadable type comparison): tagma itself ships no
-	// semver knowledge. This registration is the test fixture
+	// semver/version knowledge. These registrations are the test fixtures
 	// ../../features/type-comparison.feature exercises — every scenario
-	// gets a fresh Index with "semver" already registered, via ordinary
-	// Given/When steps (a tagma.type:<target>=semver tag write, then a
+	// gets a fresh Index with both already registered, via ordinary
+	// Given/When steps (a tagma.type:<target>=<name> tag write, then a
 	// relational query), with no new step vocabulary needed (docs/steps.md's
 	// frozen ten steps are untouched by this feature).
 	idx.RegisterType("semver", semverComparator{})
+	// versionComparator: a second, deliberately different fixture from
+	// semverComparator — used by the "explicit declaration takes
+	// precedence" scenario (SPEC.md §9 "Precedence"), which needs a
+	// comparator that accepts 1.9/1.10 (two components; semverComparator's
+	// strict three-component core would reject them as unparseable).
+	idx.RegisterType("version", versionComparator{})
 	*c = conformanceState{idx: idx}
+}
+
+// versionComparator is a test fixture only: a plain dotted-integer-tuple
+// version comparator — 1.9 < 1.10 (component-wise numeric comparison, not
+// string/float comparison), with a shorter tuple that's a prefix of a
+// longer one sorting first (1.2 < 1.2.1). Deliberately simpler than
+// semverComparator — no fixed arity, no pre-release/build-metadata
+// grammar — specifically so it accepts 1.9/1.10, which are *also* both
+// parseable under tagma's own §6 numeric grammar as the floats 1.9/1.1.
+// That overlap is the whole point: it demonstrates SPEC.md §9
+// "Precedence" — a declared, registered comparator is used exclusively,
+// so 1.10 > 1.9 (version order) on a declared target, even though the
+// numeric grammar alone would say 1.10 < 1.9 (float order) on an
+// undeclared one.
+type versionComparator struct{}
+
+func (versionComparator) Compare(a, b string) (int, bool) {
+	pa, ok := parseVersion(a)
+	if !ok {
+		return 0, false
+	}
+	pb, ok := parseVersion(b)
+	if !ok {
+		return 0, false
+	}
+	for i := 0; i < len(pa) && i < len(pb); i++ {
+		if c := compareUint(pa[i], pb[i]); c != 0 {
+			return c, true
+		}
+	}
+	return compareInt(len(pa), len(pb)), true
+}
+
+func parseVersion(s string) ([]uint64, bool) {
+	if s == "" {
+		return nil, false
+	}
+	parts := strings.Split(s, ".")
+	out := make([]uint64, len(parts))
+	for i, p := range parts {
+		n, err := strconv.ParseUint(p, 10, 64)
+		if err != nil {
+			return nil, false
+		}
+		out[i] = n
+	}
+	return out, true
 }
 
 // semverComparator is a test fixture only (SemVer 2.0.0,

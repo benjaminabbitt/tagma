@@ -2,10 +2,11 @@
 //! `<` `<=`, SPEC.md §9): a self-hosted `tagma.type:<target>=<typename>`
 //! declaration (parallel to `tagma.hide` §7 and `tagma.arity` §8) selects,
 //! per `(namespace?, key)` target, a client-registered [`TypeComparator`]
-//! that stands in for tagma's own v1 numeric grammar (§6) whenever that
-//! grammar can't interpret a value — never overriding a pair the numeric
-//! grammar already compares successfully (SPEC.md §9's monotonicity
-//! invariant).
+//! that **takes precedence over** tagma's own v1 numeric grammar (§6) for
+//! that target (SPEC.md §9 "Precedence") — declaring a type is an opt-in
+//! to typed semantics, not merely a fallback for values the grammar can't
+//! parse. An undeclared target is unaffected by anything registered here
+//! (SPEC.md §9's narrower monotonicity guarantee).
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
@@ -75,21 +76,20 @@ impl TypeCtx {
 /// between a tag's stored value and an atom's literal value, for a tag
 /// whose target is `(ns, key)`.
 ///
-/// Both sides are tried under the v1 numeric grammar (§6) first — the
-/// existing, unconditional behavior — so a pair the numeric grammar
-/// already compares is *never* re-routed to a [`TypeComparator`] and can
-/// never change as a result of one being declared or registered (SPEC.md
-/// §9's monotonicity invariant, modeled on SPARQL 1.1 §17.3.1's rule that
-/// an extension function may only be invoked in place of what would
-/// otherwise be a type error). Only when at least one side fails to parse
-/// as a numeral does `type_ctx` (if given at all — `None` behaves exactly
-/// as if no types were ever declared or registered, so callers with no
+/// SPEC.md §9 "Precedence": if the target has a declared, registered
+/// [`TypeComparator`] (`type_ctx` is `Some` and
+/// [`TypeCtx::comparator_for`] finds one — `None` behaves exactly as if no
+/// types were ever declared or registered, so callers with no
 /// [`crate::index::Index`] in hand, e.g. [`crate::atom::Atom::matches`],
-/// keep the pre-extension numeric-only behavior unchanged) get a chance to
-/// interpret the pair via the target's declared, registered comparator;
-/// that comparator's own `NotComparable` (`None`) result is itself a
-/// no-match, same as any other uninterpretable value (SPEC.md §4's casting
-/// rule, extended by §9).
+/// keep the pre-extension numeric-only behavior unchanged), it is used
+/// **exclusively** — the §6 numeric grammar is never consulted for this
+/// pair, even when both values also happen to parse as numerals, and the
+/// comparator's own `NotComparable` result is itself a no-match, same as
+/// any other uninterpretable value (SPEC.md §4's casting rule, extended by
+/// §9). Only when there is no declaration, the declared name has no
+/// registered comparator, or the declaration conflicts (all three already
+/// collapsed into `comparator_for` returning `None`) does this fall back
+/// to the §6 numeric grammar, requiring both sides to parse as numerals.
 pub(crate) fn relational_matches(
     op: Op,
     tag_value: &str,
@@ -98,16 +98,13 @@ pub(crate) fn relational_matches(
     key: &str,
     type_ctx: Option<&TypeCtx>,
 ) -> bool {
-    if let (Some(a), Some(b)) = (parse_numeral(tag_value), parse_numeral(atom_value)) {
-        return apply_op(op, a.partial_cmp(&b));
+    if let Some(cmp) = type_ctx.and_then(|ctx| ctx.comparator_for(ns, key)) {
+        return apply_op(op, cmp.compare(tag_value, atom_value));
     }
-    let Some(ctx) = type_ctx else {
+    let (Some(a), Some(b)) = (parse_numeral(tag_value), parse_numeral(atom_value)) else {
         return false;
     };
-    let Some(cmp) = ctx.comparator_for(ns, key) else {
-        return false;
-    };
-    apply_op(op, cmp.compare(tag_value, atom_value))
+    apply_op(op, a.partial_cmp(&b))
 }
 
 /// Maps a four-valued comparison result (`None` = `NotComparable`) to a

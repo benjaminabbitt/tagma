@@ -9,18 +9,26 @@ Feature: Client-loadable type comparison — tagma.type
   comparator for a type name — tagma itself ships no knowledge of any
   type — and declares which `(namespace?, key)` targets use it via
   `tagma.type:<target>=<typename>`, encoded exactly like `tagma.arity`'s
-  target (SPEC.md §8). Both sides of a relational comparison are always
-  tried under the numeric grammar first; a declared type only ever gets a
-  chance when that grammar can't interpret at least one side, so it can
-  only ever add a match, never remove one tagma already had (SPEC.md §9's
-  monotonicity invariant).
+  target (SPEC.md §8). A declared, registered comparator is used
+  EXCLUSIVELY for its target, taking precedence over the numeric grammar
+  even when a value also happens to parse as a numeral — declaring a type
+  is an opt-in to typed semantics, not merely a fallback for values the
+  numeric grammar can't parse (SPEC.md §9 "Precedence"). Monotonicity
+  therefore only holds for undeclared targets: registering a comparator
+  can never perturb a query over a target nobody declared a type for, but
+  a declared target's ordering may (and, by design, is meant to) change
+  once the declaration lands (SPEC.md §9 "Monotonicity").
 
-  These scenarios exercise "semver" — SemVer 2.0.0 — as a test fixture
-  comparator the *conformance harness* registers (Rust and Go only, hence
-  `@core-only`: the C FFI, WASM, CLI, and JS/Python bindings don't yet wire
-  a callback-registration seam, tracked as its own workstream). tagma-core
-  and the Go port ship no semver knowledge themselves; only the harness
-  does, exactly as a real downstream client would.
+  These scenarios exercise two test-fixture comparators the *conformance
+  harness* registers (Rust and Go only, hence `@core-only`: the C
+  FFI, WASM, CLI, and JS/Python bindings don't yet wire a
+  callback-registration seam, tracked as its own workstream) — tagma-core
+  and the Go port ship neither's knowledge themselves, only the harness
+  does, exactly as a real downstream client would:
+  - "semver" — full SemVer 2.0.0 precedence.
+  - "version" — a plain dotted-integer-tuple comparator (no fixed arity,
+    no pre-release grammar), deliberately able to parse values like `1.9`
+    and `1.10` that are *also* numeral-shaped, to demonstrate precedence.
 
   Scenario: the SemVer 2.0.0 §11 canonical precedence chain orders each element strictly less than the next
     Given an item "cfg" tagged "tagma.type:v=semver"
@@ -88,9 +96,24 @@ Feature: Client-loadable type comparison — tagma.type
     When the query "v>4" is run
     Then it matches exactly "b"
 
-  Scenario: registering and declaring a type never changes an already-matching numeric-grammar result
+  Scenario: an explicit type declaration takes precedence over the numeric grammar, even for numeral-shaped values
+    Given an item "cfg" tagged "tagma.type:ver=version"
+    Given an item "a" tagged "ver=1.9"
+    Given an item "b" tagged "ver=1.10"
+    When the query "ver>1.9" is run
+    Then it matches exactly "b"
+    When the query "ver<1.9" is run
+    Then it matches exactly ""
+    Given an item "c" tagged "plain=1.9"
+    Given an item "d" tagged "plain=1.10"
+    When the query "plain>1.9" is run
+    Then it matches exactly ""
+    When the query "plain<1.9" is run
+    Then it matches exactly "d"
+
+  Scenario: registering and declaring a type never changes a query over an undeclared target
     Given an item "cfg" tagged "tagma.type:v=semver"
-    Given an item "a" tagged "v=9"
-    Given an item "b" tagged "v=10"
-    When the query "v>9" is run
+    Given an item "a" tagged "n=9"
+    Given an item "b" tagged "n=10"
+    When the query "n>9" is run
     Then it matches exactly "b"

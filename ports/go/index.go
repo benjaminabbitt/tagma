@@ -254,10 +254,10 @@ type TypeComparator interface {
 
 // RegisterType registers cmp under name (SPEC.md §9), so
 // tagma.type:<target>=<name> declarations naming it switch that target's
-// relational-operator matching to typed comparison whenever tagma's own
-// §6 numeric grammar can't interpret a value (see relationalMatches).
-// Re-registering the same name replaces the previously-registered
-// comparator.
+// relational-operator matching to typed comparison — exclusively, taking
+// precedence over tagma's own §6 numeric grammar even for a numeral-shaped
+// value (SPEC.md §9 "Precedence"; see relationalMatches). Re-registering
+// the same name replaces the previously-registered comparator.
 func (idx *Index) RegisterType(name string, cmp TypeComparator) {
 	idx.typeComparators[name] = cmp
 }
