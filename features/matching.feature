@@ -321,6 +321,28 @@ Feature: Postfix query matching
     When the query "z<=0" is run
     Then it matches exactly "r s"
 
+  Scenario: a quoted signed numeral compares as a numeral, exactly like the bare spelling
+    Quoting escapes the CHARSET, not the value: `k="+1"` and `k=+1` both
+    store the value `+1`, so both must order identically. This scenario
+    pins a DELIBERATE behaviour change. Before signs entered §6's numeral
+    grammar, `k="+1"` was the only way to write a leading `+`. It parsed,
+    yet silently matched no relational operator, because §6 accepted only
+    a leading `-`. That was the silent-no-match failure this rule
+    removes, so the change is a fix rather than a regression; it is pinned
+    here because no fixture previously exercised either behaviour.
+    Given an item "qp" tagged 'k="+1"'
+    Given an item "bp" tagged "k=+1"
+    Given an item "one" tagged "k=1"
+    When the query "k>=1" is run
+    Then it matches exactly "bp one qp"
+    When the query "k<=1" is run
+    Then it matches exactly "bp one qp"
+    When the query "k=+1" is run
+    Then it matches exactly "bp qp"
+    When the query 'k="+1"' is run
+    Then it matches exactly "bp qp"
+
+
   Scenario: a leading sign needs no special case in any of the three positions
     `value-token`'s old `("-"? bare-token)` patch is gone (SPEC.md §2), so
     a sign is an ordinary token character in the namespace and key
