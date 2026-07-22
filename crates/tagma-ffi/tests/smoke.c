@@ -8,9 +8,71 @@
 
 #include "tagma.h"
 
+/* Drains tagma_last_error() and asserts it mentions `needle`. */
+static void assert_error_contains(const char *needle) {
+    char *err = tagma_last_error();
+    assert(err != NULL);
+    assert(strstr(err, needle) != NULL);
+    tagma_str_free(err);
+}
+
+/* Handle safety (task kooky-snub), exercised at the real ABI: a freed,
+ * reused, or never-issued handle must be a defined error on every entry
+ * point that takes one -- not undefined behaviour. */
+static void handle_safety(void) {
+    TagmaIndex h = tagma_index_new();
+    assert(h != 0);
+
+    /* Double free. */
+    assert(tagma_index_free(h) == 0);
+    assert(tagma_index_free(h) == -1);
+    assert_error_contains("freed index");
+
+    /* Use after free, on every handle-taking entry point. */
+    assert(tagma_index_add(h, "a urgent") == -1);
+    assert_error_contains("freed index");
+    assert(tagma_query(h, "urgent") == NULL);
+    assert_error_contains("freed index");
+    assert(tagma_query_postfix(h, "urgent") == NULL);
+    assert_error_contains("freed index");
+
+    /* Never issued by tagma: garbage integers and a real address, which is
+     * what a handle used to be. */
+    int stack_object = 0;
+    TagmaIndex foreign[] = {1, 42, 0xDEADBEEF, (TagmaIndex)(uintptr_t)&stack_object};
+    for (size_t i = 0; i < sizeof foreign / sizeof foreign[0]; i++) {
+        assert(tagma_index_free(foreign[i]) == -1);
+        assert_error_contains("not issued by tagma");
+        assert(tagma_index_add(foreign[i], "a urgent") == -1);
+        assert_error_contains("not issued by tagma");
+        assert(tagma_query(foreign[i], "urgent") == NULL);
+        assert_error_contains("not issued by tagma");
+    }
+
+    /* Generation reuse: the freed slot comes back, the stale handle does
+     * not. This is the case a slot table without a generation counter gets
+     * wrong -- the stale handle would silently address the new index. */
+    TagmaIndex reused = tagma_index_new();
+    assert(reused != h);
+    assert(tagma_index_add(reused, "fresh urgent") == 0);
+
+    assert(tagma_index_add(h, "stale urgent") == -1);
+    assert_error_contains("freed index");
+
+    char *only_fresh = tagma_query(reused, "urgent");
+    assert(only_fresh != NULL);
+    assert(strcmp(only_fresh, "fresh") == 0); /* the stale write went nowhere */
+    tagma_str_free(only_fresh);
+
+    assert(tagma_index_free(reused) == 0);
+
+    /* A zero handle frees as a no-op, like free(NULL). */
+    assert(tagma_index_free(0) == 0);
+}
+
 int main(void) {
-    void *idx = tagma_index_new();
-    assert(idx != NULL);
+    TagmaIndex idx = tagma_index_new();
+    assert(idx != 0);
 
     assert(tagma_index_add(
                idx, "a urgent lang=en lang=fr range=5 geo:lat=57.64 status=done") == 0);
@@ -55,10 +117,10 @@ int main(void) {
     assert(tagma_query(idx, NULL) == NULL);
     assert(tagma_query_postfix(idx, NULL) == NULL);
     assert(tagma_compile(NULL) == NULL);
-    assert(tagma_index_add(NULL, "a urgent") == -1);
-    assert(tagma_query(NULL, "urgent") == NULL);
-    assert(tagma_query_postfix(NULL, "urgent") == NULL);
-    tagma_index_free(NULL);
+    assert(tagma_index_add(0, "a urgent") == -1);
+    assert(tagma_query(0, "urgent") == NULL);
+    assert(tagma_query_postfix(0, "urgent") == NULL);
+    assert(tagma_index_free(0) == 0);
     tagma_str_free(NULL);
 
     /* An interior NUL cannot reach the library through a C string at all --
@@ -76,7 +138,9 @@ int main(void) {
     assert(strcmp(still_good, "c") == 0);
     tagma_str_free(still_good);
 
-    tagma_index_free(idx);
+    assert(tagma_index_free(idx) == 0);
+
+    handle_safety();
 
     return 0;
 }
