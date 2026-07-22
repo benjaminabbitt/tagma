@@ -10,14 +10,38 @@
  * `ffi: panic in <function>:`.
  *
  * Invalid input is a defined error, not a panic and not undefined
- * behaviour. A null string pointer, a null or missing index handle, bytes
- * that are not valid UTF-8, and a malformed query all take the normal error
- * return; the caught-panic path exists only as a backstop for genuine bugs
- * in tagma or in a client-supplied extension. Two things remain the
- * caller's responsibility and are still undefined behaviour if violated: a
- * handle or string pointer that is dangling, already freed, or not one
- * tagma returned (tagma cannot detect this), and use of one index handle
- * from several threads at once.
+ * behaviour. A null string pointer, an invalid index handle, bytes that are
+ * not valid UTF-8, and a malformed query all take the normal error return;
+ * the caught-panic path exists only as a backstop for genuine bugs in tagma
+ * or in a client-supplied extension.
+ *
+ * Index handles
+ * -------------
+ * TagmaIndex is an opaque token, NOT a pointer: do not dereference it, do
+ * not cast a pointer to it, do not assume any structure. 0 is never a valid
+ * handle and is what tagma_index_new() returns on failure.
+ *
+ * Every handle is validated on entry, so the classic C lifetime mistakes
+ * are reported instead of being undefined behaviour. Freeing a handle
+ * twice, using one after freeing it, and passing a value tagma never issued
+ * each return the function's ordinary failure value (-1, or NULL) with a
+ * message in tagma_last_error(). A freed handle is never reissued for a
+ * later index, so a stale handle can never be silently redirected to an
+ * unrelated one. tagma_index_free() returns int for this reason: 0 on
+ * success, -1 if the handle was not live. Freeing handle 0 is a no-op
+ * returning 0, like free(NULL).
+ *
+ * Handles are thread-safe. Any function here may be called from any thread,
+ * with the same handle or different ones, without external locking;
+ * operations on one index serialize, operations on different indexes run
+ * concurrently. Freeing a handle another thread is still using is defined:
+ * the handle dies immediately and the storage is released once the
+ * in-flight call returns. (The error message from tagma_last_error() is
+ * per-thread, as before.)
+ *
+ * String pointers are a separate matter and remain the caller's
+ * responsibility: passing tagma_str_free() a pointer that is dangling,
+ * already freed, or not one tagma returned is still undefined behaviour.
  *
  * Extensions must not panic. A future client-registered type comparator
  * (SPEC.md section 9) that panics is a contract violation on the client's
@@ -38,27 +62,34 @@
 #include <stdlib.h>
 
 /**
- * Creates a new, empty index and returns an opaque owning handle to it.
- * The caller must eventually pass the handle to [`tagma_index_free`].
- * Returns `NULL` if construction fails (see [`tagma_last_error`]). Never
- * unwinds.
+ * The integer handle type exposed to C. Opaque: callers must treat it as a
+ * token, never as an address or an index. `0` is never a valid handle.
  */
-void *tagma_index_new(void);
+typedef uint64_t TagmaIndex;
 
 /**
- * Frees an index handle previously returned by [`tagma_index_new`]. A null
- * handle is a no-op.
+ * Creates a new, empty index and returns an opaque owning handle to it.
+ * The caller must eventually pass the handle to [`tagma_index_free`].
+ * Returns `0` if construction fails (see [`tagma_last_error`]); `0` is
+ * never a valid handle. Never unwinds.
+ */
+TagmaIndex tagma_index_new(void);
+
+/**
+ * Frees the index named by a handle previously returned by
+ * [`tagma_index_new`]. Returns `0` on success and `-1` if the handle is
+ * not a live tagma handle — already freed, never issued, or garbage — with
+ * the reason in [`tagma_last_error`]. A `0` handle is a no-op returning
+ * `0`, mirroring `free(NULL)`.
  *
- * # Safety
- *
- * `handle`, if non-null, must be a still-live pointer previously returned
- * by [`tagma_index_new`], not already freed, and not used again after this
- * call.
+ * After a successful call the handle is dead: every later use of it,
+ * including another free, is a defined error rather than undefined
+ * behaviour, and it will never be reissued for a future index.
  *
  * Never unwinds: a panic while dropping the index is caught and recorded
  * for [`tagma_last_error`].
  */
-void tagma_index_free(void *handle);
+int tagma_index_free(TagmaIndex handle);
 
 /**
  * Parses and adds a `<id> <tag> <tag>...` line to the index (same line
@@ -67,10 +98,11 @@ void tagma_index_free(void *handle);
  *
  * # Safety
  *
- * `handle` must be a live pointer from [`tagma_index_new`]. `line`, if
- * non-null, must point to a valid NUL-terminated UTF-8 C string.
+ * `line`, if non-null, must point to a valid NUL-terminated UTF-8 C
+ * string. `handle` needs no precondition: an invalid one is a reported
+ * error.
  */
-int tagma_index_add(void *handle, const char *line);
+int tagma_index_add(TagmaIndex handle, const char *line);
 
 /**
  * Compiles `q` (infix) and evaluates it against the index, returning a
@@ -80,10 +112,10 @@ int tagma_index_add(void *handle, const char *line);
  *
  * # Safety
  *
- * `handle` must be a live pointer from [`tagma_index_new`]. `q`, if
- * non-null, must point to a valid NUL-terminated UTF-8 C string.
+ * `q`, if non-null, must point to a valid NUL-terminated UTF-8 C string.
+ * `handle` needs no precondition: an invalid one is a reported error.
  */
-char *tagma_query(void *handle, const char *q);
+char *tagma_query(TagmaIndex handle, const char *q);
 
 /**
  * Evaluates an already-compiled postfix query against the index; same
@@ -91,10 +123,10 @@ char *tagma_query(void *handle, const char *q);
  *
  * # Safety
  *
- * `handle` must be a live pointer from [`tagma_index_new`]. `q`, if
- * non-null, must point to a valid NUL-terminated UTF-8 C string.
+ * `q`, if non-null, must point to a valid NUL-terminated UTF-8 C string.
+ * `handle` needs no precondition: an invalid one is a reported error.
  */
-char *tagma_query_postfix(void *handle, const char *q);
+char *tagma_query_postfix(TagmaIndex handle, const char *q);
 
 /**
  * Compiles an infix query `q` to its canonical postfix form. Returns

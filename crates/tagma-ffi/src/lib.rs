@@ -5,6 +5,15 @@
 //! All strings are UTF-8. A thread-local holds the last error message,
 //! readable via [`tagma_last_error`].
 //!
+//! # Handle safety
+//!
+//! An index is named by an opaque [`TagmaIndex`] integer, not by a pointer.
+//! Every handle is validated on entry, so a freed handle, a handle whose
+//! slot has since been reissued, and a value this library never issued are
+//! all *detected* and reported through [`tagma_last_error`] instead of
+//! being undefined behaviour. See [`handle`] for the representation, the
+//! concurrency guarantee, and how slots are reclaimed.
+//!
 //! # Panic safety
 //!
 //! A Rust panic must never reach an `extern "C"` boundary. Historically it
@@ -35,10 +44,14 @@
 #![deny(missing_docs)]
 
 use std::cell::RefCell;
-use std::ffi::{c_char, c_int, c_void, CStr, CString};
+use std::ffi::{c_char, c_int, CStr, CString};
 use std::panic::{catch_unwind, UnwindSafe};
 
 use tagma_core::Index;
+
+pub mod handle;
+
+pub use handle::TagmaIndex;
 
 thread_local! {
     static LAST_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
@@ -132,36 +145,67 @@ unsafe fn borrow_str<'a>(ptr: *const c_char, what: &str) -> Option<&'a str> {
     }
 }
 
+/// Runs `f` against the index named by `handle`, recording the handle
+/// diagnostic and returning `on_error` if the handle is not a live one this
+/// library issued.
+fn with_handle<T>(handle: TagmaIndex, on_error: T, f: impl FnOnce(&mut Index) -> T) -> T {
+    match handle::with_index(handle, f) {
+        Ok(v) => v,
+        Err(e) => {
+            set_last_error(e.message());
+            on_error
+        }
+    }
+}
+
 /// Creates a new, empty index and returns an opaque owning handle to it.
 /// The caller must eventually pass the handle to [`tagma_index_free`].
-/// Returns `NULL` if construction fails (see [`tagma_last_error`]). Never
-/// unwinds.
+/// Returns `0` if construction fails (see [`tagma_last_error`]); `0` is
+/// never a valid handle. Never unwinds.
 #[no_mangle]
-pub extern "C" fn tagma_index_new() -> *mut c_void {
-    guard("tagma_index_new", std::ptr::null_mut(), || {
-        let idx = Box::new(Index::new());
-        Box::into_raw(idx) as *mut c_void
+pub extern "C" fn tagma_index_new() -> TagmaIndex {
+    guard("tagma_index_new", 0, || {
+        match handle::allocate(Index::new()) {
+            Ok(h) => {
+                clear_last_error();
+                h
+            }
+            Err(e) => {
+                set_last_error(e.message());
+                0
+            }
+        }
     })
 }
 
-/// Frees an index handle previously returned by [`tagma_index_new`]. A null
-/// handle is a no-op.
+/// Frees the index named by a handle previously returned by
+/// [`tagma_index_new`]. Returns `0` on success and `-1` if the handle is
+/// not a live tagma handle — already freed, never issued, or garbage — with
+/// the reason in [`tagma_last_error`]. A `0` handle is a no-op returning
+/// `0`, mirroring `free(NULL)`.
 ///
-/// # Safety
-///
-/// `handle`, if non-null, must be a still-live pointer previously returned
-/// by [`tagma_index_new`], not already freed, and not used again after this
-/// call.
+/// After a successful call the handle is dead: every later use of it,
+/// including another free, is a defined error rather than undefined
+/// behaviour, and it will never be reissued for a future index.
 ///
 /// Never unwinds: a panic while dropping the index is caught and recorded
 /// for [`tagma_last_error`].
 #[no_mangle]
-pub unsafe extern "C" fn tagma_index_free(handle: *mut c_void) {
-    guard("tagma_index_free", (), || {
-        if handle.is_null() {
-            return;
+pub extern "C" fn tagma_index_free(handle: TagmaIndex) -> c_int {
+    guard("tagma_index_free", -1, || {
+        if handle == 0 {
+            return 0;
         }
-        drop(unsafe { Box::from_raw(handle as *mut Index) });
+        match handle::release(handle) {
+            Ok(()) => {
+                clear_last_error();
+                0
+            }
+            Err(e) => {
+                set_last_error(e.message());
+                -1
+            }
+        }
     })
 }
 
@@ -171,20 +215,16 @@ pub unsafe extern "C" fn tagma_index_free(handle: *mut c_void) {
 ///
 /// # Safety
 ///
-/// `handle` must be a live pointer from [`tagma_index_new`]. `line`, if
-/// non-null, must point to a valid NUL-terminated UTF-8 C string.
+/// `line`, if non-null, must point to a valid NUL-terminated UTF-8 C
+/// string. `handle` needs no precondition: an invalid one is a reported
+/// error.
 #[no_mangle]
-pub unsafe extern "C" fn tagma_index_add(handle: *mut c_void, line: *const c_char) -> c_int {
+pub unsafe extern "C" fn tagma_index_add(handle: TagmaIndex, line: *const c_char) -> c_int {
     guard("tagma_index_add", -1, || {
-        if handle.is_null() {
-            set_last_error("ffi: handle is null".to_string());
-            return -1;
-        }
         let Some(line) = (unsafe { borrow_str(line, "line") }) else {
             return -1;
         };
-        let idx = unsafe { &mut *(handle as *mut Index) };
-        match idx.add_line(line) {
+        with_handle(handle, -1, |idx| match idx.add_line(line) {
             Ok(()) => {
                 clear_last_error();
                 0
@@ -193,7 +233,7 @@ pub unsafe extern "C" fn tagma_index_add(handle: *mut c_void, line: *const c_cha
                 set_last_error(e);
                 -1
             }
-        }
+        })
     })
 }
 
@@ -204,20 +244,15 @@ pub unsafe extern "C" fn tagma_index_add(handle: *mut c_void, line: *const c_cha
 ///
 /// # Safety
 ///
-/// `handle` must be a live pointer from [`tagma_index_new`]. `q`, if
-/// non-null, must point to a valid NUL-terminated UTF-8 C string.
+/// `q`, if non-null, must point to a valid NUL-terminated UTF-8 C string.
+/// `handle` needs no precondition: an invalid one is a reported error.
 #[no_mangle]
-pub unsafe extern "C" fn tagma_query(handle: *mut c_void, q: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn tagma_query(handle: TagmaIndex, q: *const c_char) -> *mut c_char {
     guard("tagma_query", std::ptr::null_mut(), || {
-        if handle.is_null() {
-            set_last_error("ffi: handle is null".to_string());
-            return std::ptr::null_mut();
-        }
         let Some(q) = (unsafe { borrow_str(q, "query") }) else {
             return std::ptr::null_mut();
         };
-        let idx = unsafe { &*(handle as *const Index) };
-        match idx.query(q) {
+        with_handle(handle, std::ptr::null_mut(), |idx| match idx.query(q) {
             Ok(mut ids) => {
                 clear_last_error();
                 ids.sort();
@@ -227,7 +262,7 @@ pub unsafe extern "C" fn tagma_query(handle: *mut c_void, q: *const c_char) -> *
                 set_last_error(e);
                 std::ptr::null_mut()
             }
-        }
+        })
     })
 }
 
@@ -236,30 +271,27 @@ pub unsafe extern "C" fn tagma_query(handle: *mut c_void, q: *const c_char) -> *
 ///
 /// # Safety
 ///
-/// `handle` must be a live pointer from [`tagma_index_new`]. `q`, if
-/// non-null, must point to a valid NUL-terminated UTF-8 C string.
+/// `q`, if non-null, must point to a valid NUL-terminated UTF-8 C string.
+/// `handle` needs no precondition: an invalid one is a reported error.
 #[no_mangle]
-pub unsafe extern "C" fn tagma_query_postfix(handle: *mut c_void, q: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn tagma_query_postfix(handle: TagmaIndex, q: *const c_char) -> *mut c_char {
     guard("tagma_query_postfix", std::ptr::null_mut(), || {
-        if handle.is_null() {
-            set_last_error("ffi: handle is null".to_string());
-            return std::ptr::null_mut();
-        }
         let Some(q) = (unsafe { borrow_str(q, "query") }) else {
             return std::ptr::null_mut();
         };
-        let idx = unsafe { &*(handle as *const Index) };
-        match idx.query_postfix(q) {
-            Ok(mut ids) => {
-                clear_last_error();
-                ids.sort();
-                to_c_string(ids.join("\n"))
+        with_handle(handle, std::ptr::null_mut(), |idx| {
+            match idx.query_postfix(q) {
+                Ok(mut ids) => {
+                    clear_last_error();
+                    ids.sort();
+                    to_c_string(ids.join("\n"))
+                }
+                Err(e) => {
+                    set_last_error(e);
+                    std::ptr::null_mut()
+                }
             }
-            Err(e) => {
-                set_last_error(e);
-                std::ptr::null_mut()
-            }
-        }
+        })
     })
 }
 
@@ -466,11 +498,11 @@ mod tests {
             assert!(tagma_compile(std::ptr::null()).is_null());
 
             let q = to_cstring("urgent");
-            assert!(tagma_query(std::ptr::null_mut(), q.as_ptr()).is_null());
-            assert_eq!(tagma_index_add(std::ptr::null_mut(), q.as_ptr()), -1);
+            assert!(tagma_query(0, q.as_ptr()).is_null());
+            assert_eq!(tagma_index_add(0, q.as_ptr()), -1);
 
-            tagma_index_free(handle);
-            tagma_index_free(std::ptr::null_mut());
+            assert_eq!(tagma_index_free(handle), 0);
+            assert_eq!(tagma_index_free(0), 0, "a zero handle frees as a no-op");
             tagma_str_free(std::ptr::null_mut());
         }
     }
@@ -485,7 +517,7 @@ mod tests {
     fn invalid_utf8_inputs_return_defined_errors_without_panicking() {
         unsafe {
             let handle = tagma_index_new();
-            assert!(!handle.is_null());
+            assert_ne!(handle, 0);
             let bad = invalid_utf8_cstring();
 
             assert_eq!(tagma_index_add(handle, bad.as_ptr()), -1);
@@ -587,11 +619,111 @@ mod tests {
     #[test]
     fn null_handle_and_null_string_together_are_defined() {
         unsafe {
-            assert_eq!(tagma_index_add(std::ptr::null_mut(), std::ptr::null()), -1);
-            assert!(tagma_query(std::ptr::null_mut(), std::ptr::null()).is_null());
-            assert!(tagma_query_postfix(std::ptr::null_mut(), std::ptr::null()).is_null());
-            tagma_index_free(std::ptr::null_mut());
+            assert_eq!(tagma_index_add(0, std::ptr::null()), -1);
+            assert!(tagma_query(0, std::ptr::null()).is_null());
+            assert!(tagma_query_postfix(0, std::ptr::null()).is_null());
+            assert_eq!(tagma_index_free(0), 0);
             tagma_str_free(std::ptr::null_mut());
+        }
+    }
+
+    // --- handle safety (task kooky-snub) -----------------------------------
+
+    /// Freeing twice is a reported error, not a double free.
+    #[test]
+    fn double_free_returns_a_defined_error() {
+        unsafe {
+            let handle = tagma_index_new();
+            assert_eq!(tagma_index_free(handle), 0);
+            clear_last_error();
+            assert_eq!(tagma_index_free(handle), -1);
+            assert!(take_error().contains("freed index"));
+        }
+    }
+
+    /// Using a handle after freeing it is a reported error on every entry
+    /// point that takes one.
+    #[test]
+    fn use_after_free_returns_a_defined_error() {
+        unsafe {
+            let handle = tagma_index_new();
+            assert_eq!(tagma_index_free(handle), 0);
+
+            let line = to_cstring("a urgent");
+            assert_eq!(tagma_index_add(handle, line.as_ptr()), -1);
+            assert!(take_error().contains("freed index"));
+
+            let q = to_cstring("urgent");
+            assert!(tagma_query(handle, q.as_ptr()).is_null());
+            assert!(take_error().contains("freed index"));
+
+            assert!(tagma_query_postfix(handle, q.as_ptr()).is_null());
+            assert!(take_error().contains("freed index"));
+        }
+    }
+
+    /// Values this library never issued are rejected, including plausible
+    /// small integers and a real heap address — the shape of the old ABI's
+    /// `void *` handles.
+    #[test]
+    fn a_foreign_handle_is_rejected() {
+        unsafe {
+            let boxed = Box::new(0u64);
+            let as_pointer = (&*boxed as *const u64) as TagmaIndex;
+            for garbage in [1, 42, 0xDEAD_BEEF, u64::MAX, as_pointer] {
+                clear_last_error();
+                assert_eq!(tagma_index_free(garbage), -1, "handle {garbage:#x}");
+                let msg = take_error();
+                assert!(msg.contains("not issued by tagma"), "got {msg}");
+            }
+        }
+    }
+
+    /// The generation case: after a free the slot is reused, and the stale
+    /// handle must not reach the index that took its place.
+    #[test]
+    fn a_stale_handle_is_not_confused_with_a_reused_slot() {
+        unsafe {
+            let first = tagma_index_new();
+            assert_eq!(tagma_index_free(first), 0);
+            let second = tagma_index_new();
+            assert_ne!(first, second, "a reused slot must issue a fresh handle");
+
+            let line = to_cstring("a urgent");
+            assert_eq!(tagma_index_add(second, line.as_ptr()), 0);
+
+            assert_eq!(tagma_index_add(first, line.as_ptr()), -1);
+            assert!(take_error().contains("freed index"));
+            assert_eq!(tagma_index_free(first), -1);
+            assert!(take_error().contains("freed index"));
+
+            // The live index is untouched by the stale handle's traffic.
+            let q = to_cstring("urgent");
+            assert_eq!(from_c(tagma_query(second, q.as_ptr())), "a");
+            assert_eq!(tagma_index_free(second), 0);
+        }
+    }
+
+    /// One handle, many threads: the per-index lock serializes the writes
+    /// and every call sees a valid handle.
+    #[test]
+    fn one_handle_is_safe_to_use_from_several_threads() {
+        let handle = tagma_index_new();
+        std::thread::scope(|s| {
+            for t in 0..8 {
+                s.spawn(move || {
+                    for i in 0..32 {
+                        let line = to_cstring(&format!("id{t}_{i} urgent"));
+                        assert_eq!(unsafe { tagma_index_add(handle, line.as_ptr()) }, 0);
+                    }
+                });
+            }
+        });
+        unsafe {
+            let q = to_cstring("urgent");
+            let ids = from_c(tagma_query(handle, q.as_ptr()));
+            assert_eq!(ids.lines().count(), 8 * 32);
+            assert_eq!(tagma_index_free(handle), 0);
         }
     }
 

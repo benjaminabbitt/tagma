@@ -55,8 +55,9 @@ setup-go:
 
 # --- critical path -------------------------------------------------------
 
-# Universal green light: fmt-check + clippy (deny warnings) + test + conformance-rust.
-check: fmt-check lint test conformance-rust
+# Universal green light: fmt-check + clippy (deny warnings) + panic-freedom
+# lint for the WASM surface + test + conformance-rust.
+check: fmt-check lint lint-wasm test conformance-rust
     @echo "check: green"
 
 fmt:
@@ -67,6 +68,28 @@ fmt-check:
 
 lint:
     cargo clippy --workspace --all-targets -- -D warnings
+
+# Panic-freedom gate for crates/tagma-wasm (task oily-wheat).
+#
+# wasm32-unknown-unknown is panic="abort", so catch_unwind cannot protect
+# this crate the way it protects tagma-ffi: a panic aborts the wasm instance
+# under the host JS process. The only enforceable guarantee is "contains no
+# construct that can panic", which is what these denials check.
+#
+# The same set is also a #![deny(...)] in the crate root (so the workspace
+# `just lint` catches it too, and editors show it inline); repeating it here
+# means deleting those attributes does not silently delete the gate.
+lint-wasm:
+    cargo clippy -p tagma-wasm --all-targets --no-deps -- \
+        -D warnings \
+        -D clippy::unwrap_used \
+        -D clippy::expect_used \
+        -D clippy::panic \
+        -D clippy::unreachable \
+        -D clippy::todo \
+        -D clippy::unimplemented \
+        -D clippy::indexing_slicing \
+        -D clippy::string_slice
 
 test:
     cargo test --workspace
