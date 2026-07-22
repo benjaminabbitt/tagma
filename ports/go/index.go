@@ -18,6 +18,9 @@ import (
 // NewIndex.
 type Index struct {
 	items map[string][]Tag
+	// typeComparators is tagma.type name -> registered comparator
+	// (SPEC.md §9), set via RegisterType.
+	typeComparators map[string]TypeComparator
 }
 
 // hideConfigNamespace is the reserved namespace tagma.hide config tags live
@@ -124,12 +127,13 @@ const (
 	arityScalar
 )
 
-// arityTarget is the (namespace?, key) pair a tagma.arity config tag
-// targets, recovered from the config tag's own key via splitArityTarget.
-// Used as a map key, so it holds a dereferenced *string (nsPresent/ns)
-// rather than the *string itself, which isn't comparable across distinct
-// pointers to equal strings.
-type arityTarget struct {
+// configTarget is the (namespace?, key) pair a self-hosted config tag's
+// own key packs, recovered via splitConfigTarget — shared by tagma.arity
+// (SPEC.md §8) and tagma.type (SPEC.md §9), which both encode a target
+// this same first-colon-split way. Used as a map key, so it holds a
+// dereferenced *string (nsPresent/ns) rather than the *string itself,
+// which isn't comparable across distinct pointers to equal strings.
+type configTarget struct {
 	nsPresent bool
 	ns        string
 	key       string
@@ -225,7 +229,37 @@ func keyReveals(ref atomReference, patternKey keyPattern) bool {
 
 // NewIndex returns an empty Index.
 func NewIndex() *Index {
-	return &Index{items: make(map[string][]Tag)}
+	return &Index{items: make(map[string][]Tag), typeComparators: make(map[string]TypeComparator)}
+}
+
+// TypeComparator is a client-loadable comparator for the relational
+// operators ('>' '>=' '<' '<=', SPEC.md §9): registered under a type name
+// via Index.RegisterType and selected per (namespace, key) target by a
+// tagma.type:<target>=<name> declaration (SPEC.md §9). tagma itself ships
+// no knowledge of any type — registering one is entirely the client's
+// responsibility.
+//
+// Compare returns (-1, true) if a < b, (0, true) if a == b, (1, true) if
+// a > b — Go's own three-way-compare convention, pinned to exactly one of
+// -1/0/1 when ok is true (unlike the language-neutral four-valued spec
+// interface, SPEC.md §9, which has no single cross-language convention to
+// pin to); (_, false) — NotComparable — when a and b cannot be compared
+// under this type at all, e.g. either fails to parse as it. Implementations
+// MUST be pure and deterministic and MUST NOT panic (SPEC.md §9); this
+// port does not (and, absent a recover() at every call site, cannot
+// safely) guard against a panicking comparator.
+type TypeComparator interface {
+	Compare(a, b string) (result int, ok bool)
+}
+
+// RegisterType registers cmp under name (SPEC.md §9), so
+// tagma.type:<target>=<name> declarations naming it switch that target's
+// relational-operator matching to typed comparison — exclusively, taking
+// precedence over tagma's own §6 numeric grammar even for a numeral-shaped
+// value (SPEC.md §9 "Precedence"; see relationalMatches). Re-registering
+// the same name replaces the previously-registered comparator.
+func (idx *Index) RegisterType(name string, cmp TypeComparator) {
+	idx.typeComparators[name] = cmp
 }
 
 // AddItem adds tags to id. Calling AddItem more than once for the same id
@@ -449,13 +483,13 @@ func (idx *Index) HideConfig() HideConfig {
 // the hidden "tagma" family).
 //
 // Each config tag's key is a <target> string packing the target
-// (namespace?, key) pair; splitArityTarget recovers the pair via a
+// (namespace?, key) pair; splitConfigTarget recovers the pair via a
 // first-colon split. On a target with both a "=scalar" and a "=set" tag on
 // record (possible since this port has no untag/delete operation), scalar
 // wins — the same fail-safe posture as hide-ns's hide-wins rule. A target
 // whose only recorded value is neither "scalar" nor "set" configures
 // nothing and is omitted, so lookups fall through to the Set default.
-func (idx *Index) arityConfig() map[arityTarget]arity {
+func (idx *Index) arityConfig() map[configTarget]arity {
 	type verdict struct{ saysScalar, saysSet bool }
 	targets := map[string]verdict{}
 	for _, tags := range idx.items {
@@ -475,43 +509,136 @@ func (idx *Index) arityConfig() map[arityTarget]arity {
 			targets[t.Key] = v
 		}
 	}
-	config := map[arityTarget]arity{}
+	config := map[configTarget]arity{}
 	for target, v := range targets {
 		switch {
 		case v.saysScalar:
-			config[splitArityTarget(target)] = arityScalar
+			config[splitConfigTarget(target)] = arityScalar
 		case v.saysSet:
-			config[splitArityTarget(target)] = arityDefault
+			config[splitConfigTarget(target)] = arityDefault
 		}
 	}
 	return config
 }
 
-// splitArityTarget splits a tagma.arity config tag's <target> key into the
-// target (namespace?, key) pair it encodes (SPEC.md §8): a first-colon
-// split, not applied recursively — everything before the first ':' is the
-// target namespace, everything after is the target key; no ':' means a
-// null target namespace and the whole string is the target key. A target
-// key that itself contains a ':' (only reachable by quoting <target> at
+// splitConfigTarget splits a self-hosted config tag's <target> key into
+// the target (namespace?, key) pair it encodes (SPEC.md §8-9, shared by
+// tagma.arity and tagma.type): a first-colon split, not applied
+// recursively — everything before the first ':' is the target namespace,
+// everything after is the target key; no ':' means a null target
+// namespace and the whole string is the target key. A target key that
+// itself contains a ':' (only reachable by quoting <target> at
 // config-write time) is indistinguishable from a namespace separator here
 // — a documented limitation, not disambiguated.
-func splitArityTarget(target string) arityTarget {
+func splitConfigTarget(target string) configTarget {
 	if i := strings.IndexByte(target, ':'); i != -1 {
-		return arityTarget{nsPresent: true, ns: target[:i], key: target[i+1:]}
+		return configTarget{nsPresent: true, ns: target[:i], key: target[i+1:]}
 	}
-	return arityTarget{key: target}
+	return configTarget{key: target}
 }
 
 // arityLookup looks up (ns, key)'s declared arity in a config built by
 // arityConfig, defaulting to arityDefault (Set) for any undeclared target
 // (SPEC.md §8).
-func arityLookup(config map[arityTarget]arity, ns *string, key string) arity {
-	t := arityTarget{key: key}
+func arityLookup(config map[configTarget]arity, ns *string, key string) arity {
+	t := configTarget{key: key}
 	if ns != nil {
 		t.nsPresent = true
 		t.ns = *ns
 	}
 	return config[t]
+}
+
+// typeConfigNamespace is the reserved namespace tagma.type config tags
+// live in (SPEC.md §9): a config tag is tagma.type:<target>=<typename>,
+// so this is the tag's own namespace, not the target it declares (which
+// is encoded, first-colon split, in the tag's key — see
+// splitConfigTarget).
+const typeConfigNamespace = "tagma.type"
+
+// typeConfig derives the current tagma.type config (SPEC.md §9) by
+// reading tagma.type:<target>=<typename> tags back out of the store — the
+// same self-hosted pattern as arityConfig/hiddenPatterns: an internal
+// scan of idx.items that bypasses the query-time hide (tagma.type is
+// itself under the hidden "tagma" family).
+//
+// Unlike arity's scalar/set (an ordered pair with a most-restrictive
+// winner) or hide's true/false (hide-wins), declared type *names* have no
+// ordering to break a tie with — SPEC.md §9's conflict rule is instead: a
+// target with more than one *distinct* declared type name on record
+// disables typed comparison for that target outright, so such a target is
+// simply omitted here (falling through to the numeric grammar), rather
+// than resolving to some picked winner.
+func (idx *Index) typeConfig() map[configTarget]string {
+	names := map[string]map[string]struct{}{} // target -> set of distinct declared names
+	for _, tags := range idx.items {
+		for _, t := range tags {
+			if t.Namespace == nil || *t.Namespace != typeConfigNamespace || t.Value == nil {
+				continue
+			}
+			set, ok := names[t.Key]
+			if !ok {
+				set = map[string]struct{}{}
+				names[t.Key] = set
+			}
+			set[*t.Value] = struct{}{}
+		}
+	}
+	config := map[configTarget]string{}
+	for target, set := range names {
+		if len(set) != 1 {
+			continue // no declaration, or a conflicting one: fall back to numeric
+		}
+		for name := range set {
+			config[splitConfigTarget(target)] = name
+		}
+	}
+	return config
+}
+
+// typeLookup looks up (ns, key)'s declared type name in a config built by
+// typeConfig, returning ("", false) for any undeclared, or conflicting
+// (never entered into the map by typeConfig), target (SPEC.md §9).
+func typeLookup(config map[configTarget]string, ns *string, key string) (string, bool) {
+	t := configTarget{key: key}
+	if ns != nil {
+		t.nsPresent = true
+		t.ns = *ns
+	}
+	name, ok := config[t]
+	return name, ok
+}
+
+// typeCtx carries the query-time state relational-operator matching needs
+// for SPEC.md §9's typed-comparison fallback: the currently-declared
+// tagma.type config paired with the store's registered comparators. Built
+// fresh per Index.resolveAtom call — tagma.type is evaluated at query
+// time (SPEC.md §9 "Ordering"), unlike tagma.arity's write-time
+// enforcement (§8). A nil *typeCtx behaves exactly as if no types were
+// ever declared or registered, so relationalMatches falls straight
+// through to the numeric grammar — the pre-extension behavior, unchanged.
+type typeCtx struct {
+	config      map[configTarget]string
+	comparators map[string]TypeComparator
+}
+
+// comparatorFor returns the registered TypeComparator for (ns, key)'s
+// declared type, or (nil, false) if there is no declaration, the
+// declaration conflicts (already excluded from tc.config by typeConfig),
+// or no comparator is registered under the declared name — all three
+// collapse to the same "fall back to the numeric grammar" outcome
+// (SPEC.md §9's failure semantics). tc itself may be nil (see the type
+// doc); comparatorFor is nil-receiver-safe.
+func (tc *typeCtx) comparatorFor(ns *string, key string) (TypeComparator, bool) {
+	if tc == nil {
+		return nil, false
+	}
+	name, ok := typeLookup(tc.config, ns, key)
+	if !ok {
+		return nil, false
+	}
+	cmp, ok := tc.comparators[name]
+	return cmp, ok
 }
 
 // participatingIDs returns the ids of items that *participate* in a query
@@ -545,6 +672,12 @@ func (idx *Index) participatingIDs(vis visibility) idSet {
 // built here is always local to this one atom's own reference, regardless
 // of whether other atoms in the same compound query reference other
 // (ns, key) pairs.
+//
+// Also builds a fresh typeCtx (SPEC.md §9) from the store's current
+// tagma.type config and registered comparators, so a relational operator
+// ('>' '>=' '<' '<=') can fall back to typed comparison — tagma.type is
+// evaluated at query time, so this is rebuilt on every call rather than
+// cached.
 func (idx *Index) resolveAtom(text string) (idSet, error) {
 	a, err := parseAtom(text)
 	if err != nil {
@@ -555,6 +688,7 @@ func (idx *Index) resolveAtom(text string) (idSet, error) {
 		references[ref] = struct{}{}
 	}
 	vis := idx.visibilityFor(references)
+	tc := &typeCtx{config: idx.typeConfig(), comparators: idx.typeComparators}
 	s := make(idSet)
 	for id, tags := range idx.items {
 		visible := make([]Tag, 0, len(tags))
@@ -563,7 +697,7 @@ func (idx *Index) resolveAtom(text string) (idSet, error) {
 				visible = append(visible, t)
 			}
 		}
-		if atomMatchesAny(a, visible) {
+		if atomMatchesAny(a, visible, tc) {
 			s[id] = struct{}{}
 		}
 	}
@@ -573,10 +707,11 @@ func (idx *Index) resolveAtom(text string) (idSet, error) {
 // firstColonSplit splits target on its first ':' — not applied
 // recursively: everything before the first ':' is the left part,
 // everything after is the right; no ':' means no left part and the whole
-// string is the right. Shared by splitArityTarget (SPEC.md §8's
-// tagma.arity target) and parseHideTarget (SPEC.md §7's tagma.hide
-// target) — both config facets pack a (namespace?, key-or-pattern) pair
-// into one string this same way.
+// string is the right. Used by parseHideTarget (SPEC.md §7's tagma.hide
+// target); splitConfigTarget (SPEC.md §8's tagma.arity and §9's
+// tagma.type targets) packs a (namespace?, key) pair the same first-colon
+// way but with its own inline split (both config facets share the
+// convention, not this helper's code).
 func firstColonSplit(target string) (nsPart string, hasNs bool, rest string) {
 	if i := strings.IndexByte(target, ':'); i != -1 {
 		return target[:i], true, target[i+1:]

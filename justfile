@@ -102,12 +102,27 @@ conformance-js:
     # -count=1 works around in conformance-go — a wasm pkg built before a
     # tagma-core change (e.g. new features/*.feature scenarios) would sit on
     # disk looking "built" and silently mask a stale PASS.
+    #
+    # bindings/js/cucumber.json globs ../../features directly (not a
+    # curated symlink set like bindings/python's), so a shared feature file
+    # a binding can't yet support must be tagged `@core-only` and excluded
+    # there ("tags": "not @core-only") rather than left to fail here.
+    # features/type-comparison.feature (SPEC.md §9) is the first: it needs
+    # a client-registered TypeComparator callback, which only tagma-core
+    # and ports/go currently expose — the C FFI/WASM/CLI/JS/Python
+    # callback-marshalling seam is its own, later workstream.
     just build-wasm
     cd bindings/js && npx cucumber-js
 
 conformance-py: setup-py
     #!/usr/bin/env bash
     set -euo pipefail
+    # bindings/python/features symlinks each supported feature file in by
+    # name (curated allowlist), unlike bindings/js's direct glob of
+    # ../../features — so a feature this binding can't yet support (see
+    # conformance-js's comment on features/type-comparison.feature, SPEC.md
+    # §9) simply isn't symlinked here, and behave never sees it. No tag
+    # exclusion needed on this side; don't add a symlink for it.
     cd bindings/python
     .venv/bin/maturin develop --release
     .venv/bin/behave features --no-capture

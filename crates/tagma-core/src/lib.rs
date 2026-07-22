@@ -8,7 +8,9 @@ pub mod infix;
 pub mod postfix;
 pub mod tag;
 pub mod token;
+pub mod typecmp;
 
 pub use atom::{Atom, Op, Pos};
 pub use index::{tag_hidden, HideConfig, Index};
 pub use tag::Tag;
+pub use typecmp::TypeComparator;

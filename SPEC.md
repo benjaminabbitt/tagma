@@ -542,3 +542,203 @@ untag/delete operation, a target key's arity config is append-only, so
 `<target>` may end up with both a `=scalar` and a `=set` tag on record; on
 that conflict, `scalar` wins — the same fail-safe posture as `hide`'s
 hide-wins rule (§7), the more restrictive reading taking precedence.
+
+## 9. Client-loadable type comparison — `tagma.type`
+
+§6's numeric grammar (`-?[0-9]+(\.[0-9]+)?`) is the only interpretation
+`>` `>=` `<` `<=` know natively, so a value outside it — a semver string
+like `0.7.0`, a date, a version range — can never be ordered: a consumer
+cannot ask `blocks-release<=0.7.0`. This section adds a **client-loadable
+comparison extension**: an application registers a typed comparator for a
+type name at the host-language binding level, without tagma itself ever
+knowing what the type means, and declares which `(namespace?, key)`
+targets use it via a third self-hosted meta-feature, `tagma.type`,
+specified strictly parallel to `tagma.hide` (§7) and `tagma.arity` (§8).
+
+**The comparison interface.** Spec-level and language-neutral:
+
+```text
+compare(a: string, b: string) -> { Less, Equal, Greater, NotComparable }
+```
+
+Four-valued, deliberately **not** an integer: there is no cross-language
+standard for a three-way-compare return type — C and Java specify only the
+*sign* of an integer, Go's own convention pins it to exactly `-1`/`0`/`+1`,
+and Rust and C++ return an enum. `NotComparable` is modeled on C++20's
+`std::partial_ordering::unordered`: a comparator is allowed to say "I
+cannot order this pair at all," distinct from `Equal`.
+
+Per-port renderings of the same four-valued type:
+
+- **Rust**: `fn compare(&self, a: &str, b: &str) -> Option<std::cmp::Ordering>`
+  on a `TypeComparator` trait (`Send + Sync`), registered via
+  `Index::register_type(&mut self, name: &str, cmp: Arc<dyn TypeComparator>)`.
+  `None` is `NotComparable`.
+- **Go**: `type TypeComparator interface { Compare(a, b string) (result int, ok bool) }`
+  on the `Index`, registered via `Index.RegisterType(name string, cmp TypeComparator)`.
+  `result` is Go's usual three-way-compare convention, pinned to *exactly*
+  `-1`/`0`/`+1` when `ok` is `true`; `ok == false` is `NotComparable`.
+
+**Contract.** A `TypeComparator` implementation MUST be **pure and
+deterministic** (the same pair always yields the same result) and MUST
+**NOT panic** — tagma-core cannot safely guard a foreign callback against
+unwinding, so a panicking comparator's behavior is implementation-defined.
+For every pair of values it does *not* return `NotComparable` for, an
+implementation MUST satisfy the standard ordering-relation properties:
+
+- **Antisymmetry** — if `compare(a, b)` is `Less`, `compare(b, a)` is
+  `Greater` (and vice versa); if `compare(a, b)` is `Equal`, so is
+  `compare(b, a)`.
+- **Transitivity** — if `compare(a, b)` and `compare(b, c)` agree on a
+  direction (both `Less`, or both `Greater`), `compare(a, c)` agrees too.
+- **Equality-consistency** — if `compare(a, b)` is `Equal`, then
+  `compare(a, c)` and `compare(b, c)` agree, for any `c`, i.e. `a` and `b`
+  are interchangeable with respect to ordering against anything else.
+
+**Config tag form.** `tagma.type:<target>=<typename>` declares the type
+name of the target key encoded in `<target>` — the config tag's own key,
+not its value, exactly `tagma.arity`'s shape (§8). `<typename>` is any
+legal tag value (no fixed enumeration, unlike `hide`'s `<bool>` or
+`arity`'s `<arity>` token, since the set of type names is open — whatever
+names a client registers).
+
+**Target encoding — a first-colon split**, reusing `tagma.arity`'s target
+grammar verbatim (§8): `<targetkey>` alone for a null target namespace
+(e.g. `tagma.type:blocks-release=semver`), or `<targetns>:<targetkey>` for
+a named one, quoted (§2) whenever the target string itself contains a `:`
+(e.g. `tagma.type:"triage:eta"=date`). The same first-colon-split
+recovery, and the same documented-not-solved colon-in-key limitation, apply
+unchanged (§8).
+
+**Conflicting declarations.** Because this reference core has no
+untag/delete operation, a target's type config is append-only, so
+`<target>` may end up with more than one *distinct* `tagma.type:<target>=`
+value on record. Unlike `arity`'s scalar/set (an ordered pair with a
+most-restrictive winner) or `hide`'s true/false (hide always wins), there
+is no ordering between two type names — `semver` is not "more restrictive"
+than `date`. **A target with conflicting `tagma.type` declarations
+disables typed comparison for that target outright, falling back to the §6
+numeric grammar** — the same outcome as an undeclared target, not an
+error.
+
+**Ordering — evaluated at query time.** `tagma.arity` is enforced at
+*write* time (§8): a declaration governs writes that happen after tagma
+has it on record, and never retroactively changes storage. `tagma.type` is
+different — it changes *comparison*, not storage, so it is evaluated at
+**query** time: every query re-reads the currently-declared `tagma.type`
+config and currently-registered comparators, and a value already written
+before a declaration or a comparator registration is compared under
+whatever config is active *at query time*, not at write time.
+
+**Failure semantics — all no-match, never error.** This is tagma's own
+house rule (§4: "An operator only matches tags it can interpret. No
+errors, no coercion surprises"), extended rather than broken by this
+feature — typed comparison must not become the only part of tagma that can
+fail an evaluation instead of simply not matching:
+
+| condition | outcome |
+|---|---|
+| value not parseable as its declared type | atom does not match that tag |
+| declared type name has no registered comparator | ignore the declaration, fall back to §6 numeric grammar |
+| comparator returns `NotComparable` | atom does not match that tag |
+| conflicting declarations on the target | fall back to §6 numeric grammar |
+| comparator panics | contract violation (see Contract above); behavior implementation-defined |
+
+**Precedence — an explicit declaration trumps the numeric grammar.** When
+a relational operator (`>` `>=` `<` `<=`) compares a tag's value against
+an atom's literal value:
+
+1. If the tag's `(namespace, key)` target has a non-conflicting
+   `tagma.type` declaration **and** a comparator is registered under that
+   declared name, the comparator is used **exclusively**: the atom matches
+   iff the comparator's result satisfies the operator, and if the
+   comparator returns `NotComparable` — including because a value isn't
+   well-formed for that type — the atom does not match. The §6 numeric
+   grammar is **not** consulted for this pair, even if both values happen
+   to also parse as numerals.
+2. Otherwise — no declaration, a declaration naming an unregistered type,
+   or a conflicting declaration (see above) — comparison falls back to the
+   §6 numeric grammar, exactly as if this section didn't exist.
+
+Declaring `tagma.type` is an **opt-in to typed semantics for that
+target**, and typed semantics take precedence over any syntactic
+resemblance to a numeral. Concretely: `1.9` and `1.10` both parse under
+§6's grammar as floats, so an undeclared target orders them `1.10 < 1.9`.
+But if that target is declared and registered as, say, a `version` type
+whose comparator treats `.`-separated components as an ordered tuple
+(the ordinary reading for a version number), the declared comparator's
+order governs instead — `1.10 > 1.9` — because the declaration says so.
+Numeric-shaped is not the same claim as numeric-meaning, and an explicit
+declaration resolves that ambiguity in the declarer's favor, not the
+grammar's.
+
+**Monotonicity.** This holds in a narrower, but still useful, form than a
+first read of "extension" might suggest:
+
+- **For undeclared targets — the overwhelming majority of any store —
+  monotonicity holds unconditionally.** Case 2 above governs an undeclared
+  target regardless of what comparators are registered or under what
+  names; registering a `TypeComparator` can never perturb a query over a
+  target nobody declared a type for. Registering an extension is always
+  safe with respect to the rest of the store.
+- **For a *declared* target, a `tagma.type` declaration MAY change a
+  result the numeric grammar alone would have produced — and that is the
+  point of declaring it, not a side effect to be suppressed.** The
+  declaration is explicit and visible in the data (SPEC.md §7's
+  self-hosted-config posture: config lives as ordinary, readable tags, not
+  hidden machinery); a client who writes `tagma.type:v=version` is asking
+  for `v`'s ordering to change, on that target only.
+
+An earlier draft of this section tried the opposite precedence — numeric
+grammar first, unconditionally, with typed comparison only a fallback
+when parsing failed — specifically to keep the stronger, SPARQL-style
+monotonicity guarantee below intact. That was wrong: it let numeric
+interpretation silently override an explicit declaration whenever a value
+happened to also be numeral-shaped, which is exactly the `1.9`/`1.10`
+case above — the declaration is ignored precisely where it was written to
+matter. This section chooses a correct answer for declared targets over
+preserving a monotonicity guarantee for them; the guarantee that survives
+(undeclared targets are never affected) is the one that matters in
+practice, since typed comparison is opt-in, per target, by construction.
+
+**Prior art.**
+
+- **SPARQL 1.1 §17.3.1, Operator Extensibility** — prior art for the
+  *mechanism*: a pluggable `<` for a datatype SPARQL doesn't know
+  natively, registered by an implementation or client. This section
+  **deliberately diverges from SPARQL's own precedence rule**: SPARQL only
+  invokes an extension function in place of what would otherwise be a type
+  error, so a built-in interpretation that succeeds always wins over an
+  extension. tagma instead lets an explicit `tagma.type` declaration take
+  precedence over its own built-in numeric grammar whenever a comparator
+  is registered for it (see "Precedence" above) — the declaration is what
+  the client explicitly asked for, and letting a syntactic coincidence
+  silently override it produces wrong orderings (§6's grammar has no
+  concept of `1.10 > 1.9`). §17.3.1 is cited here for the
+  registration/pluggable-ordering idea, not for its precedence rule, which
+  this section does not follow.
+  <https://www.w3.org/TR/sparql11-query/#operatorExtensibility>
+- **SPARQL 1.1 §15.1, ORDER BY** — "SPARQL does not define a total
+  ordering of all possible RDF terms"; an unsupported datatype's relative
+  order is left undefined, not an error — the same posture this section's
+  failure-semantics table takes. <https://www.w3.org/TR/sparql11-query/#modOrderBy>
+- **PostgreSQL §36.14, Index Method Strategies (xindex)** — a B-tree
+  operator class's support function 1, `compare`, is the required,
+  canonical registered-comparator contract (`sortsupport`, an optional
+  accelerant, is not required); this section's `TypeComparator` mirrors
+  that required/optional split by specifying only `compare`.
+  <https://www.postgresql.org/docs/current/xindex.html>
+- **Unicode UTS #10 / ICU collation** — why this section specifies a
+  *comparator*, not a sort-key function: ICU's own guidance is that
+  `compare()` is faster for a one-off comparison, and sort keys suit
+  databases that pay per call; UTS #10 calls a sort key "a logical
+  intermediate object," with only the resulting order normative. An
+  optional order-preserving key-projection extension point is a
+  recognised future addition here too, if indexed range scans over typed
+  values are ever added — not part of this slice.
+  <https://www.unicode.org/reports/tr10/>
+- **JSON Schema 2020-12 §7, `format`** — annotation by default: an
+  implementation MUST collect an unrecognized `format` value and MUST NOT
+  fail validation because of it. This section's "unregistered type name ->
+  ignore the declaration" rule is the same posture: an unrecognized name
+  configures nothing, quietly. <https://json-schema.org/draft/2020-12/json-schema-validation>
