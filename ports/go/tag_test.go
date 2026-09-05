@@ -2,6 +2,65 @@ package tagma
 
 import "testing"
 
+func strptr(s string) *string { return &s }
+
+// TestTagStringCanonical pins the canonical write-side spelling: bare where the
+// content is a valid bare-token, quoted where a reserved character or the empty
+// string would otherwise be misread.
+func TestTagStringCanonical(t *testing.T) {
+	cases := []struct {
+		tag  Tag
+		want string
+	}{
+		{Tag{Key: "urgent"}, "urgent"},
+		{Tag{Key: "range", Value: strptr("5")}, "range=5"},
+		{Tag{Namespace: strptr("geo"), Key: "lat", Value: strptr("57.64")}, "geo:lat=57.64"},
+		{Tag{Namespace: strptr("hew"), Key: "sha256", Value: strptr("0123abcd")}, "hew:sha256=0123abcd"},
+		{Tag{Key: "note", Value: strptr("a=b")}, `note="a=b"`}, // '=' forces quoting
+		{Tag{Namespace: strptr("a:b"), Key: "k"}, `"a:b":k`},   // ':' in ns
+		{Tag{Key: "x", Value: strptr("")}, `x=""`},             // present empty value
+		{Tag{Key: "x", Value: strptr(`a"b`)}, `x="a""b"`},      // inner quote doubled
+	}
+	for _, c := range cases {
+		if got := c.tag.String(); got != c.want {
+			t.Errorf("Tag%+v.String() = %q, want %q", c.tag, got, c.want)
+		}
+	}
+}
+
+// TestTagStringRoundTrips is the inverse property: ParseTag(t.String()) == t for
+// every tag, including the ones whose components need quoting.
+func TestTagStringRoundTrips(t *testing.T) {
+	tags := []Tag{
+		{Key: "urgent"},
+		{Key: "range", Value: strptr("5")},
+		{Namespace: strptr("hew"), Key: "sha256", Value: strptr("deadbeef")},
+		{Key: "note", Value: strptr("a=b c:d")},
+		{Namespace: strptr("a b"), Key: "k", Value: strptr("")},
+		{Key: "x", Value: strptr(`a"b`)},
+		{Key: "and"}, // a reserved word is an ordinary write-side key
+	}
+	for _, want := range tags {
+		got, err := ParseTag(want.String())
+		if err != nil {
+			t.Fatalf("ParseTag(%q) from %+v: %v", want.String(), want, err)
+		}
+		if !tagsEqual(got, want) {
+			t.Errorf("round-trip: ParseTag(%q) = %+v, want %+v", want.String(), got, want)
+		}
+	}
+}
+
+func tagsEqual(a, b Tag) bool {
+	eq := func(x, y *string) bool {
+		if (x == nil) != (y == nil) {
+			return false
+		}
+		return x == nil || *x == *y
+	}
+	return eq(a.Namespace, b.Namespace) && a.Key == b.Key && eq(a.Value, b.Value)
+}
+
 // TestParseTagValid transcribes PLAN.md Appendix B.1 (valid rows).
 func TestParseTagValid(t *testing.T) {
 	cases := []struct {

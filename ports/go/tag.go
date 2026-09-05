@@ -2,6 +2,7 @@ package tagma
 
 import (
 	"fmt"
+	"strings"
 )
 
 // Tag is a parsed (namespace?, key, value?) triple.
@@ -91,4 +92,37 @@ func ParseTag(s string) (Tag, error) {
 	}
 
 	return t, nil
+}
+
+// String renders the tag in its canonical write-side form (SPEC.md §2):
+//
+//	(namespace ":")? key ("=" value)?
+//
+// Each component is emitted bare where its content is a valid bare-token and
+// quoted otherwise — the shortest spelling that reparses to the same content. It
+// is the exact inverse of ParseTag: for every Tag t, ParseTag(t.String()) equals
+// t. Quoting is what keeps a component whose content holds a reserved character
+// (":", "=", a quote, whitespace, …) — or the empty string, which is not a
+// bare-token — from being misread as a separator or a different component.
+func (t Tag) String() string {
+	var b strings.Builder
+	if t.Namespace != nil {
+		b.WriteString(emitComponent(*t.Namespace))
+		b.WriteByte(':')
+	}
+	b.WriteString(emitComponent(t.Key))
+	if t.Value != nil {
+		b.WriteByte('=')
+		b.WriteString(emitComponent(*t.Value))
+	}
+	return b.String()
+}
+
+// emitComponent spells one component's content as a token: bare when it is a
+// valid bare-token (isToken), quoted otherwise. The inverse of parseComponent.
+func emitComponent(s string) string {
+	if isToken(s) {
+		return s
+	}
+	return quoteSuggestion(s)
 }
