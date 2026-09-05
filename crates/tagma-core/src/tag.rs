@@ -170,11 +170,16 @@ mod tests {
     }
 
     #[test]
-    fn doubled_quote_escapes_a_literal_quote() {
+    fn backslash_escapes_a_literal_quote() {
         assert_eq!(
-            Tag::parse("x=\"say \"\"hi\"\"\""),
+            Tag::parse("x=\"say \\\"hi\\\"\""),
             Ok(t(None, "x", Some("say \"hi\"")))
         );
+    }
+
+    #[test]
+    fn backslash_escapes_a_literal_backslash() {
+        assert_eq!(Tag::parse("x=\"a\\\\b\""), Ok(t(None, "x", Some("a\\b"))));
     }
 
     #[test]

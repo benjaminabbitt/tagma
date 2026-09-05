@@ -39,10 +39,11 @@ Feature: Tag parsing
     A `"`-quoted token is legal in the namespace, key, or value position.
     Quoting is syntax, not data: the canonical, stored value is always the
     decoded content, so a quoted spelling that didn't need quoting (e.g.
-    "3.5") parses identically to its bare spelling. `""` inside the quotes
-    escapes one literal `"`. (Table cells here embed literal `"` characters,
-    so the step arguments below are single-quote-delimited — the same
-    {string} cucumber-expression type, just the other legal delimiter.)
+    "3.5") parses identically to its bare spelling. Backslash is the escape:
+    `\"` inside the quotes is a literal `"` and `\\` a literal `\`. (Table cells
+    here embed literal `"` and `\` characters, so the step arguments below are
+    single-quote-delimited — the same {string} cucumber-expression type, just
+    the other legal delimiter.)
     When the tag '<input>' is parsed
     Then it parses with namespace '<namespace>', key '<key>', value '<value>'
 
@@ -52,7 +53,7 @@ Feature: Tag parsing
       | note="hello world"          |           | note | hello world           |
       | "a:b"=c                     |           | a:b  | c                     |
       | x="3.5"                     |           | x    | 3.5                   |
-      | x="say ""hi"""              |           | x    | say "hi"              |
+      | x="say \"hi\""              |           | x    | say "hi"              |
 
   Scenario Outline: invalid tags
     Includes the empty-string input, which must also fail to parse. The

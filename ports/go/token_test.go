@@ -43,10 +43,10 @@ func TestParseComponentErrorNamesQuoting(t *testing.T) {
 	if !strings.Contains(err.Error(), "quoted") || !strings.Contains(err.Error(), `"a/b"`) {
 		t.Errorf("error does not name quoting or the working spelling: %v", err)
 	}
-	// The suggestion is itself a valid qtoken, inner quotes doubled.
+	// The suggestion is itself a valid qtoken, inner quotes backslash-escaped.
 	_, err = parseComponent(`a"b/c`)
-	if err == nil || !strings.Contains(err.Error(), `"a""b/c"`) {
-		t.Errorf("error lacks the doubled-quote suggestion: %v", err)
+	if err == nil || !strings.Contains(err.Error(), `"a\"b/c"`) {
+		t.Errorf("error lacks the backslash-escaped suggestion: %v", err)
 	}
 }
 

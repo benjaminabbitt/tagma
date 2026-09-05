@@ -25,7 +25,7 @@ A **tag** is a triple `(namespace?, key, value?)`:
 ```ebnf
 /* ---- lexical ---- */
 bare-token  ::= ( [A-Za-z0-9_+-] [A-Za-z0-9_.+-]* ) - ( "*" | "+" )
-qtoken      ::= '"' ( '""' | [^"] )* '"'    /* '""' escapes one literal '"' */
+qtoken      ::= '"' ( '\' ('"' | '\') | [^"\] )* '"'  /* \" and \\ are the only escapes */
 token       ::= bare-token | qtoken
 value-token ::= bare-token | qtoken         /* identical to token; see below */
 
@@ -130,19 +130,24 @@ into a tag or a query atom (e.g. `tagma:"triage:impact"` is the same key on
 both sides).
 
 - **Quoting is syntax, not data.** A `qtoken`'s canonical value is its
-  *decoded* content — delimiting quotes stripped, `""` undoubled to a
-  single literal `"` — and that decoded string is indistinguishable from
+  *decoded* content — delimiting quotes stripped, `\"` and `\\` decoded to a
+  literal `"` and `\` — and that decoded string is indistinguishable from
   the same content spelled as a `bare-token`, wherever the bare charset
   would have allowed it. `key="3.5"` and `key=3.5` parse to the identical
   tag; `due~"2026-..-.."` casts and matches identically to
   `due~2026-..-..` (§4's casting rule is unchanged by quoting). A token
   should be spelled quoted only when it must be: it contains a reserved
   character or whitespace, or it is the empty string.
-- **Escaping.** `""` inside a `qtoken` decodes to one literal `"` — the
-  only escape; there is no backslash metacharacter.
+- **Escaping.** Backslash is the escape: `\"` decodes to a literal `"` and
+  `\\` to a literal `\`. Those are the *only* two escapes — a `\` followed by
+  anything else is a parse error, so the grammar stays closed (no `\n`/`\t`/
+  `\uXXXX` sequence to define or misread). This matches the escaping the
+  formats tags are embedded in already use (JSON, YAML double-quoted, and the
+  hew pointer grammar), so a quoted value survives one level of nesting without
+  a second escaping convention colliding with it.
 - **Reserved characters and whitespace are legal, literal content** inside
-  a `qtoken`, including a literal `/` (see the postfix note below) and the
-  delimiter `"` itself (via `""`).
+  a `qtoken`, including a literal `/` (see the postfix note below); only `"`
+  (as `\"`) and `\` (as `\\`) are escaped.
 - **Presence vs. absence.** `""` is a *present* value that happens to be
   the empty string, distinct from that position being absent — the same
   distinction §1 already draws for unquoted tags. `key=""` is a valued tag

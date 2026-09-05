@@ -91,7 +91,7 @@ func parseComponent(s string) (string, error) {
 		if consumed != len(s) {
 			return "", fmt.Errorf("token: invalid quoted component %q: a component "+
 				"is either wholly quoted or wholly bare, never a mix — quote the "+
-				"whole of it, doubling any inner `\"`, i.e. %s", s, quoteSuggestion(s))
+				"whole of it, escaping any `\"` as `\\\"` and any `\\` as `\\\\`, i.e. %s", s, quoteSuggestion(s))
 		}
 		return content, nil
 	}
@@ -107,24 +107,27 @@ func parseComponent(s string) (string, error) {
 }
 
 // quoteSuggestion renders s as the qtoken that would carry it literally —
-// wrapped in '"' with every inner '"' doubled (SPEC.md §2) — so a parse
-// error can hand the caller the exact spelling that works, instead of only
-// naming what went wrong.
+// wrapped in '"', with every '\' written '\\' and every '"' written '\"'
+// (SPEC.md §2) — so a parse error can hand the caller the exact spelling that
+// works, instead of only naming what went wrong. The Replacer applies both
+// substitutions in one pass, so a backslash is never escaped twice.
 func quoteSuggestion(s string) string {
-	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+	return `"` + backslashEscaper.Replace(s) + `"`
 }
 
+var backslashEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`)
+
 // decodeQuotedPrefix decodes a '"'-delimited qtoken beginning at the start
-// of s (SPEC.md §2: qtoken ::= '"' ( '""' | [^"] )* '"'). A doubled `""`
-// inside the quotes decodes to one literal '"' — the only escape, no
-// backslash metacharacter. Returns the decoded content and the number of
-// bytes consumed from s (both delimiting quotes included), so callers can
-// either require the whole of s to be consumed (a fully-quoted component)
-// or continue scanning past it (a quoted span embedded in a larger string,
-// e.g. while lexing).
+// of s (SPEC.md §2: qtoken ::= '"' ( '\' ("\"" | "\\") | [^"\] )* '"'). The
+// two escapes are '\"' (a literal '"') and '\\' (a literal '\'); a '\'
+// followed by anything else is a parse error, keeping the escape set closed.
+// Returns the decoded content and the number of bytes consumed from s (both
+// delimiting quotes included), so callers can either require the whole of s to
+// be consumed (a fully-quoted component) or continue scanning past it (a
+// quoted span embedded in a larger string, e.g. while lexing).
 //
-// Returns an error if s doesn't start with '"', or if the quote is never
-// closed (an unterminated quote is a parse failure, SPEC.md §2).
+// Returns an error if s doesn't start with '"', if a '\' escape is malformed,
+// or if the quote is never closed (SPEC.md §2).
 func decodeQuotedPrefix(s string) (content string, consumed int, err error) {
 	if len(s) == 0 || s[0] != '"' {
 		return "", 0, fmt.Errorf("token: expected opening '\"' in %q", s)
@@ -132,25 +135,30 @@ func decodeQuotedPrefix(s string) (content string, consumed int, err error) {
 	var out strings.Builder
 	i := 1 // past the opening quote
 	for i < len(s) {
-		r, size := utf8.DecodeRuneInString(s[i:])
-		if r != '"' {
-			out.WriteRune(r)
-			i += size
-			continue
+		switch c := s[i]; c {
+		case '\\':
+			if i+1 >= len(s) {
+				return "", 0, fmt.Errorf("token: dangling '\\' at the end of quoted token %q: "+
+					"a backslash must be followed by '\"' or '\\'", s)
+			}
+			n := s[i+1]
+			if n != '"' && n != '\\' {
+				return "", 0, fmt.Errorf("token: invalid escape %q in %q: "+
+					"a backslash escapes only '\"' or '\\'", `\`+string(n), s)
+			}
+			out.WriteByte(n)
+			i += 2
+		case '"':
+			// The closing quote.
+			return out.String(), i + 1, nil
+		default:
+			out.WriteByte(c)
+			i++
 		}
-		after := i + size
-		if after < len(s) && s[after] == '"' {
-			// "" — an escaped literal quote; consume the second quote too.
-			out.WriteByte('"')
-			i = after + 1
-			continue
-		}
-		// The real closing quote.
-		return out.String(), after, nil
 	}
 	return "", 0, fmt.Errorf("token: unterminated quote in %q: every `\"` opens "+
 		"a span that must be closed; a literal `\"` inside a quoted token is "+
-		"written doubled (`\"\"`)", s)
+		"written `\\\"`", s)
 }
 
 // findUnquoted scans s left to right, skipping '"'-quoted spans (SPEC.md

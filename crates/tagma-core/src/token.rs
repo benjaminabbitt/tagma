@@ -76,7 +76,7 @@ pub(crate) fn parse_component(s: &str) -> Result<String, String> {
             return Err(format!(
                 "token: invalid quoted component {s:?}: a component is either \
                  wholly quoted or wholly bare, never a mix — quote the whole \
-                 of it, doubling any inner `\"`, i.e. {}",
+                 of it, escaping any `\"` as `\\\"` and any `\\` as `\\\\`, i.e. {}",
                 quote_suggestion(s)
             ));
         }
@@ -97,26 +97,27 @@ pub(crate) fn parse_component(s: &str) -> Result<String, String> {
 }
 
 /// Renders `s` as the `qtoken` that would carry it literally — wrapped in
-/// `"` with every inner `"` doubled (SPEC.md §2) — so a parse error can
-/// hand the caller the exact spelling that works, instead of only naming
-/// what went wrong.
+/// `"`, with every `\` written `\\` and every `"` written `\"` (SPEC.md §2)
+/// — so a parse error can hand the caller the exact spelling that works,
+/// instead of only naming what went wrong. Backslashes are escaped first so
+/// one is never escaped twice.
 fn quote_suggestion(s: &str) -> String {
-    format!("\"{}\"", s.replace('"', "\"\""))
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 /// Decodes a `"`-delimited `qtoken` beginning at the start of `s`
-/// (SPEC.md §2: `qtoken ::= '"' ( '""' | [^"] )* '"'`). `""` inside the
-/// quotes decodes to one literal `"` — the only escape, no backslash
-/// metacharacter. Returns the decoded content and the number of bytes
-/// consumed from `s` (both delimiting quotes included), so callers can
-/// either require the whole of `s` to be consumed (a fully-quoted
-/// component) or continue scanning past it (a quoted span embedded in a
-/// larger string, e.g. while lexing).
+/// (SPEC.md §2: `qtoken ::= '"' ( '\' ('"' | '\') | [^"\] )* '"'`). The two
+/// escapes are `\"` (a literal `"`) and `\\` (a literal `\`); a `\` followed
+/// by anything else is a parse error, keeping the escape set closed. Returns
+/// the decoded content and the number of bytes consumed from `s` (both
+/// delimiting quotes included), so callers can either require the whole of `s`
+/// to be consumed (a fully-quoted component) or continue scanning past it (a
+/// quoted span embedded in a larger string, e.g. while lexing).
 ///
 /// # Errors
 ///
-/// Returns a `String` if `s` doesn't start with `"`, or if the quote is
-/// never closed (SPEC.md §2: an unterminated quote is a parse failure).
+/// Returns a `String` if `s` doesn't start with `"`, if a `\` escape is
+/// malformed, or if the quote is never closed (SPEC.md §2).
 pub(crate) fn decode_quoted_prefix(s: &str) -> Result<(String, usize), String> {
     if !s.starts_with('"') {
         return Err(format!("token: expected opening '\"' in {s:?}"));
@@ -124,23 +125,29 @@ pub(crate) fn decode_quoted_prefix(s: &str) -> Result<(String, usize), String> {
     let mut out = String::new();
     let mut chars = s.char_indices().skip(1); // past the opening quote
     while let Some((i, c)) = chars.next() {
-        if c != '"' {
-            out.push(c);
-            continue;
-        }
-        let after = i + c.len_utf8();
-        if s[after..].starts_with('"') {
-            // "" — an escaped literal quote; consume the second quote too.
-            out.push('"');
-            chars.next();
-        } else {
-            // The real closing quote.
-            return Ok((out, after));
+        match c {
+            '\\' => match chars.next() {
+                Some((_, e @ ('"' | '\\'))) => out.push(e),
+                Some((_, other)) => {
+                    return Err(format!(
+                        "token: invalid escape '\\{other}' in {s:?}: \
+                         a backslash escapes only '\"' or '\\'"
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "token: dangling '\\' at the end of quoted token {s:?}: \
+                         a backslash must be followed by '\"' or '\\'"
+                    ));
+                }
+            },
+            '"' => return Ok((out, i + c.len_utf8())), // the closing quote
+            _ => out.push(c),
         }
     }
     Err(format!(
         "token: unterminated quote in {s:?}: every `\"` opens a span that must \
-         be closed; a literal `\"` inside a quoted token is written doubled (`\"\"`)"
+         be closed; a literal `\"` inside a quoted token is written `\\\"`"
     ))
 }
 
@@ -370,11 +377,21 @@ mod tests {
     }
 
     #[test]
-    fn decode_quoted_prefix_doubling_escape() {
+    fn decode_quoted_prefix_backslash_escape() {
         assert_eq!(
-            decode_quoted_prefix("\"say \"\"hi\"\"\"").unwrap(),
+            decode_quoted_prefix("\"say \\\"hi\\\"\"").unwrap(),
             ("say \"hi\"".to_string(), 12)
         );
+        assert_eq!(
+            decode_quoted_prefix("\"a\\\\b\"").unwrap(),
+            ("a\\b".to_string(), 6)
+        );
+    }
+
+    #[test]
+    fn decode_quoted_prefix_rejects_bad_escape() {
+        assert!(decode_quoted_prefix("\"a\\nb\"").is_err()); // \n is not a valid escape
+        assert!(decode_quoted_prefix("\"a\\").is_err()); // dangling backslash at EOF
     }
 
     #[test]
@@ -412,9 +429,9 @@ mod tests {
         let err = parse_component("a/b").unwrap_err();
         assert!(err.contains("quoted"), "{err}");
         assert!(err.contains("\"a/b\""), "{err}");
-        // The suggestion is itself a valid qtoken, inner quotes doubled.
+        // The suggestion is itself a valid qtoken, inner quotes backslash-escaped.
         let err = parse_component("a\"b/c").unwrap_err();
-        assert!(err.contains("\"a\"\"b/c\""), "{err}");
+        assert!(err.contains("\"a\\\"b/c\""), "{err}");
     }
 
     #[test]

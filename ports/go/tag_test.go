@@ -19,7 +19,8 @@ func TestTagStringCanonical(t *testing.T) {
 		{Tag{Key: "note", Value: strptr("a=b")}, `note="a=b"`}, // '=' forces quoting
 		{Tag{Namespace: strptr("a:b"), Key: "k"}, `"a:b":k`},   // ':' in ns
 		{Tag{Key: "x", Value: strptr("")}, `x=""`},             // present empty value
-		{Tag{Key: "x", Value: strptr(`a"b`)}, `x="a""b"`},      // inner quote doubled
+		{Tag{Key: "x", Value: strptr(`a"b`)}, `x="a\"b"`},      // inner quote backslash-escaped
+		{Tag{Key: "x", Value: strptr(`a\b`)}, `x="a\\b"`},      // inner backslash doubled
 	}
 	for _, c := range cases {
 		if got := c.tag.String(); got != c.want {
