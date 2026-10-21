@@ -96,6 +96,16 @@ pub(crate) fn parse_component(s: &str) -> Result<String, String> {
     }
 }
 
+/// Spells one component's content as a token: bare when it is a valid
+/// `bare-token`, quoted otherwise. The inverse of [`parse_component`].
+pub(crate) fn emit_component(s: &str) -> std::borrow::Cow<'_, str> {
+    if is_token(s) {
+        std::borrow::Cow::Borrowed(s)
+    } else {
+        std::borrow::Cow::Owned(quote_suggestion(s))
+    }
+}
+
 /// Renders `s` as the `qtoken` that would carry it literally — wrapped in
 /// `"`, with every `\` written `\\` and every `"` written `\"` (SPEC.md §2)
 /// — so a parse error can hand the caller the exact spelling that works,
