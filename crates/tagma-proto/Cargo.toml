@@ -11,7 +11,7 @@ description = "tagma's Tag as a protobuf message (proto/tagma/v1/tag.proto), wit
 # messages from two prost versions cannot be nested in one another.
 [dependencies]
 prost = "0.14"
-tagma-core = { path = "../tagma-core" }
+tagma-core = { version = "0.1.0", path = "../tagma-core" }
 
 # Generated into OUT_DIR at build time, never committed. Needs protoc on
 # PATH (or PROTOC).
