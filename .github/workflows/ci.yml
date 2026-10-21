@@ -16,6 +16,10 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      # tagma-proto generates its prost types at build time.
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
       - name: Install just
         uses: extractions/setup-just@v2
 

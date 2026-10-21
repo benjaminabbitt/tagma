@@ -1,6 +1,8 @@
 //! Tag parsing (SPEC.md §2; PLAN.md §7.1).
 
-use crate::token::{find_unquoted, parse_component};
+use std::fmt;
+
+use crate::token::{emit_component, find_unquoted, parse_component};
 
 /// A parsed tag: `(namespace?, key, value?)` (SPEC.md §1-2).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +68,25 @@ impl Tag {
             key,
             value,
         })
+    }
+}
+
+/// The canonical write-side form (SPEC.md §2): `(namespace ":")? key ("="
+/// value)?`, each component bare where its content is a `bare-token` and
+/// quoted otherwise, the shortest spelling that reparses to the same
+/// content. It is the inverse of [`Tag::parse`]: for every tag `t`,
+/// `Tag::parse(&t.to_string()) == Ok(t)`. ports/go's `Tag.String()` is the
+/// same form.
+impl fmt::Display for Tag {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(namespace) = &self.namespace {
+            write!(f, "{}:", emit_component(namespace))?;
+        }
+        f.write_str(&emit_component(&self.key))?;
+        if let Some(value) = &self.value {
+            write!(f, "={}", emit_component(value))?;
+        }
+        Ok(())
     }
 }
 
@@ -139,6 +160,48 @@ mod tests {
             "",
         ] {
             assert!(Tag::parse(s).is_err(), "expected {s:?} to fail parsing");
+        }
+    }
+
+    // --- canonical write-side form (Display) ---------------------------
+    // The same cases as ports/go's TestTagStringCanonical and
+    // TestTagStringRoundTrips, so the reference and the port agree.
+
+    #[test]
+    fn display_is_the_canonical_write_side_form() {
+        for (tag, want) in [
+            (t(None, "urgent", None), "urgent"),
+            (t(None, "range", Some("5")), "range=5"),
+            (t(Some("geo"), "lat", Some("57.64")), "geo:lat=57.64"),
+            (
+                t(Some("hew"), "sha256", Some("0123abcd")),
+                "hew:sha256=0123abcd",
+            ),
+            (t(None, "note", Some("a=b")), "note=\"a=b\""),
+            (t(Some("a:b"), "k", None), "\"a:b\":k"),
+            (t(None, "x", Some("")), "x=\"\""),
+            (t(None, "x", Some("a\"b")), "x=\"a\\\"b\""),
+            (t(None, "x", Some("a\\b")), "x=\"a\\\\b\""),
+        ] {
+            assert_eq!(tag.to_string(), want, "{tag:?}");
+        }
+    }
+
+    #[test]
+    fn display_round_trips_through_parse() {
+        for tag in [
+            t(None, "urgent", None),
+            t(None, "range", Some("5")),
+            t(Some("hew"), "sha256", Some("deadbeef")),
+            t(None, "note", Some("a=b c:d")),
+            t(Some("a b"), "k", Some("")),
+            t(None, "x", Some("a\"b")),
+            // A reserved word is an ordinary write-side key.
+            t(None, "and", None),
+            // Neither quantifier is a bare token, so each is quoted.
+            t(None, "*", Some("+")),
+        ] {
+            assert_eq!(Tag::parse(&tag.to_string()), Ok(tag.clone()), "{tag:?}");
         }
     }
 
