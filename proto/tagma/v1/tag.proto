@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+// A tagma tag as a protobuf message, for a system that stores or sends tags
+// inside its own messages (an event-sourced store, a gRPC service). The tag
+// grammar stays the portable form (ARCHITECTURE.md, "Interchange &
+// serialization"): this message carries a tag already parsed, and a
+// consumer that wants the string spells it canonically (tagma-core's
+// `Display for Tag`, ports/go's `Tag.String()`).
+package tagma.v1;
+
+// `(namespace?, key, value?)` (SPEC.md §1-2), each component its decoded
+// content: unquoted, with no grammar left in it. An absent namespace or
+// value is distinct from a present empty one (`x` and `x=""`).
+message Tag {
+  optional string namespace = 1;
+  string key = 2;
+  optional string value = 3;
+}
