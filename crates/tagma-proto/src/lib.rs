@@ -10,6 +10,11 @@
 //! writer's policy, not the wire's.
 #![deny(missing_docs)]
 
+/// The directory `tagma/v1/tag.proto` is imported from: the include path a
+/// consumer's build script gives protoc when its own `.proto` files import
+/// the message.
+pub const PROTO_INCLUDE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../proto");
+
 /// `tagma.v1`.
 pub mod v1 {
     #![allow(missing_docs)]
@@ -78,6 +83,12 @@ mod tests {
         assert_eq!(decode(&absent).value, None);
         assert_eq!(decode(&empty).value, Some(String::new()));
         assert_eq!(decode(&absent).namespace, None);
+    }
+
+    #[test]
+    fn the_include_directory_holds_the_proto() {
+        let proto = std::path::Path::new(super::PROTO_INCLUDE).join("tagma/v1/tag.proto");
+        assert!(proto.is_file(), "{}", proto.display());
     }
 
     #[test]
