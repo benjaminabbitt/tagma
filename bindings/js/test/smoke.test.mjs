@@ -37,7 +37,7 @@ test("parseTag: returns a plain object", () => {
 });
 
 test("errors throw JS Error with the core's message", () => {
-  assert.throws(() => parseTag("=5"), /tag: invalid key/);
+  assert.throws(() => parseTag("=5"), /^Error: token: invalid component ""/);
   assert.throws(() => compile("a and"), Error);
   const idx = new Index();
   assert.throws(() => idx.add("a =5"), Error);

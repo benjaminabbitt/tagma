@@ -161,7 +161,12 @@ conformance-js:
         exit 1
     fi
     just build-wasm
-    cd bindings/js && node_modules/.bin/cucumber-js
+    cd bindings/js
+    # The binding's own node:test unit tests (test/*.test.mjs) ride along
+    # here, against the wasm just built: no other recipe runs them, and
+    # `just check` (CI) has no wasm toolchain, so they had rotted unseen.
+    node --test "test/**/*.test.mjs"
+    node_modules/.bin/cucumber-js
 
 conformance-py: setup-py
     #!/usr/bin/env bash
