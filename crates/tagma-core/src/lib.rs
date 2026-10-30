@@ -13,6 +13,6 @@ pub mod typecmp;
 
 pub use atom::{Atom, Op, Pos};
 pub use index::{tag_hidden, HideConfig, Index};
-pub use rules::{Change, Code, Finding, Rules};
+pub use rules::{Change, Code, Finding, Origin, Rules};
 pub use tag::Tag;
 pub use typecmp::TypeComparator;

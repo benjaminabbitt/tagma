@@ -6,7 +6,7 @@
 use std::cmp::Ordering;
 use std::sync::Arc;
 
-use tagma_core::{Change, Code, Finding, Index, Rules, Tag, TypeComparator};
+use tagma_core::{Change, Code, Finding, Index, Origin, Rules, Tag, TypeComparator};
 
 // --- fixtures ----------------------------------------------------------
 
@@ -42,7 +42,7 @@ fn remove(list: &[&str]) -> Change {
     }
 }
 
-fn finding(code: Code, t: &str, args: &[(&str, &str)]) -> Finding {
+fn finding(code: Code, t: &str, args: &[(&str, &str)], origin: Origin) -> Finding {
     Finding {
         code,
         tag: tag(t),
@@ -50,7 +50,20 @@ fn finding(code: Code, t: &str, args: &[(&str, &str)]) -> Finding {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect(),
+        origin,
     }
+}
+
+/// A finding the change introduces: it does not hold for the item's
+/// current set (SPEC.md §13 "Introduced or existing").
+fn introduced(code: Code, t: &str, args: &[(&str, &str)]) -> Finding {
+    finding(code, t, args, Origin::Introduced)
+}
+
+/// A finding that already holds for the item's current set, under the same
+/// config — and every `check` finding (SPEC.md §13, §14).
+fn existing(code: Code, t: &str, args: &[(&str, &str)]) -> Finding {
+    finding(code, t, args, Origin::Existing)
 }
 
 /// Compares findings as a multiset (order is pinned separately, by
@@ -100,7 +113,7 @@ fn permit_allowlist_admits_only_tags_matching_an_active_true_pattern() {
     let change = add(&["triage:kind=bug", "triage.sub:x", "lang=en"]);
     assert_findings(
         idx.validate("a", &change),
-        vec![finding(Code::NotPermitted, "lang=en", &[])],
+        vec![introduced(Code::NotPermitted, "lang=en", &[])],
     );
 }
 
@@ -112,7 +125,7 @@ fn permit_false_wins_over_true_on_the_same_target() {
     ]);
     assert_findings(
         idx.validate("a", &add(&["triage:kind=bug"])),
-        vec![finding(Code::NotPermitted, "triage:kind=bug", &[])],
+        vec![introduced(Code::NotPermitted, "triage:kind=bug", &[])],
     );
 }
 
@@ -135,7 +148,7 @@ fn permit_bare_key_target_pins_the_null_namespace() {
     let idx = index(&[r#"cfg tagma.permit:"*:*"=false tagma.permit:lang=true"#]);
     assert_findings(
         idx.validate("a", &add(&["lang=en", "x:lang=en"])),
-        vec![finding(Code::NotPermitted, "x:lang=en", &[])],
+        vec![introduced(Code::NotPermitted, "x:lang=en", &[])],
     );
 }
 
@@ -144,7 +157,7 @@ fn permit_star_namespace_target_admits_the_key_under_every_namespace() {
     let idx = index(&[r#"cfg tagma.permit:"*:*"=false tagma.permit:"*:lang"=true"#]);
     assert_findings(
         idx.validate("a", &add(&["lang=en", "x:lang=en", "x:other"])),
-        vec![finding(Code::NotPermitted, "x:other", &[])],
+        vec![introduced(Code::NotPermitted, "x:other", &[])],
     );
 }
 
@@ -169,7 +182,7 @@ fn enum_admits_exactly_the_declared_values_one_tag_per_value() {
     assert_findings(idx.validate("a", &add(&["triage:kind=defect"])), vec![]);
     assert_findings(
         idx.validate("a", &add(&["triage:kind=bug"])),
-        vec![finding(
+        vec![introduced(
             Code::NotInEnum,
             "triage:kind=bug",
             &[("allowed", "chore"), ("allowed", "defect")],
@@ -192,7 +205,7 @@ fn enum_comma_value_is_one_literal_value_not_a_list() {
     assert_findings(idx.validate("a", &add(&[r#"k="a,b""#])), vec![]);
     assert_findings(
         idx.validate("a", &add(&["k=a"])),
-        vec![finding(Code::NotInEnum, "k=a", &[("allowed", "a,b")])],
+        vec![introduced(Code::NotInEnum, "k=a", &[("allowed", "a,b")])],
     );
 }
 
@@ -201,7 +214,7 @@ fn enum_rejects_a_valueless_tag_on_a_declared_target() {
     let idx = index(&["cfg tagma.enum:k=a"]);
     assert_findings(
         idx.validate("a", &add(&["k"])),
-        vec![finding(Code::NotInEnum, "k", &[("allowed", "a")])],
+        vec![introduced(Code::NotInEnum, "k", &[("allowed", "a")])],
     );
 }
 
@@ -221,8 +234,8 @@ fn range_bounds_are_inclusive() {
     assert_findings(
         idx.validate("a", &add(&["k=0", "k=6"])),
         vec![
-            finding(Code::OutOfRange, "k=0", &[("range", "1..5")]),
-            finding(Code::OutOfRange, "k=6", &[("range", "1..5")]),
+            introduced(Code::OutOfRange, "k=0", &[("range", "1..5")]),
+            introduced(Code::OutOfRange, "k=6", &[("range", "1..5")]),
         ],
     );
 }
@@ -234,8 +247,8 @@ fn range_with_an_absent_bound_is_open_on_that_side() {
     assert_findings(
         idx.validate("a", &add(&["lo=4", "hi=6"])),
         vec![
-            finding(Code::OutOfRange, "lo=4", &[("range", "5..")]),
-            finding(Code::OutOfRange, "hi=6", &[("range", "..5")]),
+            introduced(Code::OutOfRange, "lo=4", &[("range", "5..")]),
+            introduced(Code::OutOfRange, "hi=6", &[("range", "..5")]),
         ],
     );
 }
@@ -246,7 +259,7 @@ fn range_accepts_signed_numeral_bounds() {
     assert_findings(idx.validate("a", &add(&["k=-3"])), vec![]);
     assert_findings(
         idx.validate("a", &add(&["k=+1"])),
-        vec![finding(Code::OutOfRange, "k=+1", &[("range", "-5..-1")])],
+        vec![introduced(Code::OutOfRange, "k=+1", &[("range", "-5..-1")])],
     );
 }
 
@@ -257,8 +270,8 @@ fn range_declarations_on_one_target_intersect() {
     assert_findings(
         idx.validate("a", &add(&["k=3", "k=12"])),
         vec![
-            finding(Code::OutOfRange, "k=3", &[("range", "5..20")]),
-            finding(Code::OutOfRange, "k=12", &[("range", "1..10")]),
+            introduced(Code::OutOfRange, "k=3", &[("range", "5..20")]),
+            introduced(Code::OutOfRange, "k=12", &[("range", "1..10")]),
         ],
     );
 }
@@ -269,8 +282,8 @@ fn range_reports_one_finding_per_violated_declaration() {
     assert_findings(
         idx.validate("a", &add(&["k=0"])),
         vec![
-            finding(Code::OutOfRange, "k=0", &[("range", "1..10")]),
-            finding(Code::OutOfRange, "k=0", &[("range", "5..20")]),
+            introduced(Code::OutOfRange, "k=0", &[("range", "1..10")]),
+            introduced(Code::OutOfRange, "k=0", &[("range", "5..20")]),
         ],
     );
 }
@@ -281,8 +294,8 @@ fn range_uninterpretable_or_absent_value_is_not_comparable() {
     assert_findings(
         idx.validate("a", &add(&["k=tbd", "k"])),
         vec![
-            finding(Code::NotComparable, "k=tbd", &[("range", "1..5")]),
-            finding(Code::NotComparable, "k", &[("range", "1..5")]),
+            introduced(Code::NotComparable, "k=tbd", &[("range", "1..5")]),
+            introduced(Code::NotComparable, "k", &[("range", "1..5")]),
         ],
     );
 }
@@ -295,7 +308,7 @@ fn range_on_a_typed_target_compares_with_the_declared_comparator() {
     assert_findings(idx.validate("a", &add(&["v=1.9"])), vec![]);
     assert_findings(
         idx.validate("a", &add(&["v=1.11"])),
-        vec![finding(
+        vec![introduced(
             Code::OutOfRange,
             "v=1.11",
             &[("range", "1.2..1.10")],
@@ -311,7 +324,11 @@ fn validate_reports_a_type_mismatch_when_the_comparator_cannot_order_the_value()
     assert_findings(idx.validate("a", &add(&["v=1.2", "v"])), vec![]);
     assert_findings(
         idx.validate("a", &add(&["v=abc"])),
-        vec![finding(Code::TypeMismatch, "v=abc", &[("type", "version")])],
+        vec![introduced(
+            Code::TypeMismatch,
+            "v=abc",
+            &[("type", "version")],
+        )],
     );
 }
 
@@ -330,8 +347,8 @@ fn validate_reports_every_value_of_a_scalar_key_written_before_the_declaration()
     assert_findings(
         idx.validate("a", &Change::default()),
         vec![
-            finding(Code::ArityExceeded, "k=1", &[("arity", "scalar")]),
-            finding(Code::ArityExceeded, "k=2", &[("arity", "scalar")]),
+            existing(Code::ArityExceeded, "k=1", &[("arity", "scalar")]),
+            existing(Code::ArityExceeded, "k=2", &[("arity", "scalar")]),
         ],
     );
 }
@@ -357,7 +374,7 @@ fn validate_collapses_a_scalar_within_one_change_last_value_wins() {
     assert_findings(idx.validate("a", &add(&["k=bad", "k=good"])), vec![]);
     assert_findings(
         idx.validate("a", &add(&["k=good", "k=bad"])),
-        vec![finding(Code::NotInEnum, "k=bad", &[("allowed", "good")])],
+        vec![introduced(Code::NotInEnum, "k=bad", &[("allowed", "good")])],
     );
 }
 
@@ -370,7 +387,7 @@ fn validate_applies_removes_before_adds() {
     };
     assert_findings(
         idx.validate("item", &change),
-        vec![finding(Code::NotInEnum, "k=z", &[("allowed", "a")])],
+        vec![existing(Code::NotInEnum, "k=z", &[("allowed", "a")])],
     );
 }
 
@@ -379,8 +396,54 @@ fn validate_reports_preexisting_violations_the_change_does_not_touch() {
     let idx = index(&["cfg tagma.enum:k=a", "item k=z"]);
     assert_findings(
         idx.validate("item", &add(&["other=1"])),
-        vec![finding(Code::NotInEnum, "k=z", &[("allowed", "a")])],
+        vec![existing(Code::NotInEnum, "k=z", &[("allowed", "a")])],
     );
+}
+
+#[test]
+fn validate_a_change_that_fixes_one_violation_and_introduces_another() {
+    // k=z's finding is fixed (gone, not reported); k=y's is new; j=bad's
+    // held before the change and still does.
+    let idx = index(&["cfg tagma.enum:k=a tagma.enum:j=a", "item k=z j=bad"]);
+    let change = Change {
+        add: tags(&["k=y"]),
+        remove: tags(&["k=z"]),
+    };
+    assert_findings(
+        idx.validate("item", &change),
+        vec![
+            introduced(Code::NotInEnum, "k=y", &[("allowed", "a")]),
+            existing(Code::NotInEnum, "j=bad", &[("allowed", "a")]),
+        ],
+    );
+}
+
+#[test]
+fn validate_re_adding_a_tag_the_item_already_carries_keeps_its_finding_existing() {
+    let idx = index(&["cfg tagma.enum:k=a", "item k=z"]);
+    assert_findings(
+        idx.validate("item", &add(&["k=z"])),
+        vec![existing(Code::NotInEnum, "k=z", &[("allowed", "a")])],
+    );
+}
+
+#[test]
+fn validate_an_arity_finding_that_held_before_with_the_same_args_is_existing() {
+    // Removing k=3 leaves k=1 and k=2 over a scalar, exactly as before.
+    let idx = index(&["item k=1 k=2 k=3", "cfg tagma.arity:k=scalar"]);
+    assert_findings(
+        idx.validate("item", &remove(&["k=3"])),
+        vec![
+            existing(Code::ArityExceeded, "k=1", &[("arity", "scalar")]),
+            existing(Code::ArityExceeded, "k=2", &[("arity", "scalar")]),
+        ],
+    );
+}
+
+#[test]
+fn origins_have_stable_spellings() {
+    assert_eq!(Origin::Introduced.as_str(), "introduced");
+    assert_eq!(Origin::Existing.as_str(), "existing");
 }
 
 #[test]
@@ -394,7 +457,7 @@ fn validate_an_unknown_item_starts_from_an_empty_set() {
     let idx = index(&["cfg tagma.enum:k=a"]);
     assert_findings(
         idx.validate("nobody", &add(&["k=b"])),
-        vec![finding(Code::NotInEnum, "k=b", &[("allowed", "a")])],
+        vec![introduced(Code::NotInEnum, "k=b", &[("allowed", "a")])],
     );
 }
 
@@ -421,9 +484,9 @@ fn validate_reports_every_rule_a_tag_breaks_independently() {
     assert_findings(
         idx.validate("a", &add(&["k=9"])),
         vec![
-            finding(Code::NotPermitted, "k=9", &[]),
-            finding(Code::NotInEnum, "k=9", &[("allowed", "a")]),
-            finding(Code::OutOfRange, "k=9", &[("range", "1..5")]),
+            introduced(Code::NotPermitted, "k=9", &[]),
+            introduced(Code::NotInEnum, "k=9", &[("allowed", "a")]),
+            introduced(Code::OutOfRange, "k=9", &[("range", "1..5")]),
         ],
     );
 }
@@ -482,17 +545,17 @@ fn check_reports_unknown_facets_in_the_reserved_family() {
     assert_findings(
         idx.check(),
         vec![
-            finding(
+            existing(
                 Code::UnknownFacet,
                 r#"tagma.priority_fn:"triage:kind"=x"#,
                 &[("facet", "priority_fn")],
             ),
-            finding(
+            existing(
                 Code::UnknownFacet,
                 "tagma.hide.extra:k=true",
                 &[("facet", "hide.extra")],
             ),
-            finding(Code::UnknownFacet, "tagma:note", &[("facet", "")]),
+            existing(Code::UnknownFacet, "tagma:note", &[("facet", "")]),
         ],
     );
 }
@@ -507,42 +570,42 @@ fn check_reports_values_that_configure_nothing() {
     assert_findings(
         idx.check(),
         vec![
-            finding(
+            existing(
                 Code::MalformedValue,
                 "tagma.permit:k=maybe",
                 &[("facet", "permit"), bool_],
             ),
-            finding(
+            existing(
                 Code::MalformedValue,
                 "tagma.hide:k=yes",
                 &[("facet", "hide"), bool_],
             ),
-            finding(
+            existing(
                 Code::MalformedValue,
                 "tagma.arity:k=many",
                 &[("facet", "arity"), ("expected", "scalar|set")],
             ),
-            finding(
+            existing(
                 Code::MalformedValue,
                 "tagma.enum:k",
                 &[("facet", "enum"), ("expected", "value")],
             ),
-            finding(
+            existing(
                 Code::MalformedValue,
                 "tagma.type:k",
                 &[("facet", "type"), ("expected", "type name")],
             ),
-            finding(
+            existing(
                 Code::MalformedValue,
                 "tagma.range:a=abc",
                 &[("facet", "range"), ("expected", "lo..hi")],
             ),
-            finding(
+            existing(
                 Code::MalformedValue,
                 r#"tagma.range:b="..""#,
                 &[("facet", "range"), ("expected", "lo..hi")],
             ),
-            finding(
+            existing(
                 Code::MalformedValue,
                 "tagma.range:c=1..x",
                 &[("facet", "range"), ("expected", "lo..hi")],
@@ -557,17 +620,17 @@ fn check_reports_malformed_targets() {
     assert_findings(
         idx.check(),
         vec![
-            finding(
+            existing(
                 Code::MalformedTarget,
                 r#"tagma.enum:"*:k"=a"#,
                 &[("facet", "enum")],
             ),
-            finding(
+            existing(
                 Code::MalformedTarget,
                 r#"tagma.arity:"ns:"=scalar"#,
                 &[("facet", "arity")],
             ),
-            finding(
+            existing(
                 Code::MalformedTarget,
                 r#"tagma.permit:":k"=true"#,
                 &[("facet", "permit")],
@@ -584,7 +647,7 @@ fn check_reports_a_permit_conflict_on_the_losing_true() {
     ]);
     assert_findings(
         idx.check(),
-        vec![finding(
+        vec![existing(
             Code::Conflict,
             r#"tagma.permit:"x:*"=true"#,
             &[("facet", "permit"), ("resolution", "false")],
@@ -602,22 +665,22 @@ fn check_reports_hide_arity_and_type_conflicts_with_their_resolution() {
     assert_findings(
         idx.check(),
         vec![
-            finding(
+            existing(
                 Code::Conflict,
                 "tagma.hide:k=false",
                 &[("facet", "hide"), ("resolution", "true")],
             ),
-            finding(
+            existing(
                 Code::Conflict,
                 "tagma.arity:k=set",
                 &[("facet", "arity"), ("resolution", "scalar")],
             ),
-            finding(
+            existing(
                 Code::Conflict,
                 "tagma.type:k=version",
                 &[("facet", "type"), ("resolution", "disabled")],
             ),
-            finding(
+            existing(
                 Code::Conflict,
                 "tagma.type:k=other",
                 &[("facet", "type"), ("resolution", "disabled")],
@@ -635,12 +698,12 @@ fn check_reports_a_false_that_deactivates_nothing() {
     assert_findings(
         idx.check(),
         vec![
-            finding(
+            existing(
                 Code::InertFalse,
                 r#"tagma.permit:"*:secret"=false"#,
                 &[("facet", "permit")],
             ),
-            finding(Code::InertFalse, "tagma.hide:x=false", &[("facet", "hide")]),
+            existing(Code::InertFalse, "tagma.hide:x=false", &[("facet", "hide")]),
         ],
     );
 }
@@ -650,7 +713,7 @@ fn check_reports_every_explicit_permit_as_shadowed_while_the_default_is_active()
     let idx = index(&[r#"cfg tagma.permit:"triage:kind"=true"#]);
     assert_findings(
         idx.check(),
-        vec![finding(
+        vec![existing(
             Code::ShadowedPermit,
             r#"tagma.permit:"triage:kind"=true"#,
             &[("by", "*:*")],
@@ -668,17 +731,17 @@ fn check_reports_a_permit_covered_by_a_broader_active_permit() {
     assert_findings(
         idx.check(),
         vec![
-            finding(
+            existing(
                 Code::ShadowedPermit,
                 r#"tagma.permit:"triage:kind"=true"#,
                 &[("by", "triage:*")],
             ),
-            finding(
+            existing(
                 Code::ShadowedPermit,
                 r#"tagma.permit:"triage.sub:x"=true"#,
                 &[("by", "triage:*")],
             ),
-            finding(
+            existing(
                 Code::ShadowedPermit,
                 "tagma.permit:lang=true",
                 &[("by", "*:lang")],
@@ -695,7 +758,7 @@ fn check_reports_a_rule_on_a_target_no_permit_admits() {
     ]);
     assert_findings(
         idx.check(),
-        vec![finding(
+        vec![existing(
             Code::RuleOnUnpermitted,
             r#"tagma.enum:"other:k"=a"#,
             &[("facet", "enum")],
@@ -709,9 +772,9 @@ fn check_reports_ranges_whose_intersection_is_empty() {
     assert_findings(
         idx.check(),
         vec![
-            finding(Code::RangeEmpty, "tagma.range:k=1..3", &[("range", "5..9")]),
-            finding(Code::RangeEmpty, "tagma.range:k=5..9", &[("range", "1..3")]),
-            finding(Code::RangeEmpty, "tagma.range:j=9..1", &[("range", "9..1")]),
+            existing(Code::RangeEmpty, "tagma.range:k=1..3", &[("range", "5..9")]),
+            existing(Code::RangeEmpty, "tagma.range:k=5..9", &[("range", "1..3")]),
+            existing(Code::RangeEmpty, "tagma.range:j=9..1", &[("range", "9..1")]),
         ],
     );
 }
@@ -722,12 +785,12 @@ fn check_reports_enum_values_a_range_on_the_same_target_never_admits() {
     assert_findings(
         idx.check(),
         vec![
-            finding(
+            existing(
                 Code::DeadEnumValue,
                 "tagma.enum:k=7",
                 &[("reason", "out-of-range")],
             ),
-            finding(
+            existing(
                 Code::DeadEnumValue,
                 "tagma.enum:k=x",
                 &[("reason", "not-comparable")],
@@ -741,7 +804,7 @@ fn check_reports_a_type_name_with_no_registered_comparator() {
     let idx = with_version(index(&["cfg tagma.type:k=nope tagma.type:v=version"]));
     assert_findings(
         idx.check(),
-        vec![finding(
+        vec![existing(
             Code::TypeUnregistered,
             "tagma.type:k=nope",
             &[("type", "nope")],

@@ -14,7 +14,9 @@ Feature: Schema rules — tagma.permit, tagma.enum, tagma.range, validate and ch
 
   Findings are written `<code> <tag>`, several joined with ` ; `; the
   empty string is no findings. Arguments are not pinned here (the Rust
-  reference's own tests pin them).
+  reference's own tests pin them). Each validate finding is INTRODUCED by
+  the change or EXISTING before it (SPEC.md §13): "the introduced findings"
+  are the introduced ones alone, so with "the findings" they pin both.
 
   Scenario: with no permit declarations every tag is permitted
     When item "a" is validated adding "triage:kind=bug lang=en bare" and removing ""
@@ -24,6 +26,7 @@ Feature: Schema rules — tagma.permit, tagma.enum, tagma.range, validate and ch
     Given an item "cfg" tagged 'tagma.permit:"*:*"=false tagma.permit:"triage:*"=true'
     When item "a" is validated adding "triage:kind=bug triage.sub:x lang=en" and removing ""
     Then the findings are "not-permitted lang=en"
+    Then the introduced findings are "not-permitted lang=en"
 
   Scenario: false wins over true on the same permit target
     Given an item "cfg" tagged 'tagma.permit:"*:*"=false tagma.permit:"triage:*"=true tagma.permit:"triage:*"=false'
@@ -57,8 +60,16 @@ Feature: Schema rules — tagma.permit, tagma.enum, tagma.range, validate and ch
     Given an item "cfg" tagged "tagma.arity:k=scalar"
     When item "a" is validated adding "" and removing ""
     Then the findings are "arity-exceeded k=1 ; arity-exceeded k=2"
+    Then the introduced findings are ""
     When item "a" is validated adding "" and removing "k=1"
     Then the findings are ""
+
+  Scenario: validate marks what the change introduced apart from what was already wrong
+    Given an item "cfg" tagged "tagma.enum:k=a tagma.enum:j=a"
+    Given an item "item" tagged "k=z j=bad"
+    When item "item" is validated adding "k=y" and removing "k=z"
+    Then the findings are "not-in-enum k=y ; not-in-enum j=bad"
+    Then the introduced findings are "not-in-enum k=y"
 
   Scenario: an unconfigured store checks clean
     Given an item "a" tagged "k=1"

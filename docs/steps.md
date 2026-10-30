@@ -6,7 +6,7 @@ cucumber-js, behave, godog) implements exactly these steps against its
 own binding or port, and nothing else. Extending this vocabulary is a
 `[SPEC]` task.
 
-Thirteen steps. Ports implement these and nothing else. `{string}` is a quoted
+Fourteen steps. Ports implement these and nothing else. `{string}` is a quoted
 cucumber-expression string; empty string means absent/none; id and tag lists
 are single-space-separated; match assertions compare **sorted** id sets.
 
@@ -21,9 +21,10 @@ Then parsing fails
 Then the postfix is {string}
 Then compilation fails
 Then it matches exactly {string}                # space-separated sorted ids; "" = empty set
-When item {string} is validated adding {string} and removing {string}   # SPEC.md §13 (draft)
-When the config is checked                      # SPEC.md §14 (draft)
+When item {string} is validated adding {string} and removing {string}   # SPEC.md §13
+When the config is checked                      # SPEC.md §14
 Then the findings are {string}                  # "<code> <tag>" joined by " ; "; "" = none
+Then the introduced findings are {string}       # as above, origin "introduced" only (§13)
 ```
 
 ## Semantics notes
@@ -48,10 +49,16 @@ Then the findings are {string}                  # "<code> <tag>" joined by " ; "
   {string}` takes a single-space-separated list of item ids, in sorted order.
   An empty string (`""`) denotes the empty set — the query matched no items.
 - **Findings compare as a multiset of `(code, tag)` pairs** (SPEC.md §13,
-  §14 — draft). `Then the findings are {string}` splits its argument on
+  §14). `Then the findings are {string}` splits its argument on
   ` ; `, splits each entry at its first space into a stable finding code
   and a tag string, parses the tag, and compares the result against the
   last `validate` or `check` call's findings by code and parsed tag,
-  ignoring order and arguments. `""` is no findings. The adding/removing
-  arguments of the validate step are tag lists, as in `Given an item`;
-  `""` is an empty list.
+  ignoring order, arguments and origin. `""` is no findings. The
+  adding/removing arguments of the validate step are tag lists, as in
+  `Given an item`; `""` is an empty list.
+- **`Then the introduced findings are {string}`** compares the same way,
+  against only the last call's findings whose origin is `introduced`
+  (SPEC.md §13 "Introduced or existing"); `""` means the change introduced
+  none. With `Then the findings are` it pins every finding's origin. Both
+  assertions read the last call's findings without consuming them, so they
+  may follow one `When` in either order.

@@ -94,7 +94,7 @@ compiler.
   the workspace depends on it. The tag string is still the portable form:
   the message carries decoded components, and `Display for Tag` spells them.
 
-## Rules: validate and check (SPEC.md §10–§14, draft)
+## Rules: validate and check (SPEC.md §10–§14)
 
 The schema facets (`permit`, `enum`, `range`, plus the existing `arity` and
 `type`) and the two calls that read them live in `tagma-core`'s `rules`
@@ -114,12 +114,17 @@ Public shape (Rust reference; ports mirror it in their own idiom):
   `Index::check()` delegate to it, keeping the handle-based,
   data-in/data-out constraint above: tags and an id in, findings out.
 - `Change { add: Vec<Tag>, remove: Vec<Tag> }`;
-  `Finding { code: Code, tag: Tag, args: Vec<(String, String)> }`;
+  `Finding { code: Code, tag: Tag, args: Vec<(String, String)>, origin: Origin }`;
   `Code` is a closed enum whose `as_str()` is the stable kebab-case code
   from SPEC.md §13/§14 — the string is what crosses an FFI boundary.
+  `Origin` is `Introduced` or `Existing` (`as_str()`: `"introduced"`,
+  `"existing"`): a validate finding is `Existing` iff the same
+  `(code, tag, args)` finding holds for the item's current set under the
+  same config (SPEC.md §13 "Introduced or existing"); every check finding
+  is `Existing`. A client refusing writes refuses on `Introduced` only.
 
 Conformance: `features/rules.feature` pins validate/check across bindings
-with three new steps (`docs/steps.md`). The Rust harness implements them;
+with four new steps (`docs/steps.md`). The Rust harness implements them;
 the JS (`bindings/js/features-steps`), Go (`ports/go/conformance_test.go`)
 and Python (`bindings/python/features/steps`, plus the feature symlink)
 step definitions are still to be added.

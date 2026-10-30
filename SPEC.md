@@ -818,7 +818,7 @@ practice, since typed comparison is opt-in, per target, by construction.
 
 ## 10. Self-hosted meta-configuration — `tagma.permit`
 
-*(draft for owner review — §10–§14 are the "rules travel with the data"
+*(owner-approved 2026-10-30 — §10–§14 are the "rules travel with the data"
 slice: tag-schema rules a client self-hosts as config tags in its own
 store, plus the two calls that read them. Nothing here changes how a write
 or a query behaves; §13 and §14 are new, read-only calls.)*
@@ -928,8 +928,8 @@ A **valueless** tag on an enum-declared target is not admitted (an enum
 constrains the value to be one of a set; absence is not a member). An
 undeclared target admits any value.
 
-**Restrictive-wins, applied to sets — why the reading is union** *(flagged
-for owner review)*. `hide`, `arity` and `permit` reconcile two
+**Restrictive-wins, applied to sets — why the reading is union** *(owner
+ruling, 2026-10-30: union for enum, intersection for range)*. `hide`, `arity` and `permit` reconcile two
 *contradictory* tags on one target (`true`/`false`, `scalar`/`set`); the
 more restrictive tag wins. Enum tags on one target never contradict each
 other: each one asserts a single fact, "*this* value is admitted," and two
@@ -1009,7 +1009,8 @@ tags, and mutates nothing.
 
 ```text
 validate(item: id, change: { add: [tag], remove: [tag] }) -> [finding]
-finding = { code: string, tag: tag, args: [(name: string, value: string)] }
+finding = { code: string, tag: tag, args: [(name: string, value: string)],
+            origin: "introduced" | "existing" }
 ```
 
 **The resulting set.** `validate` judges the tag set the item **would**
@@ -1025,7 +1026,7 @@ change in isolation:
    old one, last-value-wins, within the batch too; an identical value is a
    no-op).
 
-Removes apply **before** adds *(flagged)*: a change that both removes and
+Removes apply **before** adds: a change that both removes and
 adds the same tag leaves it on the item. Config is read from the store as
 it stands before the change, as §8 reads arity — a config tag inside the
 change governs later calls, not this one.
@@ -1035,6 +1036,30 @@ the change touches: a change that removes the offending tag makes an
 invalid item valid (no findings), and a change that touches nothing still
 reports a pre-existing violation (e.g. two values on a key declared
 `scalar` after they were written, §8 "Ordering").
+
+**Introduced or existing.** Every finding carries an `origin`, so a
+caller can refuse a write only on what the write itself would break and
+merely warn about what was already wrong (as taskloom does). Let *before*
+be the item's current tag set and *after* the resulting set above, and
+judge **both under the same config** — the store's, as it stands before
+the change. A finding of *after* is **`existing`** iff a finding with the
+same `code`, the same `tag` (namespace, key and value) and the same `args`
+is among *before*'s findings; otherwise it is **`introduced`**.
+
+- It is defined on outcomes, not on the edit, so it does not depend on how
+  the change is spelled: re-adding a tag the item already carries,
+  removing and re-adding it in one change, or a §8 collapse that keeps it
+  all leave its findings `existing`.
+- `permit`, `enum`, `range` and `type` judge one tag on its own, against a
+  config that is the same on both sides, so such a finding is `existing`
+  iff its tag was already on the item. Only `arity-exceeded` depends on a
+  tag's siblings; requiring equal `args` and `tag` makes it `existing`
+  exactly when the same tag already exceeded the same declared arity.
+- A violation the change fixes is simply absent from the result — there is
+  no "fixed" origin. An empty change reports every finding `existing`.
+- Comparing the *change's* tags instead ("is the tag in `add`?") is not
+  equivalent: a tag in `add` the item already carries is not new, and a
+  tag the change never names can still have a finding it did not cause.
 
 **Finding codes (stable).** One finding per (resulting tag, violated
 rule):
@@ -1052,8 +1077,11 @@ rule):
 declaration (a value below two overlapping ranges yields two findings). A valueless tag on a typed
 target is not a `type-mismatch`: §9 types govern how values *compare*, and
 no value means nothing to compare. Findings are returned sorted by the
-tag's canonical spelling, then code, then args; an empty list means the
-resulting set satisfies every rule.
+tag's canonical spelling, then code (its stable string), then args — the
+origin is determined by those three and is not a sort key; an empty list
+means the resulting set satisfies every rule. A tag the resulting set
+carries twice (tagma's write path does not deduplicate a repeated tag on a
+`set` target) draws its findings once.
 
 **Not validated.** `tagma.hide` (visibility is not validity), and the
 well-formedness of config tags inside the change (that is §14's job, over
@@ -1066,6 +1094,9 @@ nothing* or *lose quietly* — correct for evaluation, opaque to the person
 who wrote it. `check` is the compiler-style pass that says so. It is pure,
 reads only the store's `tagma.*` tags (and, for `type`, the registered
 comparators), and returns findings in §13's shape, sorted the same way.
+Every `check` finding's `origin` is `existing`: `check` proposes no change,
+so — as for `validate` with an empty change — whatever it finds already
+holds. A config tag on record on several items is judged once.
 
 ```text
 check() -> [finding]

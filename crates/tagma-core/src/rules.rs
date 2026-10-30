@@ -88,10 +88,35 @@ impl Code {
     }
 }
 
+/// Whether a finding is one the proposed change brings about or one that
+/// already held (SPEC.md §13 "Introduced or existing"). A caller that
+/// refuses a write typically refuses only on [`Origin::Introduced`] and
+/// warns on [`Origin::Existing`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Origin {
+    /// The same `(code, tag, args)` finding does not hold for the item's
+    /// current set: the change brings it about.
+    Introduced,
+    /// The same `(code, tag, args)` finding already holds for the item's
+    /// current set, under the same config. Every `check` finding (§14).
+    Existing,
+}
+
+impl Origin {
+    /// The stable spelling, `"introduced"` or `"existing"` (SPEC.md §13).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Origin::Introduced => "introduced",
+            Origin::Existing => "existing",
+        }
+    }
+}
+
 /// One finding (SPEC.md §13/§14): what is wrong ([`Code`]), which tag it is
 /// about (the resulting-set tag for validate; the config tag — the loser,
-/// for a conflict — for check), and named arguments, in the order SPEC
-/// lists them, a multi-valued argument repeated once per value.
+/// for a conflict — for check), named arguments, in the order SPEC lists
+/// them, a multi-valued argument repeated once per value, and whether the
+/// change introduced it ([`Origin`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finding {
     /// The stable code.
@@ -100,6 +125,8 @@ pub struct Finding {
     pub tag: Tag,
     /// Named arguments, e.g. `("range", "1..5")`.
     pub args: Vec<(String, String)>,
+    /// Introduced by the change, or existing before it (SPEC.md §13).
+    pub origin: Origin,
 }
 
 /// The rule set derived from `tagma.*` config tags (SPEC.md §10–§12, plus

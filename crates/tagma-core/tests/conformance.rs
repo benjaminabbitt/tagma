@@ -6,7 +6,7 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 
 use cucumber::{given, then, when, World};
-use tagma_core::{infix, token, Change, Finding, Index, Tag, TypeComparator};
+use tagma_core::{infix, token, Change, Finding, Index, Origin, Tag, TypeComparator};
 
 /// Cucumber world: an index plus the outcome slots for the last tag parse,
 /// compile, and query/match operations. `#[derive(World)]` builds a fresh
@@ -232,13 +232,33 @@ fn when_config_checked(world: &mut TagmaWorld) {
 
 #[then(expr = "the findings are {string}")]
 fn then_the_findings_are(world: &mut TagmaWorld, expected: String) {
-    // docs/steps.md: a multiset of (code, parsed tag), order and args ignored.
+    // docs/steps.md: a multiset of (code, parsed tag), order, args and
+    // origin ignored.
     let actual = world
         .last_findings
-        .take()
+        .as_ref()
         .expect("no validate or check was run");
+    assert_findings_are(actual.iter(), &expected);
+}
+
+#[then(expr = "the introduced findings are {string}")]
+fn then_the_introduced_findings_are(world: &mut TagmaWorld, expected: String) {
+    // docs/steps.md: as above, over only the findings whose origin is
+    // `introduced` (SPEC.md §13).
+    let actual = world
+        .last_findings
+        .as_ref()
+        .expect("no validate or check was run");
+    assert_findings_are(
+        actual.iter().filter(|f| f.origin == Origin::Introduced),
+        &expected,
+    );
+}
+
+/// Compares `actual` with a `"<code> <tag> ; ..."` list as a multiset of
+/// `(code, parsed tag)` pairs (docs/steps.md).
+fn assert_findings_are<'a>(actual: impl Iterator<Item = &'a Finding>, expected: &str) {
     let mut actual: Vec<(String, String)> = actual
-        .iter()
         .map(|f| (f.code.as_str().to_string(), f.tag.to_string()))
         .collect();
     let mut expected: Vec<(String, String)> = expected
