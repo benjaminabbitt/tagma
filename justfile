@@ -33,7 +33,12 @@ setup-js:
     fi
     if [ -d bindings/js ]; then
         cd bindings/js
-        npm ci || npm install
+        # Lockfile only: `npm install` would resolve fresh versions (and
+        # rewrite package-lock.json), so a failed `npm ci` is a failure.
+        if ! npm ci; then
+            echo "setup-js: 'npm ci' failed in bindings/js; fix package-lock.json / the registry error above (no 'npm install' fallback)" >&2
+            exit 1
+        fi
     fi
     echo "setup-js: toolchain ready"
 
