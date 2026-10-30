@@ -150,8 +150,18 @@ conformance-js:
     # a client-registered TypeComparator callback, which only tagma-core
     # and ports/go currently expose — the C FFI/WASM/CLI/JS/Python
     # callback-marshalling seam is its own, later workstream.
+    # Run ONLY the lockfile-installed cucumber-js. A bare `npx cucumber-js`
+    # with no node_modules falls through to the npm registry, where the
+    # unscoped name `cucumber-js` is NOT @cucumber/cucumber — it fetched and
+    # executed an unrelated package that exits 0, so the gate went green
+    # having tested nothing (and ran untrusted code). Missing is a failure.
+    cucumber=bindings/js/node_modules/.bin/cucumber-js
+    if [ ! -x "$cucumber" ]; then
+        echo "conformance-js: $cucumber missing; run 'just setup-js' (npm ci from the lockfile) first" >&2
+        exit 1
+    fi
     just build-wasm
-    cd bindings/js && npx cucumber-js
+    cd bindings/js && node_modules/.bin/cucumber-js
 
 conformance-py: setup-py
     #!/usr/bin/env bash
