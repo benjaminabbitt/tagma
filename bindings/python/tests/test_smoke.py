@@ -150,6 +150,47 @@ def test_check_returns_config_findings_sorted_by_tag():
     ]
 
 
+def test_rules_from_tags_mirrors_the_index_it_comes_from():
+    # Non-config tags among the input are ignored.
+    rules = tagma.Rules.from_tags(["tagma.enum:k=a", "tagma.enum:j=a", "k=z"])
+    via_rules = rules.validate(["k=z", "j=bad"], ["k=y"], ["k=z"])
+    assert via_rules == _rules_index().validate("item", ["k=y"], ["k=z"])
+    assert len(via_rules) == 2
+    assert rules.validate([], add=["k=a"]) == []
+    assert [f["tag"] for f in rules.validate(["k=z"])] == ["k=z"]
+    assert rules.check() == []
+    conflicted = tagma.Rules.from_tags(["tagma.arity:k=scalar", "tagma.arity:k=set"])
+    assert conflicted.check() == [
+        {
+            "code": "conflict",
+            "tag": "tagma.arity:k=set",
+            "args": [("facet", "arity"), ("resolution", "scalar")],
+            "origin": "existing",
+        }
+    ]
+
+
+def test_rules_invalid_tag_raises_naming_its_list():
+    try:
+        tagma.Rules.from_tags(["=5"])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError from from_tags")
+    rules = tagma.Rules.from_tags([])
+    for args, kwargs, prefix in (
+        ((["=5"],), {}, "current: "),
+        (([],), {"add": ["=5"]}, "add: "),
+        (([],), {"remove": ["=5"]}, "remove: "),
+    ):
+        try:
+            rules.validate(*args, **kwargs)
+        except ValueError as exc:
+            assert str(exc).startswith(prefix), exc
+        else:
+            raise AssertionError(f"expected ValueError for {prefix}")
+
+
 def _run_all():
     tests = [v for k, v in globals().items() if k.startswith("test_") and callable(v)]
     for t in tests:

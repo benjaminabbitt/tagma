@@ -43,6 +43,7 @@ def step_given_item_tagged(context, **kwargs):
     # Same "<id> <tag> <tag>..." line format tagma.Index.add expects;
     # raises ValueError (Python's stand-in for "panics") on an invalid tag.
     context.index.add(f"{item_id} {tags}")
+    context.given_tags.extend(_tag_list(tags))
 
 
 @when(rf"the tag {_qstr('input')} is parsed")
@@ -159,6 +160,13 @@ def step_when_item_is_validated(context, **kwargs):
 @when("the config is checked")
 def step_when_the_config_is_checked(context):
     context.findings = context.index.check()
+    # The standalone rule set over the same config tags checks identically
+    # (Rules.from_tags; SPEC.md §14 reads only the config). No step names
+    # the standalone form, so this is how the scenarios reach it. Not done
+    # for validate: an item's set is what the index's write path (§8
+    # collapse) left, which the tags the Given steps wrote need not be.
+    via_rules = tagma.Rules.from_tags(context.given_tags).check()
+    assert via_rules == context.findings, f"{via_rules!r} != {context.findings!r}"
 
 
 def _assert_findings(actual, expected):

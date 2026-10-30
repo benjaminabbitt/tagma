@@ -6,7 +6,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
-use tagma_core::{infix, Change, Finding, Index as CoreIndex, Tag};
+use tagma_core::{infix, Change, Finding, Index as CoreIndex, Rules as CoreRules, Tag};
 
 fn to_value_error(msg: String) -> PyErr {
     PyValueError::new_err(msg)
@@ -62,10 +62,7 @@ impl Index {
         add: Vec<String>,
         remove: Vec<String>,
     ) -> PyResult<Bound<'py, PyList>> {
-        let change = Change {
-            add: parse_tags(&add).map_err(|e| to_value_error(format!("add: {e}")))?,
-            remove: parse_tags(&remove).map_err(|e| to_value_error(format!("remove: {e}")))?,
-        };
+        let change = parse_change(&add, &remove)?;
         findings_list(py, &self.inner.validate(id, &change))
     }
 
@@ -74,6 +71,58 @@ impl Index {
     fn check<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         findings_list(py, &self.inner.check())
     }
+}
+
+/// A standalone rule set (SPEC.md §10–§12, with §8 arity and §9 type),
+/// derived from config tags the caller holds itself rather than from an
+/// `Index` (wraps `tagma_core::Rules`). No comparators can be registered
+/// from Python (this binding takes no callbacks).
+#[pyclass(name = "Rules")]
+struct Rules {
+    inner: CoreRules,
+}
+
+#[pymethods]
+impl Rules {
+    /// Derives the rules from the `tagma.*` config tags among `tags` (one
+    /// tag string per element; every other tag is ignored). Raises
+    /// `ValueError` on an invalid tag.
+    #[staticmethod]
+    fn from_tags(tags: Vec<String>) -> PyResult<Self> {
+        let tags = parse_tags(&tags).map_err(to_value_error)?;
+        Ok(Rules {
+            inner: CoreRules::from_tags(&tags),
+        })
+    }
+
+    /// Validates a change to the tag set `current` (SPEC.md §13), as
+    /// `Index.validate` does for an item. Raises `ValueError` on an invalid
+    /// tag, naming its list (`current: `, `add: `, `remove: `).
+    #[pyo3(signature = (current, add = Vec::new(), remove = Vec::new()))]
+    fn validate<'py>(
+        &self,
+        py: Python<'py>,
+        current: Vec<String>,
+        add: Vec<String>,
+        remove: Vec<String>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let current = parse_tags(&current).map_err(|e| to_value_error(format!("current: {e}")))?;
+        let change = parse_change(&add, &remove)?;
+        findings_list(py, &self.inner.validate(&current, &change))
+    }
+
+    /// Checks the config itself (SPEC.md §14), as `Index.check` does.
+    fn check<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        findings_list(py, &self.inner.check())
+    }
+}
+
+/// A validate change from its two tag lists, a bad tag named by its list.
+fn parse_change(add: &[String], remove: &[String]) -> PyResult<Change> {
+    Ok(Change {
+        add: parse_tags(add).map_err(|e| to_value_error(format!("add: {e}")))?,
+        remove: parse_tags(remove).map_err(|e| to_value_error(format!("remove: {e}")))?,
+    })
 }
 
 /// Parses each element of `tags` as one tag (SPEC.md §2).
@@ -126,6 +175,7 @@ fn parse_tag(py: Python<'_>, s: &str) -> PyResult<Py<PyDict>> {
 #[pymodule]
 fn tagma(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Index>()?;
+    m.add_class::<Rules>()?;
     m.add_function(wrap_pyfunction!(compile, m)?)?;
     m.add_function(wrap_pyfunction!(parse_tag, m)?)?;
     Ok(())

@@ -11,3 +11,4 @@ import tagma
 def before_scenario(context, scenario):
     context.index = tagma.Index()
     context.findings = None  # the last validate or check call's findings
+    context.given_tags = []  # every tag a Given step wrote, in order
