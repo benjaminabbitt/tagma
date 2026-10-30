@@ -6,7 +6,7 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 
 use cucumber::{given, then, when, World};
-use tagma_core::{infix, token, Change, Finding, Index, Origin, Tag, TypeComparator};
+use tagma_core::{infix, token, Change, Finding, Index, Origin, Rules, Tag, TypeComparator};
 
 /// Cucumber world: an index plus the outcome slots for the last tag parse,
 /// compile, and query/match operations. `#[derive(World)]` builds a fresh
@@ -21,6 +21,8 @@ pub struct TagmaWorld {
     last_compile: Option<Result<String, String>>,
     last_match: Option<Result<Vec<String>, String>>,
     last_findings: Option<Vec<Finding>>,
+    /// Every tag a `Given` step wrote, in order.
+    given_tags: Vec<Tag>,
 }
 
 impl Default for TagmaWorld {
@@ -49,6 +51,7 @@ impl Default for TagmaWorld {
             last_compile: None,
             last_match: None,
             last_findings: None,
+            given_tags: Vec::new(),
         }
     }
 }
@@ -213,7 +216,9 @@ fn parse_tag_list(tags: &str) -> Vec<Tag> {
 
 #[given(expr = "an item {string} tagged {string}")]
 fn given_item(world: &mut TagmaWorld, id: String, tags: String) {
-    world.index.add_item(&id, parse_tag_list(&tags));
+    let tags = parse_tag_list(&tags);
+    world.given_tags.extend(tags.iter().cloned());
+    world.index.add_item(&id, tags);
 }
 
 #[when(expr = "item {string} is validated adding {string} and removing {string}")]
@@ -227,7 +232,18 @@ fn when_item_validated(world: &mut TagmaWorld, id: String, adding: String, remov
 
 #[when(expr = "the config is checked")]
 fn when_config_checked(world: &mut TagmaWorld) {
-    world.last_findings = Some(world.index.check());
+    let findings = world.index.check();
+    // The standalone rule set over the same config tags, with the same
+    // comparators, checks identically (Rules::from_tags; SPEC.md §14 reads
+    // only the config). No step names the standalone form, so this is how
+    // the scenarios reach it. Not done for validate: an item's set is what
+    // the index's write path (§8 collapse) left, which the tags the Given
+    // steps wrote need not be.
+    let mut rules = Rules::from_tags(&world.given_tags);
+    rules.register_type("semver", Arc::new(SemverComparator));
+    rules.register_type("version", Arc::new(VersionComparator));
+    assert_eq!(rules.check(), findings, "Rules::from_tags(..).check()");
+    world.last_findings = Some(findings);
 }
 
 #[then(expr = "the findings are {string}")]

@@ -21,6 +21,7 @@ package tagma_test
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -49,6 +50,9 @@ type conformanceState struct {
 	// findings is the last validate or check call's result (docs/steps.md);
 	// nil until one runs.
 	findings []tagma.Finding
+
+	// givenTags is every tag a Given step wrote, in order.
+	givenTags []tagma.Tag
 }
 
 func (c *conformanceState) reset() {
@@ -300,6 +304,9 @@ func (c *conformanceState) anItemTagged(id, tags string) error {
 	// the whole line to AddLine reuses that splitter instead of
 	// duplicating it here.
 	line := id + " " + tags
+	if parsed, err := parseTagList(tags); err == nil {
+		c.givenTags = append(c.givenTags, parsed...)
+	}
 	if err := c.idx.AddLine(line); err != nil {
 		// docs/steps.md: "panics on invalid tag" — Background fixtures are
 		// assumed always well-formed; a bad fixture is a harness bug.
@@ -416,6 +423,18 @@ func (c *conformanceState) itemIsValidated(id, adding, removing string) error {
 // When the config is checked
 func (c *conformanceState) theConfigIsChecked() error {
 	c.findings = c.idx.Check()
+	// The standalone rule set over the same config tags, with the same
+	// comparators, checks identically (RulesFromTags; SPEC.md §14 reads only
+	// the config). No step names the standalone form, so this is how the
+	// scenarios reach it. Not done for validate: an item's set is what the
+	// index's write path (§8 collapse) left, which the tags the Given steps
+	// wrote need not be.
+	rules := tagma.RulesFromTags(c.givenTags)
+	rules.RegisterType("semver", semverComparator{})
+	rules.RegisterType("version", versionComparator{})
+	if got := rules.Check(); !reflect.DeepEqual(got, c.findings) {
+		return fmt.Errorf("RulesFromTags(...).Check() = %+v, Index.Check() = %+v", got, c.findings)
+	}
 	return nil
 }
 
