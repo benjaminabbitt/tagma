@@ -140,3 +140,44 @@ fn bad_invocation_exits_2() {
 fn no_args_exits_2() {
     tagma().assert().failure().code(2);
 }
+
+/// Infix is a gateway (SPEC.md §5): `query <q>` prints exactly what
+/// `query --postfix <compile q>` prints, and `compile` exposes that postfix.
+#[test]
+fn infix_query_is_postfix_query_of_compile() {
+    let table = [
+        "urgent",
+        "urgent and range>4",
+        "lang=en or note",
+        "not status=done",
+        "(urgent or note) and not lang=fr",
+        "*:urgent",
+        "lang=en lang=fr",
+        "urgent AND NOT note",
+        "nothing",
+    ];
+    let mut distinct = std::collections::BTreeSet::new();
+    for q in table {
+        let compiled = tagma().args(["compile", q]).assert().success();
+        let postfix = String::from_utf8(compiled.get_output().stdout.clone()).unwrap();
+        let postfix = postfix.trim_end_matches('\n');
+
+        let via_postfix = tagma()
+            .args(["query", "--postfix", postfix])
+            .write_stdin(FIXTURE)
+            .assert()
+            .success();
+        let via_postfix = via_postfix.get_output().stdout.clone();
+        tagma()
+            .args(["query", q])
+            .write_stdin(FIXTURE)
+            .assert()
+            .success()
+            .stdout(via_postfix.clone());
+        distinct.insert(via_postfix);
+    }
+    assert!(
+        distinct.len() > 3,
+        "table must discriminate between results"
+    );
+}

@@ -1,6 +1,9 @@
 package tagma
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestCompile transcribes PLAN.md Appendix B.2.
 func TestCompile(t *testing.T) {
@@ -53,5 +56,53 @@ func TestCompileFailures(t *testing.T) {
 				t.Errorf("Compile(%q) = %q, nil error, want error", in, got)
 			}
 		})
+	}
+}
+
+// TestInfixIsGateway pins SPEC.md §5: Query(q) is exactly
+// QueryPostfix(Compile(q)) — nothing evaluates infix directly.
+func TestInfixIsGateway(t *testing.T) {
+	idx := NewIndex()
+	for _, line := range []string{
+		"a urgent lang=en lang=fr range=5 geo:lat=57.64 status=done",
+		"b range=tbd lang=en prio:urgent due=2026-08-01",
+		"c urgent=false score=-3 note",
+	} {
+		if err := idx.AddLine(line); err != nil {
+			t.Fatalf("AddLine(%q): %v", line, err)
+		}
+	}
+	table := []string{
+		"urgent",
+		"urgent and range>4",
+		"lang=en or note",
+		"not status=done",
+		"(urgent or note) and not lang=fr",
+		"*:urgent",
+		"lang=en lang=fr",
+		"urgent AND NOT note",
+		"nothing",
+	}
+	distinct := map[string]struct{}{}
+	for _, q := range table {
+		postfix, err := Compile(q)
+		if err != nil {
+			t.Fatalf("Compile(%q): %v", q, err)
+		}
+		viaPostfix, err := idx.QueryPostfix(postfix)
+		if err != nil {
+			t.Fatalf("QueryPostfix(%q): %v", postfix, err)
+		}
+		viaInfix, err := idx.Query(q)
+		if err != nil {
+			t.Fatalf("Query(%q): %v", q, err)
+		}
+		if strings.Join(viaInfix, ",") != strings.Join(viaPostfix, ",") {
+			t.Errorf("Query(%q) = %v, QueryPostfix(Compile) = %v", q, viaInfix, viaPostfix)
+		}
+		distinct[strings.Join(viaInfix, ",")] = struct{}{}
+	}
+	if len(distinct) <= 3 {
+		t.Errorf("table must discriminate between results; got %d distinct", len(distinct))
 	}
 }

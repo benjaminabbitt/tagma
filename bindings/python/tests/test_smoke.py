@@ -49,6 +49,34 @@ def test_index_add_query():
     assert sorted(idx.query_postfix("urgent/status=done/not/and")) == ["c"]
 
 
+GATEWAY_TABLE = [
+    "urgent",
+    "urgent and range>4",
+    "lang=en or note",
+    "not status=done",
+    "(urgent or note) and not lang=fr",
+    "*:urgent",
+    "lang=en lang=fr",
+    "urgent AND NOT note",
+    "nothing",
+]
+
+
+def test_infix_query_is_query_postfix_of_compile():
+    """Infix is a gateway (SPEC.md §5): query(q) == query_postfix(compile(q))."""
+    idx = tagma.Index()
+    idx.add("a urgent lang=en lang=fr range=5 geo:lat=57.64 status=done")
+    idx.add("b range=tbd lang=en prio:urgent due=2026-08-01")
+    idx.add("c urgent=false score=-3 note")
+
+    distinct = set()
+    for q in GATEWAY_TABLE:
+        via_infix = idx.query(q)
+        assert via_infix == idx.query_postfix(tagma.compile(q)), q
+        distinct.add(tuple(via_infix))
+    assert len(distinct) > 3, "table must discriminate between results"
+
+
 def test_index_add_invalid_raises():
     idx = tagma.Index()
     try:

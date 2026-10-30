@@ -43,3 +43,28 @@ test("errors throw JS Error with the core's message", () => {
   assert.throws(() => idx.add("a =5"), Error);
   assert.throws(() => idx.query("a and"), Error);
 });
+
+test("infix is a gateway: query(q) === queryPostfix(compile(q))", () => {
+  const idx = new Index();
+  idx.add("a urgent lang=en lang=fr range=5 geo:lat=57.64 status=done");
+  idx.add("b range=tbd lang=en prio:urgent due=2026-08-01");
+  idx.add("c urgent=false score=-3 note");
+  const table = [
+    "urgent",
+    "urgent and range>4",
+    "lang=en or note",
+    "not status=done",
+    "(urgent or note) and not lang=fr",
+    "*:urgent",
+    "lang=en lang=fr",
+    "urgent AND NOT note",
+    "nothing",
+  ];
+  const distinct = new Set();
+  for (const q of table) {
+    const viaInfix = idx.query(q);
+    assert.deepEqual(viaInfix, idx.queryPostfix(compile(q)), q);
+    distinct.add(JSON.stringify(viaInfix));
+  }
+  assert.ok(distinct.size > 3, "table must discriminate between results");
+});

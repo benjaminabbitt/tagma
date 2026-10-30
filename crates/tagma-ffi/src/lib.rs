@@ -448,6 +448,48 @@ mod tests {
         }
     }
 
+    /// Infix is a gateway (SPEC.md §5): `tagma_query(q)` returns exactly
+    /// `tagma_query_postfix(tagma_compile(q))`.
+    #[test]
+    fn infix_query_is_query_postfix_of_compile() {
+        let table = [
+            "urgent",
+            "urgent and range>4",
+            "lang=en or note",
+            "not status=done",
+            "(urgent or note) and not lang=fr",
+            "*:urgent",
+            "lang=en lang=fr",
+            "urgent AND NOT note",
+            "nothing",
+        ];
+        unsafe {
+            let handle = tagma_index_new();
+            for line in [
+                "a urgent lang=en lang=fr range=5 geo:lat=57.64 status=done",
+                "b range=tbd lang=en prio:urgent due=2026-08-01",
+                "c urgent=false score=-3 note",
+            ] {
+                let cline = to_cstring(line);
+                assert_eq!(tagma_index_add(handle, cline.as_ptr()), 0);
+            }
+            let mut distinct = std::collections::BTreeSet::new();
+            for q in table {
+                let cq = to_cstring(q);
+                let postfix = to_cstring(&from_c(tagma_compile(cq.as_ptr())));
+                let via_postfix = from_c(tagma_query_postfix(handle, postfix.as_ptr()));
+                let via_infix = from_c(tagma_query(handle, cq.as_ptr()));
+                assert_eq!(via_infix, via_postfix, "query({q:?})");
+                distinct.insert(via_infix);
+            }
+            assert!(
+                distinct.len() > 3,
+                "table must discriminate between results"
+            );
+            tagma_index_free(handle);
+        }
+    }
+
     #[test]
     fn compile_round_trip() {
         unsafe {
