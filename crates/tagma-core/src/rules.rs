@@ -561,12 +561,9 @@ impl Rules {
                 "type" => (None, "disabled"),
                 _ => continue,
             };
-            let contested = match facet {
-                "hide" | "permit" => has(facet, target, "true") && has(facet, target, "false"),
-                "arity" => has(facet, target, "scalar") && has(facet, target, "set"),
-                _ => tags.len() > 1,
-            };
-            if contested {
+            // Sound hide/permit/arity values are two-valued, and type names
+            // have no winner, so two distinct tags on one target conflict.
+            if tags.len() > 1 {
                 for tag in tags {
                     if loser.is_none_or(|l| tag.value.as_deref() == Some(l)) {
                         out.push(finding(
@@ -660,7 +657,8 @@ impl Rules {
             _ => false,
         };
         for other in self.ranges.get(target).into_iter().flatten() {
-            if other == raw || self_empty(other) {
+            // `raw` against itself is never disjoint: it is not self-empty.
+            if self_empty(other) {
                 continue;
             }
             let Some((olo, ohi)) = self.parse_range(target, other) else {

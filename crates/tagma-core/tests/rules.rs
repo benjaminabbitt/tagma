@@ -369,6 +369,23 @@ fn validate_judges_the_set_after_scalar_collapse_not_the_old_value() {
 }
 
 #[test]
+fn validate_scalar_collapse_displaces_only_the_same_namespace_and_key() {
+    // Adding k=1 under a scalar k displaces other k values only: not j
+    // (another key, same namespace), not x:k (same key, another namespace).
+    let idx = index(&[
+        r#"cfg tagma.arity:k=scalar tagma.enum:j=a tagma.enum:"x:k"=a"#,
+        "item j=bad x:k=bad",
+    ]);
+    assert_findings(
+        idx.validate("item", &add(&["k=1"])),
+        vec![
+            existing(Code::NotInEnum, "j=bad", &[("allowed", "a")]),
+            existing(Code::NotInEnum, "x:k=bad", &[("allowed", "a")]),
+        ],
+    );
+}
+
+#[test]
 fn validate_collapses_a_scalar_within_one_change_last_value_wins() {
     let idx = index(&["cfg tagma.arity:k=scalar tagma.enum:k=good"]);
     assert_findings(idx.validate("a", &add(&["k=bad", "k=good"])), vec![]);
@@ -800,6 +817,48 @@ fn check_reports_enum_values_a_range_on_the_same_target_never_admits() {
 }
 
 #[test]
+fn check_reports_no_empty_range_for_overlapping_ranges_and_a_reversed_one_only_against_itself() {
+    let idx = index(&["cfg tagma.range:k=1..5 tagma.range:k=3..9 tagma.range:k=9..2"]);
+    assert_findings(
+        idx.check(),
+        vec![existing(
+            Code::RangeEmpty,
+            "tagma.range:k=9..2",
+            &[("range", "9..2")],
+        )],
+    );
+}
+
+#[test]
+fn check_reports_an_enum_value_the_declared_type_cannot_order() {
+    let idx = with_version(index(&[
+        "cfg tagma.type:v=version tagma.enum:v=1.2 tagma.enum:v=abc",
+    ]));
+    assert_findings(
+        idx.check(),
+        vec![existing(
+            Code::DeadEnumValue,
+            "tagma.enum:v=abc",
+            &[("reason", "type-mismatch")],
+        )],
+    );
+}
+
+#[test]
+fn check_reports_a_null_namespace_permit_covered_by_the_null_namespace_star() {
+    let idx =
+        index(&[r#"cfg tagma.permit:"*:*"=false tagma.permit:"*"=true tagma.permit:lang=true"#]);
+    assert_findings(
+        idx.check(),
+        vec![existing(
+            Code::ShadowedPermit,
+            "tagma.permit:lang=true",
+            &[("by", "*")],
+        )],
+    );
+}
+
+#[test]
 fn check_reports_a_type_name_with_no_registered_comparator() {
     let idx = with_version(index(&["cfg tagma.type:k=nope tagma.type:v=version"]));
     assert_findings(
@@ -818,6 +877,13 @@ fn rules_from_tags_checks_like_the_index_it_was_read_from() {
     let idx = index(&[line]);
     let config: Vec<Tag> = line.split_whitespace().skip(1).map(tag).collect();
     assert_eq!(Rules::from_tags(&config).check(), idx.check());
+}
+
+#[test]
+fn rules_debug_names_its_registered_comparators() {
+    let mut rules = Rules::default();
+    rules.register_type("version", Arc::new(VersionComparator));
+    assert!(format!("{rules:?}").contains("version"));
 }
 
 #[test]

@@ -404,7 +404,7 @@ impl Index {
     /// comparators registered via [`Self::register_type`] — exactly what
     /// [`Rules::from_tags`] derives from the same tags.
     pub fn rules(&self) -> Rules {
-        let mut rules = Rules::from_tags(&self.config_tags());
+        let mut rules = Rules::from_tags(&self.config_carrier_tags());
         for (name, cmp) in &self.type_comparators {
             rules.register_type(name, Arc::clone(cmp));
         }
@@ -683,31 +683,23 @@ impl Index {
         resolve_types(facts)
     }
 
-    /// Every distinct tag in the `tagma` namespace family (SPEC.md §14
-    /// "Reserved facets") on record, read from the items that carry one —
-    /// the config [`Self::rules`] derives from. Bypasses the query-time
-    /// hide, as [`Self::arity_config`] does.
-    fn config_tags(&self) -> Vec<Tag> {
-        let mut out: Vec<Tag> = Vec::new();
+    /// The tags of every item that carries a tag in the `tagma` namespace
+    /// family (SPEC.md §14 "Reserved facets") — a superset of the store's
+    /// config, which [`Rules::from_tags`] picks out of it. Bypasses the
+    /// query-time hide, as [`Self::arity_config`] does.
+    fn config_carrier_tags(&self) -> Vec<Tag> {
+        let mut carriers: BTreeSet<u32> = BTreeSet::new();
         for ns in self.namespaces.iter().filter(|ns| in_tagma_family(ns)) {
-            let Some(keys) = self.keys_by_ns.get(ns) else {
-                continue;
-            };
-            for key in keys {
-                let Some(ids) = self.by_ns_key.get(&(ns.clone(), key.clone())) else {
-                    continue;
-                };
-                for &iid in ids {
-                    out.extend(
-                        self.tags_by_id[iid as usize]
-                            .iter()
-                            .filter(|t| t.namespace == *ns && t.key == *key)
-                            .cloned(),
-                    );
+            for key in self.keys_by_ns.get(ns).into_iter().flatten() {
+                if let Some(ids) = self.by_ns_key.get(&(ns.clone(), key.clone())) {
+                    carriers.extend(ids);
                 }
             }
         }
-        out
+        carriers
+            .into_iter()
+            .flat_map(|iid| self.tags_by_id[iid as usize].iter().cloned())
+            .collect()
     }
 
     /// Builds a [`TypeCtx`] against the store's current `tagma.type`
@@ -973,28 +965,20 @@ pub(crate) fn exact_target(target: &str) -> Option<(Option<String>, String)> {
 
 /// SPEC.md §8's arity resolution over `(target, value)` facts — one per
 /// `tagma.arity:<target>=<value>` tag on record, whatever its source (the
-/// index's postings, or [`Rules::from_tags`]'s tag list): `scalar` wins
-/// over `set` on one exact target; any other value, or a malformed target
-/// ([`exact_target`]), configures nothing.
+/// index's postings, or [`Rules::from_tags`]'s tag list). A target with a
+/// `scalar` fact is `scalar` (scalar wins over `set`); every other target
+/// is the `set` default ([`arity_lookup`]), which an explicit `set`, any
+/// other value, or a malformed target ([`exact_target`]) leaves it at — so
+/// only the scalar targets are recorded.
 pub(crate) fn resolve_arity<'a>(
     facts: impl IntoIterator<Item = (&'a str, &'a str)>,
 ) -> BTreeMap<(Option<String>, String), Arity> {
-    let mut config = BTreeMap::new();
-    for (target, value) in facts {
-        let arity = match value {
-            "scalar" => Arity::Scalar,
-            "set" => Arity::Set,
-            _ => continue,
-        };
-        let Some(t) = exact_target(target) else {
-            continue;
-        };
-        let slot = config.entry(t).or_insert(arity);
-        if arity == Arity::Scalar {
-            *slot = Arity::Scalar;
-        }
-    }
-    config
+    facts
+        .into_iter()
+        .filter(|(_, value)| *value == "scalar")
+        .filter_map(|(target, _)| exact_target(target))
+        .map(|t| (t, Arity::Scalar))
+        .collect()
 }
 
 /// SPEC.md §9's type resolution over `(target, name)` facts — one per
