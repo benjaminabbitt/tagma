@@ -8,6 +8,19 @@ export interface ParsedTag {
   value: string | null;
 }
 
+/**
+ * One finding (SPEC.md §13/§14): a stable `code`, the `tag` it is about in
+ * its canonical spelling, named `args` as `[name, value]` pairs in order (a
+ * multi-valued argument repeated once per value), and whether the change
+ * introduced it or it already held (`check` findings are all `"existing"`).
+ */
+export interface Finding {
+  code: string;
+  tag: string;
+  args: [string, string][];
+  origin: "introduced" | "existing";
+}
+
 /** An in-memory tag index, queryable via infix or postfix queries. */
 export declare class Index {
   constructor();
@@ -29,6 +42,21 @@ export declare class Index {
    * matching ids. Throws on evaluation failure.
    */
   queryPostfix(query: string): string[];
+
+  /**
+   * Validates a change to item `id` (SPEC.md §13): the findings for the tag
+   * set the item would carry after removing every tag in `remove`, then
+   * adding every tag in `add` (one tag per element), against the index's
+   * `tagma.*` config as it stands. Pure: the index is not modified. Sorted
+   * by tag spelling, then code, then args. Throws on an invalid tag.
+   */
+  validate(id: string, add: string[], remove: string[]): Finding[];
+
+  /**
+   * Checks the index's own `tagma.*` config (SPEC.md §14); every finding's
+   * origin is `"existing"`.
+   */
+  check(): Finding[];
 
   /** Releases the underlying WASM-side index. */
   free(): void;

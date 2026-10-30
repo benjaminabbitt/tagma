@@ -1,8 +1,8 @@
 //! tagma-wasm: wasm-bindgen wrapper over `tagma-core` (PLAN.md Phase 5,
 //! task W1).
 //!
-//! Thin bindings only: an `Index` class (`add`, `query`, `queryPostfix`),
-//! plus free functions `compile` and `parseTag`. No behavior beyond what
+//! Thin bindings only: an `Index` class (`add`, `query`, `queryPostfix`,
+//! `validate`, `check`), plus free functions `compile` and `parseTag`. No behavior beyond what
 //! `tagma-core` already provides; errors from the core are thrown as JS
 //! `Error`s carrying the core's `String` message. This crate is built with
 //! wasm-bindgen but, per PLAN.md W1, must also compile cleanly for native
@@ -41,6 +41,7 @@
 )]
 
 use tagma_core::tag::Tag;
+use tagma_core::{Change, Finding};
 use wasm_bindgen::prelude::*;
 
 /// Converts a core `Result<T, String>` error into a JS `Error`.
@@ -83,6 +84,72 @@ impl Index {
     pub fn query_postfix(&self, query: &str) -> Result<Vec<String>, JsValue> {
         self.inner.query_postfix(query).map_err(to_js_err)
     }
+
+    /// Validates a change to item `id` (SPEC.md §13): the findings for the
+    /// tag set the item would carry after removing every tag in `remove`
+    /// and then adding every tag in `add` (one tag string per element),
+    /// against the index's `tagma.*` config as it stands. Pure: the index
+    /// is not modified. Returns `{code, tag, args, origin}` objects (see
+    /// [`finding_to_js`]). Throws on an invalid tag.
+    pub fn validate(
+        &self,
+        id: &str,
+        add: Vec<String>,
+        remove: Vec<String>,
+    ) -> Result<js_sys::Array, JsValue> {
+        let change = Change {
+            add: parse_tags(&add).map_err(|e| to_js_err(format!("add: {e}")))?,
+            remove: parse_tags(&remove).map_err(|e| to_js_err(format!("remove: {e}")))?,
+        };
+        findings_to_js(&self.inner.validate(id, &change))
+    }
+
+    /// Checks the index's own `tagma.*` config (SPEC.md §14), returning
+    /// findings as [`Index::validate`] does, every `origin` `"existing"`.
+    pub fn check(&self) -> Result<js_sys::Array, JsValue> {
+        findings_to_js(&self.inner.check())
+    }
+}
+
+/// Parses each element of `tags` as one tag (SPEC.md §2).
+fn parse_tags(tags: &[String]) -> Result<Vec<Tag>, String> {
+    tags.iter().map(|t| Tag::parse(t)).collect()
+}
+
+/// Sets `obj[key] = value`, as a JS `Error` on failure rather than a panic.
+fn set(obj: &js_sys::Object, key: &str, value: &JsValue) -> Result<(), JsValue> {
+    js_sys::Reflect::set(obj, &JsValue::from_str(key), value)
+        .map(|_| ())
+        .map_err(|_| to_js_err(format!("wasm: failed to set {key}")))
+}
+
+/// One finding as a plain object, keys in SPEC.md §13's order: `code` and
+/// `origin` (`"introduced"` or `"existing"`) as their stable strings, `tag`
+/// in its canonical spelling (SPEC.md §2), and `args` as `[name, value]`
+/// pairs in order (a multi-valued argument repeated once per value).
+fn finding_to_js(f: &Finding) -> Result<JsValue, JsValue> {
+    let args = js_sys::Array::new();
+    for (name, value) in &f.args {
+        args.push(&js_sys::Array::of2(
+            &JsValue::from_str(name),
+            &JsValue::from_str(value),
+        ));
+    }
+    let obj = js_sys::Object::new();
+    set(&obj, "code", &JsValue::from_str(f.code.as_str()))?;
+    set(&obj, "tag", &JsValue::from_str(&f.tag.to_string()))?;
+    set(&obj, "args", &args)?;
+    set(&obj, "origin", &JsValue::from_str(f.origin.as_str()))?;
+    Ok(obj.into())
+}
+
+/// Findings as a JS array of [`finding_to_js`] objects, order kept.
+fn findings_to_js(findings: &[Finding]) -> Result<js_sys::Array, JsValue> {
+    let out = js_sys::Array::new();
+    for f in findings {
+        out.push(&finding_to_js(f)?);
+    }
+    Ok(out)
 }
 
 impl Default for Index {

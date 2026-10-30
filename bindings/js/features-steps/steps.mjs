@@ -33,6 +33,7 @@ class TagmaWorld {
     this.lastTag = undefined; // { ok: true, value } | { ok: false, error }
     this.lastCompile = undefined;
     this.lastMatch = undefined;
+    this.lastFindings = undefined; // the last validate or check call's
   }
 }
 setWorldConstructor(TagmaWorld);
@@ -129,4 +130,53 @@ Then("it matches exactly {verbatim}", function (expected) {
   expectedIds.sort();
   const actualIds = [...this.lastMatch.value].sort();
   assert.deepEqual(actualIds, expectedIds);
+});
+
+// docs/steps.md: a tag-list argument, split on unquoted whitespace as the
+// bulk-ingest line format is (a "-quoted span, backslash escapes inside it,
+// stays one field); "" is the empty list.
+function tagList(s) {
+  return s.match(/(?:[^\s"]+|"(?:[^"\\]|\\.)*")+/g) ?? [];
+}
+
+When(
+  "item {verbatim} is validated adding {verbatim} and removing {verbatim}",
+  function (id, adding, removing) {
+    this.lastFindings = this.index.validate(id, tagList(adding), tagList(removing));
+  },
+);
+
+When("the config is checked", function () {
+  this.lastFindings = this.index.check();
+});
+
+// Compares findings with a "<code> <tag> ; ..." list as a multiset of
+// (code, parsed tag) pairs, ignoring order, args and origin (docs/steps.md).
+function assertFindings(actual, expected) {
+  const key = (code, tag) => JSON.stringify([code, parseTag(tag)]);
+  const got = actual.map((f) => key(f.code, f.tag)).sort();
+  const want = expected
+    .split(" ; ")
+    .map((e) => e.trim())
+    .filter((e) => e !== "")
+    .map((e) => {
+      const space = e.indexOf(" ");
+      assert.ok(space > 0, `finding ${JSON.stringify(e)} is not \`<code> <tag>\``);
+      return key(e.slice(0, space), e.slice(space + 1));
+    })
+    .sort();
+  assert.deepEqual(got, want);
+}
+
+Then("the findings are {verbatim}", function (expected) {
+  assert.ok(this.lastFindings, "no validate or check was run");
+  assertFindings(this.lastFindings, expected);
+});
+
+Then("the introduced findings are {verbatim}", function (expected) {
+  assert.ok(this.lastFindings, "no validate or check was run");
+  assertFindings(
+    this.lastFindings.filter((f) => f.origin === "introduced"),
+    expected,
+  );
 });

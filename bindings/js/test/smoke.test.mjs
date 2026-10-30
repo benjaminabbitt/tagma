@@ -68,3 +68,50 @@ test("infix is a gateway: query(q) === queryPostfix(compile(q))", () => {
   }
   assert.ok(distinct.size > 3, "table must discriminate between results");
 });
+
+test("validate: findings with their origin, args as pairs", () => {
+  const idx = new Index();
+  idx.add("cfg tagma.enum:k=a tagma.enum:j=a");
+  idx.add("item k=z j=bad");
+  assert.deepEqual(idx.validate("item", ["k=y"], ["k=z"]), [
+    { code: "not-in-enum", tag: "j=bad", args: [["allowed", "a"]], origin: "existing" },
+    { code: "not-in-enum", tag: "k=y", args: [["allowed", "a"]], origin: "introduced" },
+  ]);
+  assert.deepEqual(idx.validate("item", ["k=a", 'j="a"'], ["k=z", "j=bad"]), []);
+  // Pure: nothing was written.
+  assert.deepEqual(idx.query("k=z and j=bad"), ["item"]);
+});
+
+test("validate: a finding with no args has an empty args array", () => {
+  const idx = new Index();
+  idx.add('cfg tagma.permit:"*:*"=false');
+  assert.deepEqual(idx.validate("x", ["lang=en"], []), [
+    { code: "not-permitted", tag: "lang=en", args: [], origin: "introduced" },
+  ]);
+});
+
+test("validate: an invalid tag throws, naming its list", () => {
+  const idx = new Index();
+  assert.throws(() => idx.validate("x", ["=5"], []), /^Error: add: /);
+  assert.throws(() => idx.validate("x", [], ["=5"]), /^Error: remove: /);
+});
+
+test("check: config findings, all existing, sorted by tag", () => {
+  const idx = new Index();
+  assert.deepEqual(idx.check(), []);
+  idx.add('cfg tagma.permit:"*:secret"=false tagma.arity:k=scalar tagma.arity:k=set');
+  assert.deepEqual(idx.check(), [
+    {
+      code: "conflict",
+      tag: "tagma.arity:k=set",
+      args: [["facet", "arity"], ["resolution", "scalar"]],
+      origin: "existing",
+    },
+    {
+      code: "inert-false",
+      tag: 'tagma.permit:"*:secret"=false',
+      args: [["facet", "permit"]],
+      origin: "existing",
+    },
+  ]);
+});
