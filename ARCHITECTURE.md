@@ -31,6 +31,29 @@ callbacks, traits, or host-language objects cross the boundary. Every FFI
 mechanism above degenerates to trivial under this shape; it cannot be
 retrofitted cheaply.
 
+## Infix is a gateway (load-bearing)
+
+Every implementation has exactly one query evaluator: the postfix stack VM.
+Infix is a compiler front end and nothing more (SPEC.md §5). Each surface's
+infix entry point is a two-line composition, `compile` then the postfix
+entry point, and each surface also exposes `compile` so callers can obtain
+the postfix that will run:
+
+| Surface | infix entry | compiles via | then runs |
+|---|---|---|---|
+| tagma-core | `Index::query` | `infix::compile` | `Index::query_postfix` → `postfix::eval` |
+| tagma-cli | `query <q>` | (`Index::query`) | `query --postfix <q>` path |
+| C ABI (`include/tagma.h`) | `tagma_query` | `tagma_compile` | `tagma_query_postfix` |
+| Python | `Index.query` | `tagma.compile` | `Index.query_postfix` |
+| WASM / JS | `Index.query` | `compile` | `Index.queryPostfix` |
+| Go port | `(*Index).Query` | `Compile` | `(*Index).QueryPostfix` → `evalPostfix` |
+
+The bindings all delegate to tagma-core's `Index::query`; the Go port mirrors
+it independently. Each surface carries a test pinning
+`query(q) == query_postfix(compile(q))` over a shared table of queries. Do not
+add an infix evaluator, an infix-only optimisation, or an infix-only API: add
+it over postfix and let infix reach it by compiling.
+
 ## JS/TS packaging
 
 Ship **WASM-only** — one npm package, no per-platform native addon matrix, no

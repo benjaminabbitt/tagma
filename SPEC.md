@@ -4,7 +4,9 @@
 
 A tagging model of three-position tags — `namespace:key=value` with namespace and
 value independently optional — plus a postfix query language (canonical/wire form)
-and an infix query frontend that compiles down to it.
+and an infix query frontend that compiles down to it. Infix is a gateway
+only: nothing evaluates infix; it compiles to postfix and runs as postfix
+(§5).
 
 ## 1. Data model
 
@@ -218,6 +220,21 @@ Postfix is the query plan: atoms resolve to id-sets via the inverted index;
 `and`/`or`/`not` are bitmap intersection/union/complement on a stack.
 Implementations should fuse `x/not/and` patterns into set-difference rather
 than materializing complements.
+
+**Infix is a gateway (normative).** Postfix is the *only* form tagma
+evaluates, queries, plans, or indexes against. Infix (§2's `query`) exists
+solely as a human front end: an infix query is first compiled to its
+canonical postfix string, and that string is then evaluated by the postfix
+VM exactly as if the caller had supplied it directly. No implementation,
+binding, or port may evaluate infix any other way — no infix AST walker, no
+infix-specific matcher, no infix query planner. Consequently, for every
+infix query `q` and every index, `query(q)` equals
+`query_postfix(compile(q))` (results and errors alike: an infix query that
+fails to compile fails before evaluation), and every surface that accepts
+infix also exposes `compile`, so the postfix it will run is always
+obtainable. Anything new that operates on a query (an API, an optimisation,
+an index access path) is defined over postfix; infix gets it for free by
+compiling first.
 
 **Leftover-stack fold.** A non-empty postfix query is never rejected for
 what it leaves on the stack. Once every token is evaluated, exactly one of
