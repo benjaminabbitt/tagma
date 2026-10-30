@@ -15,6 +15,8 @@ behave's default parse-style matcher does not, so it's reproduced here by
 hand with one regex alternation per placeholder.
 """
 
+import re
+
 import tagma
 from behave import given, then, use_step_matcher, when
 
@@ -128,4 +130,70 @@ def step_then_it_matches_exactly(context, **kwargs):
     expected = sorted(ids.split())
     assert sorted(context.match_result) == expected, (
         f"{sorted(context.match_result)!r} != {expected!r}"
+    )
+
+
+# docs/steps.md: a tag-list argument, split on unquoted whitespace as the
+# bulk-ingest line format is (a "-quoted span, backslash escapes inside it,
+# stays one field); "" is the empty list.
+_TAG_FIELD = re.compile(r'(?:[^\s"]+|"(?:[^"\\]|\\.)*")+')
+
+
+def _tag_list(s):
+    return _TAG_FIELD.findall(s)
+
+
+@when(
+    rf"item {_qstr('item_id')} is validated adding {_qstr('adding')} "
+    rf"and removing {_qstr('removing')}"
+)
+def step_when_item_is_validated(context, **kwargs):
+    item_id = _pick(kwargs, "item_id")
+    adding = _pick(kwargs, "adding")
+    removing = _pick(kwargs, "removing")
+    context.findings = context.index.validate(
+        item_id, _tag_list(adding), _tag_list(removing)
+    )
+
+
+@when("the config is checked")
+def step_when_the_config_is_checked(context):
+    context.findings = context.index.check()
+
+
+def _assert_findings(actual, expected):
+    """Compares findings with a "<code> <tag> ; ..." list as a multiset of
+    (code, parsed tag) pairs, ignoring order, args and origin
+    (docs/steps.md)."""
+
+    def key(code, tag):
+        t = tagma.parse_tag(tag)
+        return (code, t["namespace"] or "", t["namespace"] is None, t["key"],
+                t["value"] or "", t["value"] is None)
+
+    got = sorted(key(f["code"], f["tag"]) for f in actual)
+    want = []
+    for entry in expected.split(" ; "):
+        entry = entry.strip()
+        if not entry:
+            continue
+        code, sep, tag = entry.partition(" ")
+        assert sep, f"finding {entry!r} is not `<code> <tag>`"
+        want.append(key(code, tag))
+    assert got == sorted(want), f"{got!r} != {sorted(want)!r}"
+
+
+@then(rf"the findings are {_qstr('findings')}")
+def step_then_the_findings_are(context, **kwargs):
+    expected = _pick(kwargs, "findings")
+    assert context.findings is not None, "no validate or check was run"
+    _assert_findings(context.findings, expected)
+
+
+@then(rf"the introduced findings are {_qstr('findings')}")
+def step_then_the_introduced_findings_are(context, **kwargs):
+    expected = _pick(kwargs, "findings")
+    assert context.findings is not None, "no validate or check was run"
+    _assert_findings(
+        [f for f in context.findings if f["origin"] == "introduced"], expected
     )

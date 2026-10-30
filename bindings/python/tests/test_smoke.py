@@ -87,6 +87,69 @@ def test_index_add_invalid_raises():
         raise AssertionError("expected ValueError for invalid tag")
 
 
+def _rules_index():
+    idx = tagma.Index()
+    idx.add("cfg tagma.enum:k=a tagma.enum:j=a")
+    idx.add("item k=z j=bad")
+    return idx
+
+
+def test_validate_returns_findings_with_their_origin():
+    idx = _rules_index()
+    assert idx.validate("item", ["k=y"], ["k=z"]) == [
+        {"code": "not-in-enum", "tag": "j=bad", "args": [("allowed", "a")], "origin": "existing"},
+        {"code": "not-in-enum", "tag": "k=y", "args": [("allowed", "a")], "origin": "introduced"},
+    ]
+    assert idx.validate("item", add=["k=a", 'j="a"'], remove=["k=z", "j=bad"]) == []
+    # Pure: nothing was written.
+    assert idx.query("k=z and j=bad") == ["item"]
+
+
+def test_validate_change_defaults_to_empty():
+    idx = _rules_index()
+    assert [f["origin"] for f in idx.validate("item")] == ["existing", "existing"]
+    assert [f["tag"] for f in idx.validate("item", remove=["k=z"])] == ["j=bad"]
+
+
+def test_validate_finding_without_args_has_an_empty_list():
+    idx = tagma.Index()
+    idx.add('cfg tagma.permit:"*:*"=false')
+    assert idx.validate("x", ["lang=en"]) == [
+        {"code": "not-permitted", "tag": "lang=en", "args": [], "origin": "introduced"}
+    ]
+
+
+def test_validate_invalid_tag_raises_naming_its_list():
+    idx = tagma.Index()
+    for kwargs, prefix in (({"add": ["=5"]}, "add: "), ({"remove": ["=5"]}, "remove: ")):
+        try:
+            idx.validate("x", **kwargs)
+        except ValueError as exc:
+            assert str(exc).startswith(prefix), exc
+        else:
+            raise AssertionError(f"expected ValueError for {kwargs}")
+
+
+def test_check_returns_config_findings_sorted_by_tag():
+    idx = tagma.Index()
+    assert idx.check() == []
+    idx.add('cfg tagma.permit:"*:secret"=false tagma.arity:k=scalar tagma.arity:k=set')
+    assert idx.check() == [
+        {
+            "code": "conflict",
+            "tag": "tagma.arity:k=set",
+            "args": [("facet", "arity"), ("resolution", "scalar")],
+            "origin": "existing",
+        },
+        {
+            "code": "inert-false",
+            "tag": 'tagma.permit:"*:secret"=false',
+            "args": [("facet", "permit")],
+            "origin": "existing",
+        },
+    ]
+
+
 def _run_all():
     tests = [v for k, v in globals().items() if k.startswith("test_") and callable(v)]
     for t in tests:
