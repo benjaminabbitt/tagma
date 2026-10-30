@@ -6,7 +6,7 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 
 use cucumber::{given, then, when, World};
-use tagma_core::{infix, token, Index, Tag, TypeComparator};
+use tagma_core::{infix, token, Change, Finding, Index, Tag, TypeComparator};
 
 /// Cucumber world: an index plus the outcome slots for the last tag parse,
 /// compile, and query/match operations. `#[derive(World)]` builds a fresh
@@ -20,6 +20,7 @@ pub struct TagmaWorld {
     last_tag: Option<Result<Tag, String>>,
     last_compile: Option<Result<String, String>>,
     last_match: Option<Result<Vec<String>, String>>,
+    last_findings: Option<Vec<Finding>>,
 }
 
 impl Default for TagmaWorld {
@@ -47,6 +48,7 @@ impl Default for TagmaWorld {
             last_tag: None,
             last_compile: None,
             last_match: None,
+            last_findings: None,
         }
     }
 }
@@ -195,19 +197,65 @@ fn parse_identifier(part: &str) -> Option<Identifier> {
     }
 }
 
-#[given(expr = "an item {string} tagged {string}")]
-fn given_item(world: &mut TagmaWorld, id: String, tags: String) {
-    // Same unquoted-whitespace split as the ARCHITECTURE.md bulk-ingest
-    // line format (`Index::add_line`), so a fixture tag can quote a value
-    // containing a literal space (SPEC.md §2 QUOTING extension) without
-    // being torn into two fields; plain whitespace-separated fixtures
-    // split exactly as `str::split_whitespace` would.
-    let parsed: Vec<Tag> = token::split_unquoted_whitespace(&tags)
+/// Parses a step's whitespace-separated tag list. Same unquoted-whitespace
+/// split as the ARCHITECTURE.md bulk-ingest line format (`Index::add_line`),
+/// so a fixture tag can quote a value containing a literal space (SPEC.md
+/// §2 QUOTING extension) without being torn into two fields; plain
+/// whitespace-separated fixtures split exactly as `str::split_whitespace`
+/// would.
+fn parse_tag_list(tags: &str) -> Vec<Tag> {
+    token::split_unquoted_whitespace(tags)
         .unwrap_or_else(|e| panic!("invalid tag list {tags:?}: {e}"))
         .into_iter()
         .map(|t| Tag::parse(t).unwrap_or_else(|e| panic!("invalid tag {t:?}: {e}")))
+        .collect()
+}
+
+#[given(expr = "an item {string} tagged {string}")]
+fn given_item(world: &mut TagmaWorld, id: String, tags: String) {
+    world.index.add_item(&id, parse_tag_list(&tags));
+}
+
+#[when(expr = "item {string} is validated adding {string} and removing {string}")]
+fn when_item_validated(world: &mut TagmaWorld, id: String, adding: String, removing: String) {
+    let change = Change {
+        add: parse_tag_list(&adding),
+        remove: parse_tag_list(&removing),
+    };
+    world.last_findings = Some(world.index.validate(&id, &change));
+}
+
+#[when(expr = "the config is checked")]
+fn when_config_checked(world: &mut TagmaWorld) {
+    world.last_findings = Some(world.index.check());
+}
+
+#[then(expr = "the findings are {string}")]
+fn then_the_findings_are(world: &mut TagmaWorld, expected: String) {
+    // docs/steps.md: a multiset of (code, parsed tag), order and args ignored.
+    let actual = world
+        .last_findings
+        .take()
+        .expect("no validate or check was run");
+    let mut actual: Vec<(String, String)> = actual
+        .iter()
+        .map(|f| (f.code.as_str().to_string(), f.tag.to_string()))
         .collect();
-    world.index.add_item(&id, parsed);
+    let mut expected: Vec<(String, String)> = expected
+        .split(" ; ")
+        .filter(|e| !e.trim().is_empty())
+        .map(|e| {
+            let (code, t) = e
+                .trim()
+                .split_once(' ')
+                .unwrap_or_else(|| panic!("finding {e:?} is not `<code> <tag>`"));
+            let tag = Tag::parse(t).unwrap_or_else(|err| panic!("invalid tag {t:?}: {err}"));
+            (code.to_string(), tag.to_string())
+        })
+        .collect();
+    actual.sort();
+    expected.sort();
+    assert_eq!(actual, expected);
 }
 
 #[when(expr = "the tag {string} is parsed")]

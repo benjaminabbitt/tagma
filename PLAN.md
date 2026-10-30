@@ -237,7 +237,7 @@ Scoped when a mobile consumer exists; uniffi UDL over the same handle API.
 
 ## Appendix A — frozen step vocabulary
 
-Ten steps. Ports implement these and nothing else. `{string}` is a quoted
+Thirteen steps. Ports implement these and nothing else. `{string}` is a quoted
 cucumber-expression string; empty string means absent/none; id and tag lists
 are single-space-separated; match assertions compare **sorted** id sets.
 
@@ -252,6 +252,9 @@ Then parsing fails
 Then the postfix is {string}
 Then compilation fails
 Then it matches exactly {string}                # space-separated sorted ids; "" = empty set
+When item {string} is validated adding {string} and removing {string}   # SPEC.md §13 (draft)
+When the config is checked                      # SPEC.md §14 (draft)
+Then the findings are {string}                  # "<code> <tag>" joined by " ; "; "" = none
 ```
 
 ## Appendix B — verified fixtures and expectations (transcribe verbatim)
