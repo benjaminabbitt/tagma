@@ -70,6 +70,55 @@ static void handle_safety(void) {
     assert(tagma_index_free(0) == 0);
 }
 
+/* Validate and check (SPEC.md sections 13-14) at the real ABI: findings
+ * come back one JSON object per line, caller-owned, freed with
+ * tagma_str_free; errors are NULL plus tagma_last_error(). */
+static void rules(void) {
+    TagmaIndex idx = tagma_index_new();
+    assert(idx != 0);
+    assert(tagma_index_add(idx, "cfg tagma.enum:k=a tagma.enum:j=a") == 0);
+    assert(tagma_index_add(idx, "item k=z j=bad") == 0);
+
+    char *found = tagma_validate(idx, "item", "k=y", "k=z");
+    assert(found != NULL);
+    assert(strcmp(found,
+                  "{\"code\":\"not-in-enum\",\"tag\":\"j=bad\",\"args\":[[\"allowed\",\"a\"]],"
+                  "\"origin\":\"existing\"}\n"
+                  "{\"code\":\"not-in-enum\",\"tag\":\"k=y\",\"args\":[[\"allowed\",\"a\"]],"
+                  "\"origin\":\"introduced\"}") == 0);
+    tagma_str_free(found);
+
+    char *none = tagma_validate(idx, "item", "k=a j=a", "k=z j=bad");
+    assert(none != NULL);
+    assert(strcmp(none, "") == 0);
+    tagma_str_free(none);
+
+    assert(tagma_validate(idx, "item", "=5", "") == NULL);
+    assert_error_contains("add: ");
+    assert(tagma_validate(idx, NULL, "", "") == NULL);
+    assert_error_contains("id is null");
+
+    char *clean = tagma_check(idx);
+    assert(clean != NULL);
+    assert(strcmp(clean, "") == 0);
+    tagma_str_free(clean);
+
+    assert(tagma_index_add(idx, "cfg tagma.arity:k=scalar tagma.arity:k=set") == 0);
+    char *checked = tagma_check(idx);
+    assert(checked != NULL);
+    assert(strcmp(checked,
+                  "{\"code\":\"conflict\",\"tag\":\"tagma.arity:k=set\","
+                  "\"args\":[[\"facet\",\"arity\"],[\"resolution\",\"scalar\"]],"
+                  "\"origin\":\"existing\"}") == 0);
+    tagma_str_free(checked);
+
+    assert(tagma_index_free(idx) == 0);
+    assert(tagma_check(idx) == NULL);
+    assert_error_contains("freed index");
+    assert(tagma_validate(idx, "item", "", "") == NULL);
+    assert_error_contains("freed index");
+}
+
 int main(void) {
     TagmaIndex idx = tagma_index_new();
     assert(idx != 0);
@@ -141,6 +190,7 @@ int main(void) {
     assert(tagma_index_free(idx) == 0);
 
     handle_safety();
+    rules();
 
     return 0;
 }

@@ -140,6 +140,37 @@ char *tagma_query_postfix(TagmaIndex handle, const char *q);
 char *tagma_compile(const char *q);
 
 /**
+ * Validates a change to item `id` (SPEC.md §13): the findings for the tag
+ * set the item would carry after removing every tag in `remove` and then
+ * adding every tag in `add` (both whitespace-separated tag lists, `""` for
+ * none), judged against the index's `tagma.*` config as it stands. Pure:
+ * the index is not modified. An unknown `id` starts from no tags.
+ *
+ * Returns a newly allocated string of findings, one JSON object per line
+ * (`{"code","tag","args":[[name,value],...],"origin"}`, `origin` being
+ * `"introduced"` or `"existing"`), sorted as SPEC.md §13 orders them; the
+ * empty string means none. Returns `NULL` on error — an invalid tag in
+ * `add` or `remove`, a null or non-UTF-8 argument, an invalid handle (see
+ * [`tagma_last_error`]). Free the result with [`tagma_str_free`].
+ *
+ * # Safety
+ *
+ * `id`, `add` and `remove`, if non-null, must each point to a valid
+ * NUL-terminated C string. `handle` needs no precondition: an invalid one
+ * is a reported error.
+ */
+char *tagma_validate(TagmaIndex handle, const char *id, const char *add, const char *remove);
+
+/**
+ * Checks the index's own `tagma.*` config (SPEC.md §14). Returns a newly
+ * allocated string of findings in [`tagma_validate`]'s form (every
+ * `origin` `"existing"`; the empty string for none), or `NULL` on an
+ * invalid handle (see [`tagma_last_error`]). Free the result with
+ * [`tagma_str_free`]. Never unwinds.
+ */
+char *tagma_check(TagmaIndex handle);
+
+/**
  * Returns a newly allocated copy of the last error message recorded on
  * this thread, or `NULL` if there is none. Free the result with
  * [`tagma_str_free`]. Never unwinds.
@@ -151,8 +182,8 @@ char *tagma_last_error(void);
 
 /**
  * Frees a string previously returned by [`tagma_query`],
- * [`tagma_query_postfix`], [`tagma_compile`], or [`tagma_last_error`]. A
- * null pointer is a no-op.
+ * [`tagma_query_postfix`], [`tagma_compile`], [`tagma_validate`],
+ * [`tagma_check`], or [`tagma_last_error`]. A null pointer is a no-op.
  *
  * # Safety
  *

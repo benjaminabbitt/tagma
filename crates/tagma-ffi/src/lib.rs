@@ -2,7 +2,8 @@
 //!
 //! Data-in/data-out over an opaque handle (ARCHITECTURE.md API constraint):
 //! strings in, id arrays out (newline-joined), index state inside the core.
-//! All strings are UTF-8. A thread-local holds the last error message,
+//! Findings (SPEC.md §13/§14, [`tagma_validate`] and [`tagma_check`]) come
+//! out the same way: one JSON object per line. All strings are UTF-8. A thread-local holds the last error message,
 //! readable via [`tagma_last_error`].
 //!
 //! # Handle safety
@@ -47,7 +48,8 @@ use std::cell::RefCell;
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::panic::{catch_unwind, UnwindSafe};
 
-use tagma_core::Index;
+use tagma_core::token::split_unquoted_whitespace;
+use tagma_core::{Change, Finding, Index, Tag};
 
 pub mod handle;
 
@@ -321,6 +323,123 @@ pub unsafe extern "C" fn tagma_compile(q: *const c_char) -> *mut c_char {
     })
 }
 
+/// Parses a whitespace-separated tag list, split on unquoted whitespace as
+/// an [`tagma_index_add`] line is (SPEC.md §2); `""` is the empty list.
+fn parse_tag_list(list: &str) -> Result<Vec<Tag>, String> {
+    split_unquoted_whitespace(list)?
+        .into_iter()
+        .map(Tag::parse)
+        .collect()
+}
+
+/// Renders findings one JSON object per line (empty string for none):
+/// `{"code":…,"tag":…,"args":[[name,value],…],"origin":…}`, keys in
+/// SPEC.md §13's order, `tag` in its canonical spelling (SPEC.md §2) —
+/// the same lines `tagma validate`/`tagma check` print.
+fn findings_jsonl(findings: &[Finding]) -> String {
+    findings
+        .iter()
+        .map(|f| {
+            let args: Vec<String> = f
+                .args
+                .iter()
+                .map(|(name, value)| format!("[{},{}]", json_str(name), json_str(value)))
+                .collect();
+            format!(
+                "{{\"code\":{},\"tag\":{},\"args\":[{}],\"origin\":{}}}",
+                json_str(f.code.as_str()),
+                json_str(&f.tag.to_string()),
+                args.join(","),
+                json_str(f.origin.as_str()),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `s` as a JSON string literal (RFC 8259 §7): `"` and `\` escaped, every
+/// control character as `\u00XX` — so a finding never spans two lines.
+fn json_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if u32::from(c) < 0x20 => out.push_str(&format!("\\u{:04x}", u32::from(c))),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Validates a change to item `id` (SPEC.md §13): the findings for the tag
+/// set the item would carry after removing every tag in `remove` and then
+/// adding every tag in `add` (both whitespace-separated tag lists, `""` for
+/// none), judged against the index's `tagma.*` config as it stands. Pure:
+/// the index is not modified. An unknown `id` starts from no tags.
+///
+/// Returns a newly allocated string of findings, one JSON object per line
+/// (`{"code","tag","args":[[name,value],...],"origin"}`, `origin` being
+/// `"introduced"` or `"existing"`), sorted as SPEC.md §13 orders them; the
+/// empty string means none. Returns `NULL` on error — an invalid tag in
+/// `add` or `remove`, a null or non-UTF-8 argument, an invalid handle (see
+/// [`tagma_last_error`]). Free the result with [`tagma_str_free`].
+///
+/// # Safety
+///
+/// `id`, `add` and `remove`, if non-null, must each point to a valid
+/// NUL-terminated C string. `handle` needs no precondition: an invalid one
+/// is a reported error.
+#[no_mangle]
+pub unsafe extern "C" fn tagma_validate(
+    handle: TagmaIndex,
+    id: *const c_char,
+    add: *const c_char,
+    remove: *const c_char,
+) -> *mut c_char {
+    guard("tagma_validate", std::ptr::null_mut(), || {
+        let (Some(id), Some(add), Some(remove)) = (
+            unsafe { borrow_str(id, "id") },
+            unsafe { borrow_str(add, "add") },
+            unsafe { borrow_str(remove, "remove") },
+        ) else {
+            return std::ptr::null_mut();
+        };
+        let change = match (parse_tag_list(add), parse_tag_list(remove)) {
+            (Ok(add), Ok(remove)) => Change { add, remove },
+            (Err(e), _) => {
+                set_last_error(format!("add: {e}"));
+                return std::ptr::null_mut();
+            }
+            (_, Err(e)) => {
+                set_last_error(format!("remove: {e}"));
+                return std::ptr::null_mut();
+            }
+        };
+        with_handle(handle, std::ptr::null_mut(), |idx| {
+            clear_last_error();
+            to_c_string(findings_jsonl(&idx.validate(id, &change)))
+        })
+    })
+}
+
+/// Checks the index's own `tagma.*` config (SPEC.md §14). Returns a newly
+/// allocated string of findings in [`tagma_validate`]'s form (every
+/// `origin` `"existing"`; the empty string for none), or `NULL` on an
+/// invalid handle (see [`tagma_last_error`]). Free the result with
+/// [`tagma_str_free`]. Never unwinds.
+#[no_mangle]
+pub extern "C" fn tagma_check(handle: TagmaIndex) -> *mut c_char {
+    guard("tagma_check", std::ptr::null_mut(), || {
+        with_handle(handle, std::ptr::null_mut(), |idx| {
+            clear_last_error();
+            to_c_string(findings_jsonl(&idx.check()))
+        })
+    })
+}
+
 /// Returns a newly allocated copy of the last error message recorded on
 /// this thread, or `NULL` if there is none. Free the result with
 /// [`tagma_str_free`]. Never unwinds.
@@ -341,8 +460,8 @@ pub extern "C" fn tagma_last_error() -> *mut c_char {
 }
 
 /// Frees a string previously returned by [`tagma_query`],
-/// [`tagma_query_postfix`], [`tagma_compile`], or [`tagma_last_error`]. A
-/// null pointer is a no-op.
+/// [`tagma_query_postfix`], [`tagma_compile`], [`tagma_validate`],
+/// [`tagma_check`], or [`tagma_last_error`]. A null pointer is a no-op.
 ///
 /// # Safety
 ///
@@ -767,6 +886,175 @@ mod tests {
             assert_eq!(ids.lines().count(), 8 * 32);
             assert_eq!(tagma_index_free(handle), 0);
         }
+    }
+
+    // --- validate and check (SPEC.md §13/§14) ------------------------------
+
+    /// An index over `lines`, for the rules tests.
+    unsafe fn rules_index(lines: &[&str]) -> TagmaIndex {
+        let handle = tagma_index_new();
+        for line in lines {
+            let cline = to_cstring(line);
+            assert_eq!(unsafe { tagma_index_add(handle, cline.as_ptr()) }, 0);
+        }
+        handle
+    }
+
+    unsafe fn validate(handle: TagmaIndex, id: &str, add: &str, remove: &str) -> *mut c_char {
+        let (id, add, remove) = (to_cstring(id), to_cstring(add), to_cstring(remove));
+        unsafe { tagma_validate(handle, id.as_ptr(), add.as_ptr(), remove.as_ptr()) }
+    }
+
+    #[test]
+    fn validate_returns_one_json_finding_per_line_with_its_origin() {
+        unsafe {
+            let handle = rules_index(&["cfg tagma.enum:k=a tagma.enum:j=a", "item k=z j=bad"]);
+            assert_eq!(
+                from_c(validate(handle, "item", "k=y", "k=z")),
+                concat!(
+                    r#"{"code":"not-in-enum","tag":"j=bad","args":[["allowed","a"]],"origin":"existing"}"#,
+                    "\n",
+                    r#"{"code":"not-in-enum","tag":"k=y","args":[["allowed","a"]],"origin":"introduced"}"#,
+                )
+            );
+            assert!(tagma_last_error().is_null(), "success clears the error");
+            assert_eq!(tagma_index_free(handle), 0);
+        }
+    }
+
+    #[test]
+    fn validate_takes_whitespace_separated_tag_lists_and_is_pure() {
+        unsafe {
+            let handle = rules_index(&["cfg tagma.enum:k=a tagma.enum:j=a", "item k=z j=bad"]);
+            assert_eq!(
+                from_c(validate(handle, "item", r#"k=a j="a""#, "k=z j=bad")),
+                ""
+            );
+            // Nothing was written: the old violations still hold.
+            let q = to_cstring("k=z and j=bad");
+            assert_eq!(from_c(tagma_query(handle, q.as_ptr())), "item");
+            assert_eq!(tagma_index_free(handle), 0);
+        }
+    }
+
+    #[test]
+    fn validate_a_finding_with_no_args_has_an_empty_args_array() {
+        unsafe {
+            let handle = rules_index(&[r#"cfg tagma.permit:"*:*"=false"#]);
+            assert_eq!(
+                from_c(validate(handle, "x", "lang=en", "")),
+                r#"{"code":"not-permitted","tag":"lang=en","args":[],"origin":"introduced"}"#
+            );
+            assert_eq!(tagma_index_free(handle), 0);
+        }
+    }
+
+    #[test]
+    fn validate_an_invalid_tag_names_the_list_it_was_in() {
+        unsafe {
+            let handle = rules_index(&[]);
+            assert!(validate(handle, "x", "=5", "").is_null());
+            assert!(take_error().starts_with("add: "));
+            assert!(validate(handle, "x", "", "=5").is_null());
+            assert!(take_error().starts_with("remove: "));
+            assert!(validate(handle, "x", r#"k="open"#, "").is_null());
+            assert!(take_error().starts_with("add: "));
+            assert_eq!(tagma_index_free(handle), 0);
+        }
+    }
+
+    #[test]
+    fn validate_and_check_reject_null_and_non_utf8_arguments() {
+        unsafe {
+            let handle = rules_index(&[]);
+            let ok = to_cstring("");
+            let bad = invalid_utf8_cstring();
+            let null = std::ptr::null();
+            for (id, add, remove, what) in [
+                (null, ok.as_ptr(), ok.as_ptr(), "id is null"),
+                (ok.as_ptr(), null, ok.as_ptr(), "add is null"),
+                (ok.as_ptr(), ok.as_ptr(), null, "remove is null"),
+                (
+                    bad.as_ptr(),
+                    ok.as_ptr(),
+                    ok.as_ptr(),
+                    "id is not valid UTF-8",
+                ),
+                (
+                    ok.as_ptr(),
+                    bad.as_ptr(),
+                    ok.as_ptr(),
+                    "add is not valid UTF-8",
+                ),
+                (
+                    ok.as_ptr(),
+                    ok.as_ptr(),
+                    bad.as_ptr(),
+                    "remove is not valid UTF-8",
+                ),
+            ] {
+                assert!(tagma_validate(handle, id, add, remove).is_null());
+                let msg = take_error();
+                assert!(msg.contains(what), "{what}: got {msg}");
+            }
+            assert_eq!(tagma_index_free(handle), 0);
+        }
+    }
+
+    #[test]
+    fn validate_and_check_reject_dead_and_foreign_handles() {
+        unsafe {
+            let handle = tagma_index_new();
+            assert_eq!(tagma_index_free(handle), 0);
+            assert!(validate(handle, "x", "", "").is_null());
+            assert!(take_error().contains("freed index"));
+            assert!(tagma_check(handle).is_null());
+            assert!(take_error().contains("freed index"));
+            assert!(tagma_check(42).is_null());
+            assert!(take_error().contains("not issued by tagma"));
+            assert!(tagma_check(0).is_null());
+            assert!(take_error().contains("handle is null"));
+        }
+    }
+
+    #[test]
+    fn check_reports_the_config_one_json_finding_per_line() {
+        unsafe {
+            let handle = rules_index(&[
+                r#"cfg tagma.permit:"*:secret"=false tagma.range:k=1..3 tagma.range:k=5..9"#,
+            ]);
+            assert_eq!(
+                from_c(tagma_check(handle)),
+                concat!(
+                    r#"{"code":"inert-false","tag":"tagma.permit:\"*:secret\"=false","args":[["facet","permit"]],"origin":"existing"}"#,
+                    "\n",
+                    r#"{"code":"range-empty","tag":"tagma.range:k=1..3","args":[["range","5..9"]],"origin":"existing"}"#,
+                    "\n",
+                    r#"{"code":"range-empty","tag":"tagma.range:k=5..9","args":[["range","1..3"]],"origin":"existing"}"#,
+                )
+            );
+            assert!(tagma_last_error().is_null(), "success clears the error");
+            assert_eq!(tagma_index_free(handle), 0);
+        }
+    }
+
+    #[test]
+    fn check_of_an_unconfigured_index_is_the_empty_string() {
+        unsafe {
+            let handle = rules_index(&["a k=1"]);
+            assert_eq!(from_c(tagma_check(handle)), "");
+            assert_eq!(tagma_index_free(handle), 0);
+        }
+    }
+
+    #[test]
+    fn json_str_escapes_quotes_backslashes_and_control_characters_only() {
+        assert_eq!(json_str("a b"), r#""a b""#);
+        // 0x7f (DEL) is not a JSON control character: it passes through.
+        assert_eq!(
+            json_str("q\"\\\t\n\u{1f}\u{7f}é"),
+            "\"q\\\"\\\\\\u0009\\u000a\\u001f\u{7f}é\""
+        );
     }
 
     #[test]
