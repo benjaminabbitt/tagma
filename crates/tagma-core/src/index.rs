@@ -51,6 +51,7 @@ use std::sync::Arc;
 use crate::atom::{anchored_match, Atom, Op, Pos};
 use crate::infix;
 use crate::postfix;
+use crate::rules::{Change, Finding, Rules};
 use crate::tag::Tag;
 use crate::token::split_unquoted_whitespace;
 use crate::typecmp::{relational_matches, TypeComparator, TypeCtx};
@@ -393,6 +394,32 @@ impl Index {
             }
         }
         !identical_present
+    }
+
+    /// The schema rules (SPEC.md §10–§12, with §8 `arity` and §9 `type`)
+    /// derived from every `tagma.*` config tag in the store, plus the
+    /// comparators registered via [`Self::register_type`].
+    ///
+    /// **STUB** (`todo!()`): specified in SPEC.md, not implemented yet.
+    pub fn rules(&self) -> Rules {
+        todo!("SPEC.md §10-§12: derive Rules from the store")
+    }
+
+    /// SPEC.md §13: validates the tag set item `id` would carry after
+    /// `change` (empty current set for an unknown id), against
+    /// [`Self::rules`]. Pure — the index is not mutated.
+    ///
+    /// **STUB** (`todo!()`): specified in SPEC.md, not implemented yet.
+    pub fn validate(&self, id: &str, change: &Change) -> Vec<Finding> {
+        let _ = (id, change);
+        todo!("SPEC.md §13: Index::validate")
+    }
+
+    /// SPEC.md §14: the findings about the store's own config.
+    ///
+    /// **STUB** (`todo!()`): specified in SPEC.md, not implemented yet.
+    pub fn check(&self) -> Vec<Finding> {
+        todo!("SPEC.md §14: Index::check")
     }
 
     /// Parses and adds a `<id> <tag> <tag>...` line (ARCHITECTURE.md bulk
