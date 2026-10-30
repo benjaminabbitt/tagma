@@ -93,3 +93,33 @@ compiler.
   `tagma_core::Tag`. It depends on prost and tagma-core only, and nothing in
   the workspace depends on it. The tag string is still the portable form:
   the message carries decoded components, and `Display for Tag` spells them.
+
+## Rules: validate and check (SPEC.md §10–§14, draft)
+
+The schema facets (`permit`, `enum`, `range`, plus the existing `arity` and
+`type`) and the two calls that read them live in `tagma-core`'s `rules`
+module. Nothing in the write or query path changes: writes stay infallible
+and queries ignore these facets.
+
+Public shape (Rust reference; ports mirror it in their own idiom):
+
+- `Rules` — the derived rule set, the counterpart of `HideConfig`:
+  `Rules::from_tags(tags)` reads `tagma.*` config tags out of any tag
+  collection (for a client, like taskloom, whose store is not an `Index`);
+  `Rules::register_type(name, cmp)` adds a §9 comparator;
+  `Rules::validate(current, &Change) -> Vec<Finding>` and
+  `Rules::check() -> Vec<Finding>` are pure.
+- `Index::rules()` derives a `Rules` from the whole store plus its
+  registered comparators; `Index::validate(id, &Change)` and
+  `Index::check()` delegate to it, keeping the handle-based,
+  data-in/data-out constraint above: tags and an id in, findings out.
+- `Change { add: Vec<Tag>, remove: Vec<Tag> }`;
+  `Finding { code: Code, tag: Tag, args: Vec<(String, String)> }`;
+  `Code` is a closed enum whose `as_str()` is the stable kebab-case code
+  from SPEC.md §13/§14 — the string is what crosses an FFI boundary.
+
+Conformance: `features/rules.feature` pins validate/check across bindings
+with three new steps (`docs/steps.md`). The Rust harness implements them;
+the JS (`bindings/js/features-steps`), Go (`ports/go/conformance_test.go`)
+and Python (`bindings/python/features/steps`, plus the feature symlink)
+step definitions are still to be added.

@@ -815,3 +815,295 @@ practice, since typed comparison is opt-in, per target, by construction.
   fail validation because of it. This section's "unregistered type name ->
   ignore the declaration" rule is the same posture: an unrecognized name
   configures nothing, quietly. <https://json-schema.org/draft/2020-12/json-schema-validation>
+
+## 10. Self-hosted meta-configuration — `tagma.permit`
+
+*(draft for owner review — §10–§14 are the "rules travel with the data"
+slice: tag-schema rules a client self-hosts as config tags in its own
+store, plus the two calls that read them. Nothing here changes how a write
+or a query behaves; §13 and §14 are new, read-only calls.)*
+
+`permit` is the fourth self-hosted meta-feature (§7–§9): it declares which
+tags a store admits, at the same `ns:key` granularity — and with the same
+pattern grammar — as `tagma.hide`. It never refuses a write (writes stay
+infallible, §4/§8); it is enforced only by a caller that asks first, via
+§13's `validate`.
+
+**Config tag form.** `tagma.permit:<target>=<bool>` declares whether the
+pattern encoded in `<target>` — the tag's own key — is a permitted pattern;
+`<bool>` is the literal token `true` or `false` (case-sensitive; any other
+value, or no value, configures nothing — §14 reports it as
+`malformed-value`).
+
+**Target encoding and pattern grammar — §7's, verbatim.** `<target>` is
+`<ns-pattern>:<key-pattern>` (quoted whenever it contains a `:`), or a bare
+`<key-pattern>` pinned to the **null namespace**. ns-pattern matches by
+dot-subtree, or `*` for any namespace (named or null); key-pattern matches
+exactly, or `*` for any key. Every target in §7's table means the same set
+here: `"triage:*"` (the `triage` subtree, every key), `"triage:cwe"`,
+`"*:secret"`, `secret` (null namespace only), `*` (every null-namespace
+tag), `"*:*"` (every tag). §7's documented-not-solved limitations (a
+literal `:` in a key-pattern, a literal `*` pattern) carry over unchanged.
+
+**Resolution — mirrors §7 exactly, with the restrictive value flipped.**
+
+1. *Per exact target:* a target is **active** iff it has a `=true` tag on
+   record and no `=false` tag. On a target with both, **`false` wins** —
+   the restrictive reading, as `hide`'s `true` and `arity`'s `scalar` win
+   in §7/§8. Reconciliation is per exact `<target>` string only.
+2. *Default:* tagma behaves as if an implicit `tagma.permit:"*:*"=true` is
+   always present. With no permit declarations at all, every tag is
+   permitted. An explicit `tagma.permit:"*:*"=false` deactivates it,
+   store-wide — this is how a store switches to an allowlist.
+3. *Across targets:* **a tag is permitted iff it matches at least one
+   active permit pattern.** Two *different* targets are never reconciled
+   by specificity, exactly as §7 refuses to: a `false` only ever
+   deactivates its own exact target — it is never a negative pattern, and
+   never carves an exception out of a broader active `true`.
+
+Consequences, stated so nobody has to derive them:
+
+- **Allowlist** — `"*:*"=false` plus one `=true` per admitted pattern.
+  This is the mode the facet exists for.
+- **Denylist is not expressible.** `"*:*"` active plus `"*:secret"=false`
+  does not forbid `secret`: the `false` deactivates only the target
+  `"*:secret"`, which was never active, so it configures nothing (§14:
+  `inert-false`). Forbidding a pattern inside an otherwise-open store is
+  out of scope for this slice — it would need specificity, which §7
+  rejected.
+- **While the default is active, every explicit `=true` is redundant**
+  (§14: `shadowed-permit`, naming `"*:*"`). A store that declares permits
+  but forgot `"*:*"=false` is the expected mistake; `check` names it.
+
+| config on record | `triage:kind=bug` | `triage.sub:x` | `lang=en` | `secret` |
+|---|---|---|---|---|
+| *(none)* | permitted | permitted | permitted | permitted |
+| `"*:*"=false`, `"triage:*"=true` | permitted | permitted (subtree) | **not** | **not** |
+| `"*:*"=false`, `"triage:kind"=true`, `lang=true` | permitted | **not** | permitted | **not** |
+| `"*:*"=false`, `"triage:*"=true`, `"triage:*"=false` | **not** (false wins on the one target) | **not** | **not** | **not** |
+| `"*:secret"=false` | permitted | permitted | permitted | permitted (inert `false`) |
+
+**The `tagma` family is exempt.** A tag whose namespace is `tagma` or a
+dot-descendant of it (every config tag, §7–§12) is always permitted —
+otherwise `"*:*"=false` would forbid the very tags that configure the
+store. Config tags are vetted by §14's `check`, not by `permit`.
+
+**Config is stored as tags and derived at read time**, store-wide and
+unconditional, exactly as §7: permit tags live in the ordinary tag store
+on any item, and the active set is re-derived (or a cache invalidated)
+whenever one is added. They are hidden by §7's default like every
+`tagma.*` tag.
+
+## 11. Self-hosted meta-configuration — `tagma.enum`
+
+`enum` declares the values a target key admits.
+
+**Config tag form — one tag per value.** `tagma.enum:<target>=<value>`
+declares that `<value>` is an admitted value of the target encoded in
+`<target>`. An enum of three values is three tags:
+
+```text
+tagma.enum:"triage:kind"=defect
+tagma.enum:"triage:kind"=capability
+tagma.enum:"triage:kind"=chore
+```
+
+This is tagma's own multi-value idiom (§1: a key holds many values as many
+tags). There is no list syntax: `tagma.enum:"triage:kind"="defect,chore"`
+admits exactly one value, the literal string `defect,chore`. A
+`tagma.enum` tag with **no value** configures nothing (§14:
+`malformed-value`).
+
+**Target encoding — §8's first-colon split, exact targets only.** `<target>`
+is `<targetkey>` (null namespace) or `<targetns>:<targetkey>`, recovered
+exactly as `tagma.arity`'s is, with §8's colon-in-key limitation. It names
+**one exact `(namespace?, key)`** — not a §7 pattern: a target whose ns or
+key is `*` configures nothing (§14: `malformed-target`), as for `arity` and
+`type`.
+
+**Semantics.** For a declared target, the **admitted set is the set of
+every declared value** — the union of all `tagma.enum:<target>=…` tags on
+record. A tag on that target is admitted iff it carries a value in the set.
+A **valueless** tag on an enum-declared target is not admitted (an enum
+constrains the value to be one of a set; absence is not a member). An
+undeclared target admits any value.
+
+**Restrictive-wins, applied to sets — why the reading is union** *(flagged
+for owner review)*. `hide`, `arity` and `permit` reconcile two
+*contradictory* tags on one target (`true`/`false`, `scalar`/`set`); the
+more restrictive tag wins. Enum tags on one target never contradict each
+other: each one asserts a single fact, "*this* value is admitted," and two
+such facts about two different values are both true at once. The
+alternative reading — each enum tag is a whole declaration and
+restrictive-wins intersects them — makes any enum of two or more values
+admit nothing (`{defect} ∩ {chore} = ∅`), i.e. it makes the facet unable to
+express its only use. So the restrictive-wins posture applies at the
+*facet* level, not between values: **a declared enum (any value on record)
+is more restrictive than no enum, and wins** — the moment one
+`tagma.enum:<target>` tag lands, every undeclared value on that target
+stops being admitted. Narrowing an enum means deleting value tags (§1:
+untagging is deletion), which the store's own write path provides; this
+reference core, append-only, cannot narrow one (the same posture as §7/§8).
+
+**Interaction with `range` and `type`.** Independent constraints, all of
+which must hold (§13). An enum value that a `range` or `type` declaration
+on the same target can never admit is dead config (§14:
+`dead-enum-value`).
+
+## 12. Self-hosted meta-configuration — `tagma.range`
+
+`range` declares inclusive bounds a target key's values must lie within.
+
+**Config tag form.** `tagma.range:<target>=<range>`, `<target>` exactly as
+§11 (§8 first-colon split, one exact `(namespace?, key)`, no wildcards).
+
+**Range grammar.**
+
+```ebnf
+range ::= bound? ".." bound?        /* at least one bound present */
+bound ::= any non-empty string not containing ".."
+```
+
+- Split at the **first** `..`. `1..5`, `-5..-1`, `0.5..1.5`, `5..` (no upper
+  bound) and `..5` (no lower bound) are all ranges. `..` alone, a value with
+  no `..`, or a bound that is not interpretable (below) configures nothing
+  (§14: `malformed-value`).
+- **Both bounds are inclusive.** Exclusive bounds are not in this slice.
+- **Bound interpretation follows §9's precedence.** If the target has an
+  active `tagma.type` declaration (non-conflicting, §9) whose type has a
+  registered comparator, bounds and values are compared by that comparator
+  (so `tagma.range:"triage:blocks-release"=0.1.0..1.0.0` orders by semver);
+  a bound is interpretable iff the comparator orders it against itself
+  (`compare(b, b) = Equal`). Otherwise — undeclared, unregistered, or
+  conflicting type — bounds must match §6's numeric grammar and compare as
+  IEEE-754 doubles.
+- **Lexing.** `1..5`, `-5..-1`, `5..` and `0.5..1.5` are bare value-tokens
+  (§2: `.` and the signs are continuation characters; a sign may lead). A
+  range with no lower bound starts with `.`, which a bare-token cannot, so
+  it must be quoted: `tagma.range:k="..5"`. A typed bound containing `..`
+  is unrepresentable (documented, not solved — the same posture as §8's
+  colon-in-key case).
+
+**Semantics.** A tag on a range-declared target is **in range** iff its
+value `v` satisfies `lo ≤ v ≤ hi` for every present bound, compared as
+above. A **valueless** tag, or a value the comparison cannot interpret
+(not a numeral on an untyped target — §4's casting rule; `NotComparable`
+on a typed one), is **not comparable**: it fails the range (§13:
+`not-comparable`), exactly as it would fail to match `k>=lo` in a query.
+
+**Restrictive-wins = intersection.** Several `tagma.range` tags on one
+target (append-only, as everywhere) are *all* in force: a value must lie
+within every one of them, so the effective range is their intersection.
+Declarations whose intersection is empty admit no value at all; §14
+reports that as `range-empty` rather than silently admitting nothing.
+
+## 13. Validate — asking before writing
+
+Writes stay infallible (§4, §8): `permit`, `enum`, `range`, `type` and
+`arity` never make a write fail. A caller that wants a store to refuse a
+bad tag **validates first**, and decides itself what to do with the
+findings. Validation is pure: it reads the store's config and one item's
+tags, and mutates nothing.
+
+**Shape (language-neutral).**
+
+```text
+validate(item: id, change: { add: [tag], remove: [tag] }) -> [finding]
+finding = { code: string, tag: tag, args: [(name: string, value: string)] }
+```
+
+**The resulting set.** `validate` judges the tag set the item **would**
+carry after the change, computed by tagma's own write rules, never the
+change in isolation:
+
+1. Start from the item's current tags (empty for an unknown id).
+2. Apply every `remove`: delete each current tag equal to it (namespace,
+   key and value). Removing a tag the item does not carry is a no-op, not a
+   finding.
+3. Apply every `add`, in order, exactly as a write would — including §8's
+   scalar collapse (a different value on a `scalar` target displaces the
+   old one, last-value-wins, within the batch too; an identical value is a
+   no-op).
+
+Removes apply **before** adds *(flagged)*: a change that both removes and
+adds the same tag leaves it on the item. Config is read from the store as
+it stands before the change, as §8 reads arity — a config tag inside the
+change governs later calls, not this one.
+
+**Every finding is about the resulting set as a whole**, not only the tags
+the change touches: a change that removes the offending tag makes an
+invalid item valid (no findings), and a change that touches nothing still
+reports a pre-existing violation (e.g. two values on a key declared
+`scalar` after they were written, §8 "Ordering").
+
+**Finding codes (stable).** One finding per (resulting tag, violated
+rule):
+
+| code | when | `tag` | args |
+|---|---|---|---|
+| `not-permitted` | the tag matches no active permit pattern (§10); never for a `tagma`-family tag | the tag | — |
+| `not-in-enum` | the target has an enum (§11) and the tag's value is absent or not in it | the tag | `allowed` — one arg per admitted value, sorted |
+| `out-of-range` | the value is comparable but outside one `tagma.range` declaration (§12) | the tag | `range` — the violated declaration's value, e.g. `1..5` |
+| `not-comparable` | the target has a range and the value is absent or cannot be compared to its bounds | the tag | `range` |
+| `type-mismatch` | the target has an active, registered `tagma.type` (§9) and the comparator cannot order the value against itself (`compare(v, v) ≠ Equal`) | the tag | `type` |
+| `arity-exceeded` | the target is `scalar` (§8) and the resulting set carries more than one value for it | each tag on that target | `arity` = `scalar` |
+
+`out-of-range` and `not-comparable` are reported once per violated
+declaration (a value below two overlapping ranges yields two findings). A valueless tag on a typed
+target is not a `type-mismatch`: §9 types govern how values *compare*, and
+no value means nothing to compare. Findings are returned sorted by the
+tag's canonical spelling, then code, then args; an empty list means the
+resulting set satisfies every rule.
+
+**Not validated.** `tagma.hide` (visibility is not validity), and the
+well-formedness of config tags inside the change (that is §14's job, over
+the store).
+
+## 14. Check — a doctor over the config itself
+
+§7–§12 make every malformed or contradictory config tag *configure
+nothing* or *lose quietly* — correct for evaluation, opaque to the person
+who wrote it. `check` is the compiler-style pass that says so. It is pure,
+reads only the store's `tagma.*` tags (and, for `type`, the registered
+comparators), and returns findings in §13's shape, sorted the same way.
+
+```text
+check() -> [finding]
+```
+
+**Reserved facets.** The `tagma` namespace family is reserved for
+self-hosted config. Its facets are exactly `hide` (§7), `arity` (§8),
+`type` (§9), `permit` (§10), `enum` (§11) and `range` (§12). A tag in
+namespace `tagma` itself, or in any `tagma.<x>` (including deeper
+`tagma.<x>.<y>`) that is not one of those six, is reported as
+`unknown-facet`.
+
+**Finding codes (stable).** `tag` is always the config tag the finding is
+about — for a conflict, the tag that **lost**.
+
+| code | when | args |
+|---|---|---|
+| `unknown-facet` | namespace in the `tagma` family that is not a facet above | `facet` — the namespace with its leading `tagma.` removed (empty for `tagma` itself) |
+| `malformed-value` | `hide`/`permit` value not `true`/`false`; `arity` not `scalar`/`set`; `enum`, `type` or `range` with no value; a `range` that does not parse or has an uninterpretable bound (§12) | `facet`, `expected` — `true\|false`, `scalar\|set`, `value` (enum), `type name` (type), `lo..hi` (range) |
+| `malformed-target` | a target with an empty namespace or key part (`":k"`, `"ns:"`); a `*` in an `arity`/`type`/`enum`/`range` target (exact targets only) | `facet` |
+| `conflict` | one exact target carries contradictory values: `hide` `true`+`false`, `permit` `true`+`false`, `arity` `scalar`+`set`, `type` two names | `facet`, `resolution` — what won: `true` (hide), `false` (permit), `scalar` (arity), `disabled` (type, §9) |
+| `inert-false` | a `hide`/`permit` `=false` on a target with no `=true` on record (and not the facet's default target: `"tagma:*"` for hide, `"*:*"` for permit) — it deactivates nothing | `facet` |
+| `shadowed-permit` | an active `permit` pattern whose every match is already matched by another active pattern (§10), the implicit `"*:*"` included | `by` — the covering target |
+| `rule-on-unpermitted` | an `enum`/`range`/`type`/`arity` declaration on a target `(ns, key)` that no active permit pattern admits — it can never constrain a valid tag | `facet` |
+| `range-empty` | two `range` declarations on one target (or one with `lo > hi`) whose intersection admits nothing (§12) | `range` — the other declaration (itself when `lo > hi`) |
+| `dead-enum-value` | an `enum` value that a `range` or `type` declaration on the same target never admits | `reason` — `out-of-range`, `not-comparable` or `type-mismatch` |
+| `type-unregistered` | a non-conflicting `type` declaration whose name has no registered comparator — §9 falls back to the numeric grammar | `type` |
+
+Coverage for `shadowed-permit` is the §7 pattern relation: ns `*` covers
+every ns-pattern; a named ns-pattern covers itself and its dot-descendants;
+the null ns-pattern covers only itself; key `*` covers every key-pattern;
+an exact key covers only itself. `hide` has no counterpart finding on
+purpose: a narrower hide under a broader one is *not* redundant — §7
+requires both to be revealed.
+
+A config tag reported `unknown-facet`, `malformed-value` or
+`malformed-target` configures nothing, so it draws no further finding (a
+malformed permit target is never `shadowed-permit`, for instance).
+
+`check` never changes what §7–§13 do. A store with findings evaluates
+exactly as before; the findings only say why.
