@@ -2,6 +2,7 @@
 //! task W1).
 //!
 //! Thin bindings only: an `Index` class (`add`, `query`, `queryPostfix`,
+//! `validate`, `check`), a standalone `Rules` class (`Rules.fromTags`,
 //! `validate`, `check`), plus free functions `compile` and `parseTag`. No behavior beyond what
 //! `tagma-core` already provides; errors from the core are thrown as JS
 //! `Error`s carrying the core's `String` message. This crate is built with
@@ -97,10 +98,7 @@ impl Index {
         add: Vec<String>,
         remove: Vec<String>,
     ) -> Result<js_sys::Array, JsValue> {
-        let change = Change {
-            add: parse_tags(&add).map_err(|e| to_js_err(format!("add: {e}")))?,
-            remove: parse_tags(&remove).map_err(|e| to_js_err(format!("remove: {e}")))?,
-        };
+        let change = parse_change(&add, &remove)?;
         findings_to_js(&self.inner.validate(id, &change))
     }
 
@@ -109,6 +107,58 @@ impl Index {
     pub fn check(&self) -> Result<js_sys::Array, JsValue> {
         findings_to_js(&self.inner.check())
     }
+}
+
+/// A standalone rule set (SPEC.md §10–§12, with §8 arity and §9 type),
+/// derived from config tags the caller holds itself rather than from an
+/// [`Index`] — `tagma_core::Rules`. No comparators can be registered from
+/// JS (this binding takes no callbacks).
+#[wasm_bindgen]
+pub struct Rules {
+    inner: tagma_core::Rules,
+}
+
+#[wasm_bindgen]
+impl Rules {
+    /// Derives the rules from the `tagma.*` config tags among `tags` (one
+    /// tag string per element; every other tag is ignored). Throws on an
+    /// invalid tag.
+    #[wasm_bindgen(js_name = fromTags)]
+    pub fn from_tags(tags: Vec<String>) -> Result<Rules, JsValue> {
+        let tags = parse_tags(&tags).map_err(to_js_err)?;
+        Ok(Rules {
+            inner: tagma_core::Rules::from_tags(&tags),
+        })
+    }
+
+    /// Validates a change to the tag set `current` (SPEC.md §13): the
+    /// findings for the set it would become after removing every tag in
+    /// `remove`, then adding every tag in `add`, as [`Index::validate`]
+    /// returns them. Throws on an invalid tag, naming its list
+    /// (`current: `, `add: `, `remove: `).
+    pub fn validate(
+        &self,
+        current: Vec<String>,
+        add: Vec<String>,
+        remove: Vec<String>,
+    ) -> Result<js_sys::Array, JsValue> {
+        let current = parse_tags(&current).map_err(|e| to_js_err(format!("current: {e}")))?;
+        let change = parse_change(&add, &remove)?;
+        findings_to_js(&self.inner.validate(&current, &change))
+    }
+
+    /// Checks the config itself (SPEC.md §14), as [`Index::check`] does.
+    pub fn check(&self) -> Result<js_sys::Array, JsValue> {
+        findings_to_js(&self.inner.check())
+    }
+}
+
+/// A validate change from its two tag lists, a bad tag named by its list.
+fn parse_change(add: &[String], remove: &[String]) -> Result<Change, JsValue> {
+    Ok(Change {
+        add: parse_tags(add).map_err(|e| to_js_err(format!("add: {e}")))?,
+        remove: parse_tags(remove).map_err(|e| to_js_err(format!("remove: {e}")))?,
+    })
 }
 
 /// Parses each element of `tags` as one tag (SPEC.md §2).

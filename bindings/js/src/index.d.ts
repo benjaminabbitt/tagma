@@ -62,6 +62,33 @@ export declare class Index {
   free(): void;
 }
 
+/**
+ * A standalone rule set (SPEC.md §10–§12), derived from config tags the
+ * caller holds itself rather than from an `Index`.
+ */
+export declare class Rules {
+  private constructor();
+
+  /**
+   * Derives the rules from the `tagma.*` config tags among `tags` (one tag
+   * per element; every other tag is ignored). Throws on an invalid tag.
+   */
+  static fromTags(tags: string[]): Rules;
+
+  /**
+   * Validates a change to the tag set `current` (SPEC.md §13), as
+   * `Index.validate` does for an item. Throws on an invalid tag, naming its
+   * list (`current: `, `add: `, `remove: `).
+   */
+  validate(current: string[], add: string[], remove: string[]): Finding[];
+
+  /** Checks the config itself (SPEC.md §14), as `Index.check` does. */
+  check(): Finding[];
+
+  /** Releases the underlying WASM-side rule set. */
+  free(): void;
+}
+
 /** Compiles an infix query to its canonical postfix form. Throws on compile failure. */
 export declare function compile(query: string): string;
 

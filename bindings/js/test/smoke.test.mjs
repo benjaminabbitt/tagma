@@ -2,7 +2,7 @@
 // parseTag + an error throw, against the Node WASM build.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Index, compile, parseTag } from "../src/node.mjs";
+import { Index, Rules, compile, parseTag } from "../src/node.mjs";
 
 test("Index round-trip: add + query + queryPostfix", () => {
   const idx = new Index();
@@ -114,4 +114,34 @@ test("check: config findings, all existing, sorted by tag", () => {
       origin: "existing",
     },
   ]);
+});
+
+test("Rules.fromTags: validate and check mirror the index they come from", () => {
+  // Non-config tags among the input are ignored.
+  const rules = Rules.fromTags(["tagma.enum:k=a", "tagma.enum:j=a", "k=z"]);
+  const idx = new Index();
+  idx.add("cfg tagma.enum:k=a tagma.enum:j=a");
+  idx.add("item k=z j=bad");
+  const viaRules = rules.validate(["k=z", "j=bad"], ["k=y"], ["k=z"]);
+  assert.deepEqual(viaRules, idx.validate("item", ["k=y"], ["k=z"]));
+  assert.equal(viaRules.length, 2);
+  assert.deepEqual(rules.validate([], ["k=a"], []), []);
+  assert.deepEqual(rules.check(), []);
+  const conflicted = Rules.fromTags(["tagma.arity:k=scalar", "tagma.arity:k=set"]);
+  assert.deepEqual(conflicted.check(), [
+    {
+      code: "conflict",
+      tag: "tagma.arity:k=set",
+      args: [["facet", "arity"], ["resolution", "scalar"]],
+      origin: "existing",
+    },
+  ]);
+});
+
+test("Rules: an invalid tag throws, naming its list", () => {
+  assert.throws(() => Rules.fromTags(["=5"]), Error);
+  const rules = Rules.fromTags([]);
+  assert.throws(() => rules.validate(["=5"], [], []), /^Error: current: /);
+  assert.throws(() => rules.validate([], ["=5"], []), /^Error: add: /);
+  assert.throws(() => rules.validate([], [], ["=5"]), /^Error: remove: /);
 });

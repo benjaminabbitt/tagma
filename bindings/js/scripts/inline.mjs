@@ -21,7 +21,7 @@ const banner = [
 ].join("\n");
 
 const source = `${banner}
-import { initSync, Index, compile, parseTag } from "../wasm/web/tagma_wasm.js";
+import { initSync, Index, Rules, compile, parseTag } from "../wasm/web/tagma_wasm.js";
 
 const WASM_BASE64 = "${base64}";
 
@@ -39,7 +39,7 @@ function decodeBase64(base64) {
 
 initSync({ module: decodeBase64(WASM_BASE64) });
 
-export { Index, compile, parseTag };
+export { Index, Rules, compile, parseTag };
 `;
 
 writeFileSync(outPath, source);

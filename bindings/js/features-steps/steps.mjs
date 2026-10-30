@@ -11,7 +11,7 @@ import {
   setWorldConstructor,
 } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
-import { Index, compile, parseTag } from "../src/node.mjs";
+import { Index, Rules, compile, parseTag } from "../src/node.mjs";
 
 // docs/steps.md's {string} argument, taken VERBATIM between its delimiters.
 // cucumber-js's built-in {string} also rewrites `\"` to `"` and `\'` to `'`
@@ -34,6 +34,7 @@ class TagmaWorld {
     this.lastCompile = undefined;
     this.lastMatch = undefined;
     this.lastFindings = undefined; // the last validate or check call's
+    this.givenTags = []; // every tag a Given step wrote, in order
   }
 }
 setWorldConstructor(TagmaWorld);
@@ -42,6 +43,7 @@ Given("an item {verbatim} tagged {verbatim}", function (id, tags) {
   // Composes the bulk-ingest line format (id + " " + tags) and fails loudly
   // (an uncaught throw fails the step) on an invalid tag.
   this.index.add(`${id} ${tags}`);
+  this.givenTags.push(...tagList(tags));
 });
 
 When("the tag {verbatim} is parsed", function (tag) {
@@ -148,6 +150,12 @@ When(
 
 When("the config is checked", function () {
   this.lastFindings = this.index.check();
+  // The standalone rule set over the same config tags checks identically
+  // (Rules.fromTags, SPEC.md §14 reads only the config). No step names the
+  // standalone form, so this is how the scenarios reach it. Not done for
+  // validate: an item's set is what the index's write path (§8 collapse)
+  // left, which the tags the Given steps wrote need not be.
+  assert.deepEqual(Rules.fromTags(this.givenTags).check(), this.lastFindings);
 });
 
 // Compares findings with a "<code> <tag> ; ..." list as a multiset of

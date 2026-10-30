@@ -7,6 +7,7 @@ export {
   default,
   initSync,
   Index,
+  Rules,
   compile,
   parseTag,
 } from "../wasm/web/tagma_wasm.js";
