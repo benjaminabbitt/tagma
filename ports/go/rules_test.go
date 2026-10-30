@@ -690,3 +690,24 @@ func TestOriginsAndCodesHaveStableSpellings(t *testing.T) {
 		}
 	}
 }
+
+func TestLessArgsIsLexicographicByNameThenValueShorterFirst(t *testing.T) {
+	// Findings of one code share their arg names, so the name comparison
+	// is unreachable through Validate/Check; pin the order directly.
+	cases := []struct {
+		a, b []Arg
+		want bool
+	}{
+		{[]Arg{{"a", "z"}}, []Arg{{"b", "a"}}, true},
+		{[]Arg{{"b", "a"}}, []Arg{{"a", "z"}}, false},
+		{[]Arg{{"a", "1"}}, []Arg{{"a", "2"}}, true},
+		{[]Arg{{"a", "2"}}, []Arg{{"a", "1"}}, false},
+		{[]Arg{{"a", "1"}}, []Arg{{"a", "1"}, {"a", "0"}}, true},
+		{[]Arg{{"a", "1"}}, []Arg{{"a", "1"}}, false},
+	}
+	for _, c := range cases {
+		if got := lessArgs(c.a, c.b); got != c.want {
+			t.Errorf("lessArgs(%v, %v) = %v, want %v", c.a, c.b, got, c.want)
+		}
+	}
+}
