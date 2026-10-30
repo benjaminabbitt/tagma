@@ -181,3 +181,168 @@ fn infix_query_is_postfix_query_of_compile() {
         "table must discriminate between results"
     );
 }
+
+// --- validate and check (SPEC.md §13/§14) --------------------------------
+
+const RULES_FIXTURE: &str = "\
+cfg tagma.enum:k=a tagma.enum:j=a
+item k=z j=bad
+";
+
+#[test]
+fn validate_prints_one_json_finding_per_line_with_its_origin() {
+    tagma()
+        .args(["validate", "item", "--add", "k=y", "--remove", "k=z"])
+        .write_stdin(RULES_FIXTURE)
+        .assert()
+        .success()
+        .stdout(concat!(
+            r#"{"code":"not-in-enum","tag":"j=bad","args":[["allowed","a"]],"origin":"existing"}"#,
+            "\n",
+            r#"{"code":"not-in-enum","tag":"k=y","args":[["allowed","a"]],"origin":"introduced"}"#,
+            "\n",
+        ));
+}
+
+#[test]
+fn validate_with_no_change_reports_what_already_holds() {
+    tagma()
+        .args(["validate", "item"])
+        .write_stdin(RULES_FIXTURE)
+        .assert()
+        .success()
+        .stdout(concat!(
+            r#"{"code":"not-in-enum","tag":"j=bad","args":[["allowed","a"]],"origin":"existing"}"#,
+            "\n",
+            r#"{"code":"not-in-enum","tag":"k=z","args":[["allowed","a"]],"origin":"existing"}"#,
+            "\n",
+        ));
+}
+
+#[test]
+fn validate_flags_take_whitespace_separated_tag_lists_and_repeat() {
+    tagma()
+        .args(["validate", "item", "--remove", "k=z j=bad", "--add", "k=a"])
+        .args(["--add", r#"j="a""#])
+        .write_stdin(RULES_FIXTURE)
+        .assert()
+        .success()
+        .stdout("");
+}
+
+#[test]
+fn validate_a_finding_with_no_args_prints_an_empty_args_array() {
+    tagma()
+        .args(["validate", "x", "--add", "lang=en"])
+        .write_stdin("cfg tagma.permit:\"*:*\"=false\n")
+        .assert()
+        .success()
+        .stdout(
+            r#"{"code":"not-permitted","tag":"lang=en","args":[],"origin":"introduced"}"#
+                .to_string()
+                + "\n",
+        );
+}
+
+#[test]
+fn validate_an_invalid_tag_in_a_flag_fails() {
+    tagma()
+        .args(["validate", "item", "--add", "=5"])
+        .write_stdin(RULES_FIXTURE)
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("--add"));
+}
+
+#[test]
+fn validate_malformed_stdin_line_fails() {
+    tagma()
+        .args(["validate", "item"])
+        .write_stdin("a =5\n")
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(predicate::str::is_empty());
+}
+
+#[test]
+fn validate_bad_invocations_exit_2() {
+    for args in [
+        &["validate"][..],
+        &["validate", "item", "--add"],
+        &["validate", "item", "--bogus", "k=1"],
+    ] {
+        tagma()
+            .args(args)
+            .write_stdin(RULES_FIXTURE)
+            .assert()
+            .failure()
+            .code(2)
+            .stdout(predicate::str::is_empty());
+    }
+}
+
+#[test]
+fn check_prints_config_findings_and_escapes_the_tag_spelling() {
+    tagma()
+        .arg("check")
+        .write_stdin("cfg tagma.permit:\"*:secret\"=false tagma.range:k=5..9 tagma.range:k=1..3\n")
+        .assert()
+        .success()
+        .stdout(concat!(
+            r#"{"code":"inert-false","tag":"tagma.permit:\"*:secret\"=false","args":[["facet","permit"]],"origin":"existing"}"#,
+            "\n",
+            r#"{"code":"range-empty","tag":"tagma.range:k=1..3","args":[["range","5..9"]],"origin":"existing"}"#,
+            "\n",
+            r#"{"code":"range-empty","tag":"tagma.range:k=5..9","args":[["range","1..3"]],"origin":"existing"}"#,
+            "\n",
+        ));
+}
+
+#[test]
+fn check_escapes_backslashes_and_control_characters() {
+    // A quoted value holding a backslash and a tab (SPEC.md §2 QUOTING).
+    tagma()
+        .arg("check")
+        .write_stdin("cfg tagma.bogus:k=\"a\\\\b\tc\"\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#"a\\\\b\u0009c"#));
+}
+
+#[test]
+fn check_an_unconfigured_store_prints_nothing() {
+    tagma()
+        .arg("check")
+        .write_stdin(FIXTURE)
+        .assert()
+        .success()
+        .stdout("");
+}
+
+#[test]
+fn check_takes_no_arguments() {
+    tagma().args(["check", "extra"]).assert().failure().code(2);
+}
+
+#[test]
+fn check_malformed_stdin_line_fails() {
+    tagma()
+        .arg("check")
+        .write_stdin("a =5\n")
+        .assert()
+        .failure()
+        .code(1);
+}
+
+#[test]
+fn findings_keep_a_space_literal_rather_than_escaping_it() {
+    tagma()
+        .args(["validate", "x", "--add", r#"note="a b""#])
+        .write_stdin("cfg tagma.enum:note=ok\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""tag":"note=\"a b\"""#));
+}

@@ -1,9 +1,11 @@
-//! tagma-cli: `tagma parse | compile | query` (Phase 3, PLAN.md §8).
+//! tagma-cli: `tagma parse | compile | query | validate | check` (Phase 3,
+//! PLAN.md §8; validate and check are SPEC.md §13/§14).
 
 use std::io::{self, BufRead, Write};
 use std::process::ExitCode;
 
-use tagma_core::{Index, Tag};
+use tagma_core::token::split_unquoted_whitespace;
+use tagma_core::{Change, Finding, Index, Tag};
 
 const USAGE: &str = "\
 usage: tagma <command> [args]
@@ -12,6 +14,11 @@ commands:
     parse <tag>              parse a tag and print its namespace/key/value
     compile <infix-query>    compile an infix query to postfix
     query [--postfix] <q>    evaluate a query against stdin (<id> <tag>...)
+    validate <id> [--add <tags>]... [--remove <tags>]...
+                             validate a change to item <id> of the stdin
+                             store; one JSON finding per line
+    check                    check the stdin store's tagma.* config; one
+                             JSON finding per line
 ";
 
 fn main() -> ExitCode {
@@ -34,6 +41,11 @@ fn main() -> ExitCode {
             _ => bad_invocation(&mut stderr),
         },
         "query" => run_query(rest, &mut stdout, &mut stderr),
+        "validate" => run_validate(rest, &mut stdout, &mut stderr),
+        "check" => match rest {
+            [] => run_check(&mut stdout, &mut stderr),
+            _ => bad_invocation(&mut stderr),
+        },
         _ => bad_invocation(&mut stderr),
     }
 }
@@ -82,24 +94,10 @@ fn run_query(rest: &[String], stdout: &mut impl Write, stderr: &mut impl Write) 
         _ => return bad_invocation(stderr),
     };
 
-    let mut index = Index::new();
-    let stdin = io::stdin();
-    for line in stdin.lock().lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(e) => {
-                let _ = writeln!(stderr, "query: failed to read stdin: {e}");
-                return ExitCode::FAILURE;
-            }
-        };
-        if line.trim().is_empty() {
-            continue;
-        }
-        if let Err(e) = index.add_line(&line) {
-            let _ = writeln!(stderr, "{e}");
-            return ExitCode::FAILURE;
-        }
-    }
+    let index = match read_store(stderr) {
+        Some(index) => index,
+        None => return ExitCode::FAILURE,
+    };
 
     let result = if postfix_flag {
         index.query_postfix(query)
@@ -120,4 +118,125 @@ fn run_query(rest: &[String], stdout: &mut impl Write, stderr: &mut impl Write) 
             ExitCode::FAILURE
         }
     }
+}
+
+/// Reads the store from stdin, one `<id> <tag>...` line per item (blank
+/// lines skipped), reporting the first failure to `stderr` and returning
+/// `None`.
+fn read_store(stderr: &mut impl Write) -> Option<Index> {
+    let mut index = Index::new();
+    let stdin = io::stdin();
+    for line in stdin.lock().lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(e) => {
+                let _ = writeln!(stderr, "failed to read stdin: {e}");
+                return None;
+            }
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Err(e) = index.add_line(&line) {
+            let _ = writeln!(stderr, "{e}");
+            return None;
+        }
+    }
+    Some(index)
+}
+
+/// Parses one `--add`/`--remove` argument: a tag list split on unquoted
+/// whitespace, as the stdin line format is (a single tag is a one-tag
+/// list).
+fn parse_tag_list(list: &str) -> Result<Vec<Tag>, String> {
+    split_unquoted_whitespace(list)?
+        .into_iter()
+        .map(Tag::parse)
+        .collect()
+}
+
+/// `validate <id> [--add <tags>]... [--remove <tags>]...` (SPEC.md §13):
+/// every finding for the tag set item `<id>` of the stdin store would carry
+/// after the change, one JSON object per line.
+fn run_validate(rest: &[String], stdout: &mut impl Write, stderr: &mut impl Write) -> ExitCode {
+    let Some((id, mut flags)) = rest.split_first() else {
+        return bad_invocation(stderr);
+    };
+    let mut change = Change::default();
+    while let Some((flag, tail)) = flags.split_first() {
+        let Some((list, tail)) = tail.split_first() else {
+            return bad_invocation(stderr);
+        };
+        let into = match flag.as_str() {
+            "--add" => &mut change.add,
+            "--remove" => &mut change.remove,
+            _ => return bad_invocation(stderr),
+        };
+        match parse_tag_list(list) {
+            Ok(tags) => into.extend(tags),
+            Err(e) => {
+                let _ = writeln!(stderr, "{flag}: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+        flags = tail;
+    }
+    let Some(index) = read_store(stderr) else {
+        return ExitCode::FAILURE;
+    };
+    print_findings(&index.validate(id, &change), stdout)
+}
+
+/// `check` (SPEC.md §14): every finding about the stdin store's own
+/// config, one JSON object per line.
+fn run_check(stdout: &mut impl Write, stderr: &mut impl Write) -> ExitCode {
+    let Some(index) = read_store(stderr) else {
+        return ExitCode::FAILURE;
+    };
+    print_findings(&index.check(), stdout)
+}
+
+/// Prints each finding as one JSON line (ARCHITECTURE.md: JSONL where
+/// structure is wanted). Findings are data, not failure: the exit status is
+/// success whatever they say.
+fn print_findings(findings: &[Finding], stdout: &mut impl Write) -> ExitCode {
+    for f in findings {
+        let _ = writeln!(stdout, "{}", finding_json(f));
+    }
+    ExitCode::SUCCESS
+}
+
+/// One finding as a JSON object, keys in SPEC.md §13's order:
+/// `{"code":…,"tag":…,"args":[[name,value],…],"origin":…}`; `tag` is the
+/// tag's canonical spelling (SPEC.md §2).
+fn finding_json(f: &Finding) -> String {
+    let args: Vec<String> = f
+        .args
+        .iter()
+        .map(|(name, value)| format!("[{},{}]", json_str(name), json_str(value)))
+        .collect();
+    format!(
+        "{{\"code\":{},\"tag\":{},\"args\":[{}],\"origin\":{}}}",
+        json_str(f.code.as_str()),
+        json_str(&f.tag.to_string()),
+        args.join(","),
+        json_str(f.origin.as_str()),
+    )
+}
+
+/// `s` as a JSON string literal (RFC 8259 §7): `"` and `\` escaped, every
+/// control character as `\u00XX`.
+fn json_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if u32::from(c) < 0x20 => out.push_str(&format!("\\u{:04x}", u32::from(c))),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
