@@ -123,8 +123,32 @@ Public shape (Rust reference; ports mirror it in their own idiom):
   same config (SPEC.md §13 "Introduced or existing"); every check finding
   is `Existing`. A client refusing writes refuses on `Introduced` only.
 
-Conformance: `features/rules.feature` pins validate/check across bindings
-with four new steps (`docs/steps.md`). The Rust harness implements them;
-the JS (`bindings/js/features-steps`), Go (`ports/go/conformance_test.go`)
-and Python (`bindings/python/features/steps`, plus the feature symlink)
-step definitions are still to be added.
+Every surface exposes both calls (the "every surface exposes the same
+capabilities" rule the infix-gateway table above follows). Bindings delegate
+to `Index::validate`/`Index::check`; the Go port mirrors the `rules` module
+independently, `Rules` included:
+
+| Surface | validate | check | finding |
+|---|---|---|---|
+| tagma-core | `Index::validate(id, &Change)`, `Rules::validate(current, &Change)` | `Index::check()`, `Rules::check()` | `Finding { code: Code, tag: Tag, args, origin: Origin }` |
+| tagma-cli | `validate <id> [--add <tags>]... [--remove <tags>]...` | `check` | one JSON object per stdout line |
+| C ABI (`include/tagma.h`) | `tagma_validate(h, id, add, remove)` | `tagma_check(h)` | one JSON object per line of the returned string (`tagma_str_free`) |
+| Python | `Index.validate(id, add=[], remove=[])` | `Index.check()` | `dict` with `args` a list of `(name, value)` tuples |
+| WASM / JS | `Index.validate(id, add, remove)` | `Index.check()` | `Finding` object, `args` as `[name, value]` pairs |
+| Go port | `(*Index).Validate(id, Change)`, `(*Rules).Validate(current, Change)` | `(*Index).Check()`, `(*Rules).Check()` | `Finding{Code, Tag, Args []Arg, Origin}` |
+
+Outside Rust and Go a finding's tag is its canonical spelling (SPEC.md
+§2), and a change's tags cross as strings: a whitespace-separated list
+split as an ingest line is (CLI, C ABI), or one tag per list element
+(Python, JS). The JSON object is
+`{"code":…,"tag":…,"args":[[name,value],…],"origin":…}` in both the CLI
+and the C ABI. `Rules::from_tags` (validating against a config the
+caller holds rather than an index) is exposed in tagma-core and the Go
+port (`RulesFromTags`) only; the bindings expose no rules object, as they
+expose no `HideConfig`.
+
+Conformance: `features/rules.feature` pins validate/check across every
+harness with four steps (`docs/steps.md`): cucumber-rs
+(`crates/tagma-core/tests/conformance.rs`), cucumber-js
+(`bindings/js/features-steps`), godog (`ports/go/conformance_test.go`) and
+behave (`bindings/python/features/steps`, the feature symlinked in).

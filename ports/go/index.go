@@ -5,7 +5,9 @@
 //
 // This port implements SPEC.md and PLAN.md §7.1-7.5 directly (the v1 naive
 // scan evaluator; no inverted index). The public surface is small:
-// ParseTag, Compile, and Index (NewIndex, AddLine, Query, QueryPostfix).
+// ParseTag, Compile, and Index (NewIndex, AddLine, Query, QueryPostfix),
+// plus the SPEC.md §10–§14 schema rules (Index.Validate, Index.Check, and
+// Rules via RulesFromTags or Index.Rules).
 package tagma
 
 import (
