@@ -1,4 +1,6 @@
-//! Validated index handles for the C ABI (task kooky-snub).
+//! Validated object handles for the C ABI (task kooky-snub): indexes
+//! ([`TagmaIndex`]) and standalone rule sets ([`TagmaRules`]), each in its
+//! own registry under its own magic.
 //!
 //! The ABI used to hand out `Box::into_raw` pointers as `void *`. Nothing
 //! about such a value distinguishes a live index from one already freed,
@@ -59,30 +61,41 @@
 //! retired instead of reused, because reuse past a wrap is exactly the
 //! aliasing this design exists to prevent.
 
-use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
-use tagma_core::Index;
+use tagma_core::{Index, Rules};
 
-/// The integer handle type exposed to C. Opaque: callers must treat it as a
-/// token, never as an address or an index. `0` is never a valid handle.
+/// The integer handle type exposed to C for an index. Opaque: callers must
+/// treat it as a token, never as an address or an index. `0` is never a
+/// valid handle.
 pub type TagmaIndex = u64;
 
-/// Tag stored in the top 16 bits of every handle this library issues.
-/// Chosen only to be an implausible value for a real pointer or a small
-/// integer; it is a cheap filter, not a security boundary.
+/// The integer handle type exposed to C for a standalone rule set
+/// (`tagma_core::Rules`), with exactly [`TagmaIndex`]'s guarantees. Index
+/// and rules handles live in separate registries under different magic
+/// values, so passing one where the other is expected is reported as
+/// foreign, never misread.
+pub type TagmaRules = u64;
+
+/// Tag stored in the top 16 bits of every index handle this library
+/// issues. Chosen only to be an implausible value for a real pointer or a
+/// small integer; it is a cheap filter, not a security boundary.
 /// (`0x5447` is ASCII `TG`.) Note that on every platform tagma targets a
 /// real userspace pointer has zeroes in these bits, so a pointer passed by
 /// mistake — including one from an older build of this ABI — is rejected
 /// rather than silently misread.
-const HANDLE_MAGIC: u64 = 0x5447;
+const INDEX_MAGIC: u64 = 0x5447;
+
+/// The rules registry's magic (`0x5452` is ASCII `TR`).
+const RULES_MAGIC: u64 = 0x5452;
 
 const MAGIC_SHIFT: u32 = 48;
 const GENERATION_SHIFT: u32 = 16;
 const SLOT_MASK: u64 = 0xFFFF;
 const GENERATION_MASK: u64 = 0xFFFF_FFFF;
 
-/// Maximum number of simultaneously live indexes, fixed by the 16 bits the
-/// layout gives the slot field.
+/// Maximum number of simultaneously live objects per registry, fixed by the
+/// 16 bits the layout gives the slot field.
 ///
 /// Crate-private on purpose: it is an implementation limit, not part of the
 /// C ABI, and exporting it would put an unprefixed `MAX_SLOTS` macro into
@@ -96,12 +109,12 @@ pub enum HandleError {
     /// The handle is `0`, the reserved never-valid value.
     Null,
     /// The magic field is wrong, or the slot was never allocated: this
-    /// value was not issued by tagma.
+    /// value was not issued by tagma (for this kind of object).
     Foreign,
-    /// The slot is empty or its generation has moved on: the index this
+    /// The slot is empty or its generation has moved on: the object this
     /// handle named has been freed (double-free or use-after-free).
     Freed,
-    /// The index's lock was poisoned by an earlier panic, so its contents
+    /// The object's lock was poisoned by an earlier panic, so its contents
     /// are of unknown validity and it will not be used again.
     Poisoned,
     /// All `MAX_SLOTS` slots are in use.
@@ -109,154 +122,193 @@ pub enum HandleError {
 }
 
 impl HandleError {
-    /// The message recorded for `tagma_last_error`.
-    pub fn message(self) -> String {
+    /// The message recorded for `tagma_last_error`; `noun` names the kind
+    /// of object (`"index"`, `"rules"`).
+    pub fn message(self, noun: &str) -> String {
         match self {
             HandleError::Null => "ffi: handle is null".to_string(),
-            HandleError::Foreign => "ffi: handle was not issued by tagma".to_string(),
+            HandleError::Foreign => format!("ffi: {noun} handle was not issued by tagma"),
             HandleError::Freed => {
-                "ffi: handle refers to a freed index (use-after-free or double-free)".to_string()
+                format!("ffi: handle refers to a freed {noun} (use-after-free or double-free)")
             }
             HandleError::Poisoned => {
-                "ffi: index is poisoned by an earlier panic and is no longer usable".to_string()
+                format!("ffi: {noun} is poisoned by an earlier panic and is no longer usable")
             }
             HandleError::Exhausted => {
-                format!("ffi: too many live indexes (limit {MAX_SLOTS}); free some first")
+                format!("ffi: too many live {noun} handles (limit {MAX_SLOTS}); free some first")
             }
         }
     }
 }
 
-/// One registry slot. `index` is `None` while the slot is free.
-struct Slot {
+/// One registry slot. `object` is `None` while the slot is free.
+struct Slot<T> {
     generation: u32,
-    index: Option<Arc<Mutex<Index>>>,
+    object: Option<Arc<Mutex<T>>>,
 }
 
 /// Slot table plus the free list that keeps it from growing unboundedly.
-struct Registry {
-    slots: Vec<Slot>,
+struct Registry<T> {
+    slots: Vec<Slot<T>>,
     free: Vec<usize>,
 }
 
-static REGISTRY: LazyLock<Mutex<Registry>> = LazyLock::new(|| {
-    Mutex::new(Registry {
-        slots: Vec::new(),
-        free: Vec::new(),
-    })
-});
-
-/// Locks the registry, recovering from poisoning.
-///
-/// Recovery is sound here in a way it is not for an index: no user code and
-/// no `Drop` ever runs under this lock, only `Vec` bookkeeping, so a panic
-/// cannot leave the slot table half-updated. Propagating poison instead
-/// would brick every index in the process over an unrelated panic.
-fn registry() -> MutexGuard<'static, Registry> {
-    REGISTRY.lock().unwrap_or_else(|e| e.into_inner())
+/// A process-global registry of one kind of object, with its own magic.
+pub(crate) struct Handles<T> {
+    magic: u64,
+    registry: Mutex<Registry<T>>,
 }
 
-/// Packs a slot index and generation into a handle.
-fn encode(slot: usize, generation: u32) -> TagmaIndex {
-    (HANDLE_MAGIC << MAGIC_SHIFT)
-        | ((generation as u64 & GENERATION_MASK) << GENERATION_SHIFT)
-        | (slot as u64 & SLOT_MASK)
-}
+/// Every live index.
+pub(crate) static INDEXES: Handles<Index> = Handles::new(INDEX_MAGIC);
 
-/// Splits a handle into `(slot, generation)`, rejecting anything whose
-/// magic field this library did not write.
-fn decode(handle: TagmaIndex) -> Result<(usize, u32), HandleError> {
-    if handle == 0 {
-        return Err(HandleError::Null);
+/// Every live standalone rule set.
+pub(crate) static RULES: Handles<Rules> = Handles::new(RULES_MAGIC);
+
+impl<T> Handles<T> {
+    const fn new(magic: u64) -> Handles<T> {
+        Handles {
+            magic,
+            registry: Mutex::new(Registry {
+                slots: Vec::new(),
+                free: Vec::new(),
+            }),
+        }
     }
-    if handle >> MAGIC_SHIFT != HANDLE_MAGIC {
-        return Err(HandleError::Foreign);
+
+    /// Locks the registry, recovering from poisoning.
+    ///
+    /// Recovery is sound here in a way it is not for an object: no user
+    /// code and no `Drop` ever runs under this lock, only `Vec`
+    /// bookkeeping, so a panic cannot leave the slot table half-updated.
+    /// Propagating poison instead would brick every handle in the process
+    /// over an unrelated panic.
+    fn registry(&self) -> MutexGuard<'_, Registry<T>> {
+        self.registry.lock().unwrap_or_else(|e| e.into_inner())
     }
-    let slot = (handle & SLOT_MASK) as usize;
-    let generation = ((handle >> GENERATION_SHIFT) & GENERATION_MASK) as u32;
-    Ok((slot, generation))
+
+    /// Packs a slot index and generation into a handle.
+    fn encode(&self, slot: usize, generation: u32) -> u64 {
+        (self.magic << MAGIC_SHIFT)
+            | ((generation as u64 & GENERATION_MASK) << GENERATION_SHIFT)
+            | (slot as u64 & SLOT_MASK)
+    }
+
+    /// Splits a handle into `(slot, generation)`, rejecting anything whose
+    /// magic field this registry did not write.
+    fn decode(&self, handle: u64) -> Result<(usize, u32), HandleError> {
+        if handle == 0 {
+            return Err(HandleError::Null);
+        }
+        if handle >> MAGIC_SHIFT != self.magic {
+            return Err(HandleError::Foreign);
+        }
+        let slot = (handle & SLOT_MASK) as usize;
+        let generation = ((handle >> GENERATION_SHIFT) & GENERATION_MASK) as u32;
+        Ok((slot, generation))
+    }
+
+    /// Registers `object` and returns its handle.
+    pub(crate) fn allocate(&self, object: T) -> Result<u64, HandleError> {
+        let cell = Arc::new(Mutex::new(object));
+        let mut reg = self.registry();
+        if let Some(slot) = reg.free.pop() {
+            let generation = reg.slots[slot].generation;
+            reg.slots[slot].object = Some(cell);
+            return Ok(self.encode(slot, generation));
+        }
+        if reg.slots.len() >= MAX_SLOTS {
+            return Err(HandleError::Exhausted);
+        }
+        let slot = reg.slots.len();
+        reg.slots.push(Slot {
+            generation: 1,
+            object: Some(cell),
+        });
+        Ok(self.encode(slot, 1))
+    }
+
+    /// Resolves a handle to its object, cloning the `Arc` out from under
+    /// the registry lock so the caller can work without holding it.
+    fn resolve(&self, handle: u64) -> Result<Arc<Mutex<T>>, HandleError> {
+        let (slot, generation) = self.decode(handle)?;
+        let reg = self.registry();
+        let Some(entry) = reg.slots.get(slot) else {
+            // A well-formed handle naming a slot that was never allocated
+            // can only have been fabricated.
+            return Err(HandleError::Foreign);
+        };
+        if entry.generation != generation {
+            return Err(HandleError::Freed);
+        }
+        match &entry.object {
+            Some(cell) => Ok(Arc::clone(cell)),
+            None => Err(HandleError::Freed),
+        }
+    }
+
+    /// Runs `f` against the object named by `handle`.
+    ///
+    /// The registry lock is released before `f` runs; only the per-object
+    /// lock is held across it.
+    pub(crate) fn with<R>(
+        &self,
+        handle: u64,
+        f: impl FnOnce(&mut T) -> R,
+    ) -> Result<R, HandleError> {
+        let cell = self.resolve(handle)?;
+        let mut guard = cell.lock().map_err(|_| HandleError::Poisoned)?;
+        Ok(f(&mut guard))
+    }
+
+    /// Invalidates `handle` and drops its object.
+    ///
+    /// The `Arc` is moved out and dropped *after* the registry lock is
+    /// released, so an arbitrarily expensive `Drop` never blocks other
+    /// threads' handle operations.
+    pub(crate) fn release(&self, handle: u64) -> Result<(), HandleError> {
+        let (slot, generation) = self.decode(handle)?;
+        let taken = {
+            let mut reg = self.registry();
+            let Some(entry) = reg.slots.get_mut(slot) else {
+                return Err(HandleError::Foreign);
+            };
+            if entry.generation != generation || entry.object.is_none() {
+                return Err(HandleError::Freed);
+            }
+            let taken = entry.object.take();
+            // On generation exhaustion the slot is deliberately NOT
+            // returned to the free list: retiring it costs a few bytes of
+            // table forever, whereas reusing it would let a
+            // 4-billion-allocations-old handle alias a live object — the
+            // exact bug this module exists to prevent.
+            if let Some(next) = entry.generation.checked_add(1) {
+                entry.generation = next;
+                reg.free.push(slot);
+            }
+            taken
+        };
+        drop(taken);
+        Ok(())
+    }
 }
 
 /// Registers `index` and returns its handle.
 pub fn allocate(index: Index) -> Result<TagmaIndex, HandleError> {
-    let cell = Arc::new(Mutex::new(index));
-    let mut reg = registry();
-    if let Some(slot) = reg.free.pop() {
-        let generation = reg.slots[slot].generation;
-        reg.slots[slot].index = Some(cell);
-        return Ok(encode(slot, generation));
-    }
-    if reg.slots.len() >= MAX_SLOTS {
-        return Err(HandleError::Exhausted);
-    }
-    let slot = reg.slots.len();
-    reg.slots.push(Slot {
-        generation: 1,
-        index: Some(cell),
-    });
-    Ok(encode(slot, 1))
+    INDEXES.allocate(index)
 }
 
-/// Resolves a handle to its index, cloning the `Arc` out from under the
-/// registry lock so the caller can work without holding it.
-fn resolve(handle: TagmaIndex) -> Result<Arc<Mutex<Index>>, HandleError> {
-    let (slot, generation) = decode(handle)?;
-    let reg = registry();
-    let Some(entry) = reg.slots.get(slot) else {
-        // A well-formed handle naming a slot that was never allocated can
-        // only have been fabricated.
-        return Err(HandleError::Foreign);
-    };
-    if entry.generation != generation {
-        return Err(HandleError::Freed);
-    }
-    match &entry.index {
-        Some(cell) => Ok(Arc::clone(cell)),
-        None => Err(HandleError::Freed),
-    }
-}
-
-/// Runs `f` against the index named by `handle`.
-///
-/// The registry lock is released before `f` runs; only the per-index lock
-/// is held across it.
+/// Runs `f` against the index named by `handle` (see [`Handles::with`]).
 pub fn with_index<T>(
     handle: TagmaIndex,
     f: impl FnOnce(&mut Index) -> T,
 ) -> Result<T, HandleError> {
-    let cell = resolve(handle)?;
-    let mut guard = cell.lock().map_err(|_| HandleError::Poisoned)?;
-    Ok(f(&mut guard))
+    INDEXES.with(handle, f)
 }
 
 /// Invalidates `handle` and drops its index.
-///
-/// The `Arc` is moved out and dropped *after* the registry lock is
-/// released, so an arbitrarily expensive `Drop` never blocks other threads'
-/// handle operations.
 pub fn release(handle: TagmaIndex) -> Result<(), HandleError> {
-    let (slot, generation) = decode(handle)?;
-    let taken = {
-        let mut reg = registry();
-        let Some(entry) = reg.slots.get_mut(slot) else {
-            return Err(HandleError::Foreign);
-        };
-        if entry.generation != generation || entry.index.is_none() {
-            return Err(HandleError::Freed);
-        }
-        let taken = entry.index.take();
-        // On generation exhaustion the slot is deliberately NOT returned to
-        // the free list: retiring it costs a few bytes of table forever,
-        // whereas reusing it would let a 4-billion-allocations-old handle
-        // alias a live index — the exact bug this module exists to prevent.
-        if let Some(next) = entry.generation.checked_add(1) {
-            entry.generation = next;
-            reg.free.push(slot);
-        }
-        taken
-    };
-    drop(taken);
-    Ok(())
+    INDEXES.release(handle)
 }
 
 #[cfg(test)]
@@ -272,18 +324,53 @@ mod tests {
 
     #[test]
     fn zero_is_never_valid() {
-        assert_eq!(decode(0), Err(HandleError::Null));
+        assert_eq!(INDEXES.decode(0), Err(HandleError::Null));
         assert_eq!(release(0), Err(HandleError::Null));
     }
 
     #[test]
     fn a_fabricated_handle_is_foreign() {
         // Right shape, wrong magic.
-        assert_eq!(decode(1), Err(HandleError::Foreign));
-        assert_eq!(decode(0xDEAD_BEEF_CAFE_F00D), Err(HandleError::Foreign));
+        assert_eq!(INDEXES.decode(1), Err(HandleError::Foreign));
+        assert_eq!(
+            INDEXES.decode(0xDEAD_BEEF_CAFE_F00D),
+            Err(HandleError::Foreign)
+        );
         // Correct magic, slot never allocated.
-        let never = encode(MAX_SLOTS - 1, 1);
-        assert_eq!(resolve(never).unwrap_err(), HandleError::Foreign);
+        let never = INDEXES.encode(MAX_SLOTS - 1, 1);
+        assert_eq!(INDEXES.resolve(never).unwrap_err(), HandleError::Foreign);
+    }
+
+    /// The two registries never accept each other's handles: an index
+    /// handle is foreign to the rules registry and vice versa, even when
+    /// the slot and generation would match.
+    #[test]
+    fn index_and_rules_handles_are_foreign_to_each_other() {
+        let idx = allocate(Index::new()).expect("slots available");
+        let rules = RULES.allocate(Rules::default()).expect("slots available");
+        assert_eq!(RULES.with(idx, |_| ()).unwrap_err(), HandleError::Foreign);
+        assert_eq!(with_index(rules, |_| ()).unwrap_err(), HandleError::Foreign);
+        assert_eq!(RULES.release(idx), Err(HandleError::Foreign));
+        assert_eq!(release(rules), Err(HandleError::Foreign));
+        release(idx).expect("free");
+        RULES.release(rules).expect("free");
+    }
+
+    #[test]
+    fn messages_name_the_kind_of_object() {
+        assert_eq!(
+            HandleError::Freed.message("rules"),
+            "ffi: handle refers to a freed rules (use-after-free or double-free)"
+        );
+        assert!(HandleError::Foreign
+            .message("rules")
+            .starts_with("ffi: rules handle"));
+        assert!(HandleError::Poisoned
+            .message("index")
+            .starts_with("ffi: index is poisoned"));
+        assert!(HandleError::Exhausted
+            .message("rules")
+            .contains("live rules handles"));
     }
 
     #[test]
@@ -325,12 +412,12 @@ mod tests {
     #[test]
     fn released_slots_are_reused_rather_than_accumulating() {
         const CYCLES: usize = 1000;
-        let before = registry().slots.len();
+        let before = INDEXES.registry().slots.len();
         for _ in 0..CYCLES {
             let h = allocate(Index::new()).expect("slots available");
             release(h).expect("free");
         }
-        let after = registry().slots.len();
+        let after = INDEXES.registry().slots.len();
         assert!(
             after - before < CYCLES / 10,
             "free list must bound growth: {before} -> {after} over {CYCLES} cycles"

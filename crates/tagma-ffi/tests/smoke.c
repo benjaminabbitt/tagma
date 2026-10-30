@@ -119,6 +119,46 @@ static void rules(void) {
     assert_error_contains("freed index");
 }
 
+/* A standalone rule set (Rules::from_tags) at the real ABI: an opaque
+ * TagmaRules handle, freed with tagma_rules_free, never accepted as a
+ * TagmaIndex or vice versa. */
+static void standalone_rules(void) {
+    TagmaRules rules = tagma_rules_from_tags("tagma.enum:k=a tagma.enum:j=a");
+    assert(rules != 0);
+
+    char *found = tagma_rules_validate(rules, "k=z j=bad", "k=y", "k=z");
+    assert(found != NULL);
+    assert(strcmp(found,
+                  "{\"code\":\"not-in-enum\",\"tag\":\"j=bad\",\"args\":[[\"allowed\",\"a\"]],"
+                  "\"origin\":\"existing\"}\n"
+                  "{\"code\":\"not-in-enum\",\"tag\":\"k=y\",\"args\":[[\"allowed\",\"a\"]],"
+                  "\"origin\":\"introduced\"}") == 0);
+    tagma_str_free(found);
+
+    char *clean = tagma_rules_check(rules);
+    assert(clean != NULL);
+    assert(strcmp(clean, "") == 0);
+    tagma_str_free(clean);
+
+    assert(tagma_rules_validate(rules, "=5", "", "") == NULL);
+    assert_error_contains("current: ");
+    assert(tagma_rules_from_tags("=5") == 0);
+    assert(tagma_rules_from_tags(NULL) == 0);
+    assert_error_contains("tags is null");
+
+    TagmaIndex idx = tagma_index_new();
+    assert(tagma_rules_check(idx) == NULL);
+    assert_error_contains("rules handle was not issued by tagma");
+    assert(tagma_check(rules) == NULL);
+    assert_error_contains("index handle was not issued by tagma");
+    assert(tagma_index_free(idx) == 0);
+
+    assert(tagma_rules_free(rules) == 0);
+    assert(tagma_rules_free(rules) == -1);
+    assert_error_contains("freed rules");
+    assert(tagma_rules_free(0) == 0);
+}
+
 int main(void) {
     TagmaIndex idx = tagma_index_new();
     assert(idx != 0);
@@ -191,6 +231,7 @@ int main(void) {
 
     handle_safety();
     rules();
+    standalone_rules();
 
     return 0;
 }

@@ -62,10 +62,20 @@
 #include <stdlib.h>
 
 /**
- * The integer handle type exposed to C. Opaque: callers must treat it as a
- * token, never as an address or an index. `0` is never a valid handle.
+ * The integer handle type exposed to C for an index. Opaque: callers must
+ * treat it as a token, never as an address or an index. `0` is never a
+ * valid handle.
  */
 typedef uint64_t TagmaIndex;
+
+/**
+ * The integer handle type exposed to C for a standalone rule set
+ * (`tagma_core::Rules`), with exactly [`TagmaIndex`]'s guarantees. Index
+ * and rules handles live in separate registries under different magic
+ * values, so passing one where the other is expected is reported as
+ * foreign, never misread.
+ */
+typedef uint64_t TagmaRules;
 
 /**
  * Creates a new, empty index and returns an opaque owning handle to it.
@@ -171,6 +181,56 @@ char *tagma_validate(TagmaIndex handle, const char *id, const char *add, const c
 char *tagma_check(TagmaIndex handle);
 
 /**
+ * Derives a standalone rule set (SPEC.md §10–§12, with §8 arity and §9
+ * type) from the `tagma.*` config tags among `tags`, a whitespace-separated
+ * tag list split as a [`tagma_index_add`] line is (every other tag is
+ * ignored; `""` is no config) — for a caller that holds its config itself
+ * rather than in an index. Returns an opaque owning handle, to be freed
+ * with [`tagma_rules_free`], or `0` on error (an invalid tag, a null or
+ * non-UTF-8 argument; see [`tagma_last_error`]). `0` is never a valid
+ * handle. No comparators are registered: the C ABI takes no callbacks.
+ *
+ * # Safety
+ *
+ * `tags`, if non-null, must point to a valid NUL-terminated C string.
+ */
+TagmaRules tagma_rules_from_tags(const char *tags);
+
+/**
+ * Frees the rule set named by a handle from [`tagma_rules_from_tags`],
+ * exactly as [`tagma_index_free`] frees an index: `0` on success, `-1` if
+ * the handle is not a live rules handle (an index handle included), `0`
+ * handle a no-op returning `0`. Never unwinds.
+ */
+int tagma_rules_free(TagmaRules handle);
+
+/**
+ * Validates a change against a standalone rule set (SPEC.md §13): the
+ * findings for the tag set `current` (a whitespace-separated tag list,
+ * the item's tags as the caller holds them) would become after removing
+ * every tag in `remove` and then adding every tag in `add`. Same lists,
+ * result and errors as [`tagma_validate`]; an invalid tag in `current`
+ * is reported with the prefix `current: `. Free the result with
+ * [`tagma_str_free`].
+ *
+ * # Safety
+ *
+ * `current`, `add` and `remove`, if non-null, must each point to a valid
+ * NUL-terminated C string. `handle` needs no precondition.
+ */
+char *tagma_rules_validate(TagmaRules handle,
+                           const char *current,
+                           const char *add,
+                           const char *remove);
+
+/**
+ * Checks a standalone rule set's config (SPEC.md §14); same result and
+ * errors as [`tagma_check`]. Free the result with [`tagma_str_free`].
+ * Never unwinds.
+ */
+char *tagma_rules_check(TagmaRules handle);
+
+/**
  * Returns a newly allocated copy of the last error message recorded on
  * this thread, or `NULL` if there is none. Free the result with
  * [`tagma_str_free`]. Never unwinds.
@@ -183,7 +243,8 @@ char *tagma_last_error(void);
 /**
  * Frees a string previously returned by [`tagma_query`],
  * [`tagma_query_postfix`], [`tagma_compile`], [`tagma_validate`],
- * [`tagma_check`], or [`tagma_last_error`]. A null pointer is a no-op.
+ * [`tagma_check`], [`tagma_rules_validate`], [`tagma_rules_check`], or
+ * [`tagma_last_error`]. A null pointer is a no-op.
  *
  * # Safety
  *

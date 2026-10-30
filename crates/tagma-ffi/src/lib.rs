@@ -8,7 +8,9 @@
 //!
 //! # Handle safety
 //!
-//! An index is named by an opaque [`TagmaIndex`] integer, not by a pointer.
+//! An index is named by an opaque [`TagmaIndex`] integer, not by a pointer;
+//! a standalone rule set ([`tagma_rules_from_tags`]) by a [`TagmaRules`]
+//! integer, with the same guarantees.
 //! Every handle is validated on entry, so a freed handle, a handle whose
 //! slot has since been reissued, and a value this library never issued are
 //! all *detected* and reported through [`tagma_last_error`] instead of
@@ -49,11 +51,11 @@ use std::ffi::{c_char, c_int, CStr, CString};
 use std::panic::{catch_unwind, UnwindSafe};
 
 use tagma_core::token::split_unquoted_whitespace;
-use tagma_core::{Change, Finding, Index, Tag};
+use tagma_core::{Change, Finding, Index, Rules, Tag};
 
 pub mod handle;
 
-pub use handle::TagmaIndex;
+pub use handle::{TagmaIndex, TagmaRules};
 
 thread_local! {
     static LAST_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
@@ -154,7 +156,7 @@ fn with_handle<T>(handle: TagmaIndex, on_error: T, f: impl FnOnce(&mut Index) ->
     match handle::with_index(handle, f) {
         Ok(v) => v,
         Err(e) => {
-            set_last_error(e.message());
+            set_last_error(e.message("index"));
             on_error
         }
     }
@@ -173,7 +175,7 @@ pub extern "C" fn tagma_index_new() -> TagmaIndex {
                 h
             }
             Err(e) => {
-                set_last_error(e.message());
+                set_last_error(e.message("index"));
                 0
             }
         }
@@ -204,7 +206,7 @@ pub extern "C" fn tagma_index_free(handle: TagmaIndex) -> c_int {
                 0
             }
             Err(e) => {
-                set_last_error(e.message());
+                set_last_error(e.message("index"));
                 -1
             }
         }
@@ -407,16 +409,8 @@ pub unsafe extern "C" fn tagma_validate(
         ) else {
             return std::ptr::null_mut();
         };
-        let change = match (parse_tag_list(add), parse_tag_list(remove)) {
-            (Ok(add), Ok(remove)) => Change { add, remove },
-            (Err(e), _) => {
-                set_last_error(format!("add: {e}"));
-                return std::ptr::null_mut();
-            }
-            (_, Err(e)) => {
-                set_last_error(format!("remove: {e}"));
-                return std::ptr::null_mut();
-            }
+        let Some(change) = parse_change(add, remove) else {
+            return std::ptr::null_mut();
         };
         with_handle(handle, std::ptr::null_mut(), |idx| {
             clear_last_error();
@@ -436,6 +430,153 @@ pub extern "C" fn tagma_check(handle: TagmaIndex) -> *mut c_char {
         with_handle(handle, std::ptr::null_mut(), |idx| {
             clear_last_error();
             to_c_string(findings_jsonl(&idx.check()))
+        })
+    })
+}
+
+/// Parses a validate change from its two tag lists, recording an error
+/// naming the failing list.
+fn parse_change(add: &str, remove: &str) -> Option<Change> {
+    match (parse_tag_list(add), parse_tag_list(remove)) {
+        (Ok(add), Ok(remove)) => Some(Change { add, remove }),
+        (Err(e), _) => {
+            set_last_error(format!("add: {e}"));
+            None
+        }
+        (_, Err(e)) => {
+            set_last_error(format!("remove: {e}"));
+            None
+        }
+    }
+}
+
+/// Runs `f` against the rule set named by `handle`, recording the handle
+/// diagnostic and returning `on_error` if the handle is not a live rules
+/// handle this library issued.
+fn with_rules<T>(handle: TagmaRules, on_error: T, f: impl FnOnce(&mut Rules) -> T) -> T {
+    match handle::RULES.with(handle, f) {
+        Ok(v) => v,
+        Err(e) => {
+            set_last_error(e.message("rules"));
+            on_error
+        }
+    }
+}
+
+/// Derives a standalone rule set (SPEC.md §10–§12, with §8 arity and §9
+/// type) from the `tagma.*` config tags among `tags`, a whitespace-separated
+/// tag list split as a [`tagma_index_add`] line is (every other tag is
+/// ignored; `""` is no config) — for a caller that holds its config itself
+/// rather than in an index. Returns an opaque owning handle, to be freed
+/// with [`tagma_rules_free`], or `0` on error (an invalid tag, a null or
+/// non-UTF-8 argument; see [`tagma_last_error`]). `0` is never a valid
+/// handle. No comparators are registered: the C ABI takes no callbacks.
+///
+/// # Safety
+///
+/// `tags`, if non-null, must point to a valid NUL-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn tagma_rules_from_tags(tags: *const c_char) -> TagmaRules {
+    guard("tagma_rules_from_tags", 0, || {
+        let Some(tags) = (unsafe { borrow_str(tags, "tags") }) else {
+            return 0;
+        };
+        let tags = match parse_tag_list(tags) {
+            Ok(tags) => tags,
+            Err(e) => {
+                set_last_error(e);
+                return 0;
+            }
+        };
+        match handle::RULES.allocate(Rules::from_tags(&tags)) {
+            Ok(h) => {
+                clear_last_error();
+                h
+            }
+            Err(e) => {
+                set_last_error(e.message("rules"));
+                0
+            }
+        }
+    })
+}
+
+/// Frees the rule set named by a handle from [`tagma_rules_from_tags`],
+/// exactly as [`tagma_index_free`] frees an index: `0` on success, `-1` if
+/// the handle is not a live rules handle (an index handle included), `0`
+/// handle a no-op returning `0`. Never unwinds.
+#[no_mangle]
+pub extern "C" fn tagma_rules_free(handle: TagmaRules) -> c_int {
+    guard("tagma_rules_free", -1, || {
+        if handle == 0 {
+            return 0;
+        }
+        match handle::RULES.release(handle) {
+            Ok(()) => {
+                clear_last_error();
+                0
+            }
+            Err(e) => {
+                set_last_error(e.message("rules"));
+                -1
+            }
+        }
+    })
+}
+
+/// Validates a change against a standalone rule set (SPEC.md §13): the
+/// findings for the tag set `current` (a whitespace-separated tag list,
+/// the item's tags as the caller holds them) would become after removing
+/// every tag in `remove` and then adding every tag in `add`. Same lists,
+/// result and errors as [`tagma_validate`]; an invalid tag in `current`
+/// is reported with the prefix `current: `. Free the result with
+/// [`tagma_str_free`].
+///
+/// # Safety
+///
+/// `current`, `add` and `remove`, if non-null, must each point to a valid
+/// NUL-terminated C string. `handle` needs no precondition.
+#[no_mangle]
+pub unsafe extern "C" fn tagma_rules_validate(
+    handle: TagmaRules,
+    current: *const c_char,
+    add: *const c_char,
+    remove: *const c_char,
+) -> *mut c_char {
+    guard("tagma_rules_validate", std::ptr::null_mut(), || {
+        let (Some(current), Some(add), Some(remove)) = (
+            unsafe { borrow_str(current, "current") },
+            unsafe { borrow_str(add, "add") },
+            unsafe { borrow_str(remove, "remove") },
+        ) else {
+            return std::ptr::null_mut();
+        };
+        let current = match parse_tag_list(current) {
+            Ok(tags) => tags,
+            Err(e) => {
+                set_last_error(format!("current: {e}"));
+                return std::ptr::null_mut();
+            }
+        };
+        let Some(change) = parse_change(add, remove) else {
+            return std::ptr::null_mut();
+        };
+        with_rules(handle, std::ptr::null_mut(), |rules| {
+            clear_last_error();
+            to_c_string(findings_jsonl(&rules.validate(&current, &change)))
+        })
+    })
+}
+
+/// Checks a standalone rule set's config (SPEC.md §14); same result and
+/// errors as [`tagma_check`]. Free the result with [`tagma_str_free`].
+/// Never unwinds.
+#[no_mangle]
+pub extern "C" fn tagma_rules_check(handle: TagmaRules) -> *mut c_char {
+    guard("tagma_rules_check", std::ptr::null_mut(), || {
+        with_rules(handle, std::ptr::null_mut(), |rules| {
+            clear_last_error();
+            to_c_string(findings_jsonl(&rules.check()))
         })
     })
 }
@@ -461,7 +602,8 @@ pub extern "C" fn tagma_last_error() -> *mut c_char {
 
 /// Frees a string previously returned by [`tagma_query`],
 /// [`tagma_query_postfix`], [`tagma_compile`], [`tagma_validate`],
-/// [`tagma_check`], or [`tagma_last_error`]. A null pointer is a no-op.
+/// [`tagma_check`], [`tagma_rules_validate`], [`tagma_rules_check`], or
+/// [`tagma_last_error`]. A null pointer is a no-op.
 ///
 /// # Safety
 ///
@@ -1044,6 +1186,145 @@ mod tests {
             let handle = rules_index(&["a k=1"]);
             assert_eq!(from_c(tagma_check(handle)), "");
             assert_eq!(tagma_index_free(handle), 0);
+        }
+    }
+
+    // --- standalone rules (Rules::from_tags) ---------------------------------
+
+    unsafe fn rules_from(tags: &str) -> TagmaRules {
+        let tags = to_cstring(tags);
+        let h = unsafe { tagma_rules_from_tags(tags.as_ptr()) };
+        assert_ne!(h, 0, "from_tags failed");
+        h
+    }
+
+    unsafe fn rules_validate(h: TagmaRules, current: &str, add: &str, remove: &str) -> *mut c_char {
+        let (c, a, r) = (to_cstring(current), to_cstring(add), to_cstring(remove));
+        unsafe { tagma_rules_validate(h, c.as_ptr(), a.as_ptr(), r.as_ptr()) }
+    }
+
+    #[test]
+    fn rules_validate_matches_the_index_it_mirrors() {
+        unsafe {
+            // Non-config tags among `tags` are ignored.
+            let rules = rules_from("tagma.enum:k=a tagma.enum:j=a k=z unrelated");
+            assert!(tagma_last_error().is_null(), "success clears the error");
+            let idx = rules_index(&["cfg tagma.enum:k=a tagma.enum:j=a", "item k=z j=bad"]);
+            let via_rules = from_c(rules_validate(rules, "k=z j=bad", "k=y", "k=z"));
+            assert!(tagma_last_error().is_null(), "success clears the error");
+            let via_index = from_c(validate(idx, "item", "k=y", "k=z"));
+            assert_eq!(via_rules, via_index);
+            assert!(via_rules.contains(r#""origin":"introduced""#));
+            assert_eq!(from_c(rules_validate(rules, "", "k=a", "")), "");
+            assert_eq!(tagma_rules_free(rules), 0);
+            assert_eq!(tagma_index_free(idx), 0);
+        }
+    }
+
+    #[test]
+    fn rules_check_matches_the_index_it_mirrors() {
+        unsafe {
+            let config = r#"tagma.permit:"*:secret"=false tagma.arity:k=scalar tagma.arity:k=set"#;
+            let rules = rules_from(config);
+            let idx = rules_index(&[&format!("cfg {config}")]);
+            let via_rules = from_c(tagma_rules_check(rules));
+            assert!(tagma_last_error().is_null(), "success clears the error");
+            assert_eq!(via_rules, from_c(tagma_check(idx)));
+            assert_eq!(via_rules.lines().count(), 2);
+            let empty = rules_from("");
+            assert_eq!(from_c(tagma_rules_check(empty)), "");
+            assert_eq!(tagma_rules_free(rules), 0);
+            assert_eq!(tagma_rules_free(empty), 0);
+            assert_eq!(tagma_index_free(idx), 0);
+        }
+    }
+
+    #[test]
+    fn rules_from_tags_rejects_bad_input() {
+        unsafe {
+            assert_eq!(tagma_rules_from_tags(std::ptr::null()), 0);
+            assert!(take_error().contains("tags is null"));
+            let bad = invalid_utf8_cstring();
+            assert_eq!(tagma_rules_from_tags(bad.as_ptr()), 0);
+            assert!(take_error().contains("not valid UTF-8"));
+            let invalid = to_cstring("ok =5");
+            assert_eq!(tagma_rules_from_tags(invalid.as_ptr()), 0);
+            take_error();
+        }
+    }
+
+    #[test]
+    fn rules_validate_names_the_failing_list_and_rejects_nulls() {
+        unsafe {
+            let rules = rules_from("");
+            for (current, add, remove, prefix) in [
+                ("=5", "", "", "current: "),
+                ("", "=5", "", "add: "),
+                ("", "", "=5", "remove: "),
+            ] {
+                assert!(rules_validate(rules, current, add, remove).is_null());
+                assert!(take_error().starts_with(prefix), "{prefix}");
+            }
+            let ok = to_cstring("");
+            let null = std::ptr::null();
+            for (c, a, r, what) in [
+                (null, ok.as_ptr(), ok.as_ptr(), "current is null"),
+                (ok.as_ptr(), null, ok.as_ptr(), "add is null"),
+                (ok.as_ptr(), ok.as_ptr(), null, "remove is null"),
+            ] {
+                assert!(tagma_rules_validate(rules, c, a, r).is_null());
+                assert!(take_error().contains(what), "{what}");
+            }
+            assert_eq!(tagma_rules_free(rules), 0);
+        }
+    }
+
+    #[test]
+    fn rules_handles_are_validated_like_index_handles() {
+        unsafe {
+            let rules = rules_from("");
+            let idx = tagma_index_new();
+            // Neither kind is accepted as the other.
+            assert_eq!(tagma_rules_free(idx), -1);
+            assert!(take_error().contains("rules handle was not issued by tagma"));
+            assert!(tagma_rules_check(idx).is_null());
+            assert!(take_error().contains("rules handle was not issued by tagma"));
+            assert!(tagma_check(rules).is_null());
+            assert!(take_error().contains("index handle was not issued by tagma"));
+            // Double free and use after free.
+            assert_eq!(tagma_rules_free(rules), 0);
+            assert_eq!(tagma_rules_free(rules), -1);
+            assert!(take_error().contains("freed rules"));
+            assert!(tagma_rules_check(rules).is_null());
+            assert!(take_error().contains("freed rules"));
+            assert!(rules_validate(rules, "", "", "").is_null());
+            assert!(take_error().contains("freed rules"));
+            // 0 frees as a no-op and clears nothing it should not.
+            set_last_error("sentinel".to_string());
+            assert_eq!(tagma_rules_free(0), 0);
+            assert_eq!(take_error(), "sentinel", "a 0 handle is a no-op");
+            assert_eq!(tagma_index_free(idx), 0);
+        }
+    }
+
+    #[test]
+    fn rules_free_success_clears_a_previous_error() {
+        unsafe {
+            let rules = rules_from("");
+            set_last_error("stale".to_string());
+            assert_eq!(tagma_rules_free(rules), 0);
+            assert!(tagma_last_error().is_null());
+        }
+    }
+
+    /// The 0-handle short-circuit in tagma_index_free returns 0 without
+    /// touching the error channel.
+    #[test]
+    fn index_free_of_a_zero_handle_leaves_the_error_untouched() {
+        unsafe {
+            set_last_error("sentinel".to_string());
+            assert_eq!(tagma_index_free(0), 0);
+            assert_eq!(take_error(), "sentinel");
         }
     }
 
