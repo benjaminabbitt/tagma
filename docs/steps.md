@@ -25,6 +25,15 @@ Then it matches exactly {string}                # space-separated sorted ids; ""
 
 ## Semantics notes
 
+- **Arguments are verbatim.** A `{string}` argument is delimited by a
+  matching pair of either `"` or `'` (both may appear in one step); the
+  harness strips the delimiters and passes everything between them through
+  byte-for-byte — nothing is unescaped. So `'x="say \"hi\""'` hands the
+  binding `x="say \"hi\""`, backslashes intact, for the binding's own
+  QUOTING parser (SPEC.md §2) to decode. cucumber-rs, godog (`stringArg`),
+  and behave (`_qstr`) behave this way as written; cucumber-js's built-in
+  `{string}` rewrites `\"`/`\'`, so the JS harness uses its own
+  `{verbatim}` parameter type instead.
 - **Empty string = absent.** In `Then it parses with namespace {string}, key
   {string}, value {string}`, an empty-string argument means that component is
   absent from the parsed tag (namespace or value; key is always present).
