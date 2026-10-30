@@ -92,12 +92,13 @@ pub(crate) enum Arity {
     Set,
 }
 
-/// A namespace-position pattern within a `tagma.hide` target (SPEC.md §7):
-/// matches by dot-subtree (a named namespace, exactly as the retired
-/// `hide-ns` facet's own prefix rule did), the null namespace exactly (a
-/// target with no colon), or any namespace at all (`*`).
+/// A namespace-position pattern within a `tagma.hide` target (SPEC.md §7),
+/// and — same grammar — a `tagma.permit` target (§10): matches by
+/// dot-subtree (a named namespace, exactly as the retired `hide-ns` facet's
+/// own prefix rule did), the null namespace exactly (a target with no
+/// colon), or any namespace at all (`*`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum NsPattern {
+pub(crate) enum NsPattern {
     /// The null namespace only — a target with no colon.
     Null,
     /// Any namespace, named or null — a `*` ns-pattern.
@@ -106,10 +107,10 @@ enum NsPattern {
     Named(String),
 }
 
-/// A key-position pattern within a `tagma.hide` target (SPEC.md §7): an
-/// exact key, or any key at all (`*`).
+/// A key-position pattern within a `tagma.hide` target (SPEC.md §7) or a
+/// `tagma.permit` target (§10): an exact key, or any key at all (`*`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum KeyPattern {
+pub(crate) enum KeyPattern {
     /// Any key.
     Any,
     /// One exact key.
@@ -119,16 +120,18 @@ enum KeyPattern {
 /// One parsed, currently-active `tagma.hide` pattern (SPEC.md §7): the
 /// generalization of the retired `hide-ns` facet's single hidden-namespace
 /// set to `ns:key` granularity — a tag is hidden iff it matches at least
-/// one of these.
+/// one of these. `tagma.permit` (§10) reuses it verbatim: a tag is
+/// permitted iff it matches at least one active permit pattern.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct HidePattern {
-    ns: NsPattern,
-    key: KeyPattern,
+pub(crate) struct HidePattern {
+    pub(crate) ns: NsPattern,
+    pub(crate) key: KeyPattern,
 }
 
 impl HidePattern {
-    /// `true` iff this pattern hides a tag with namespace `ns`, key `key`.
-    fn matches(&self, ns: &Option<String>, key: &str) -> bool {
+    /// `true` iff this pattern matches (hides, or permits) a tag with
+    /// namespace `ns`, key `key`.
+    pub(crate) fn matches(&self, ns: &Option<String>, key: &str) -> bool {
         let ns_ok = match &self.ns {
             NsPattern::Null => ns.is_none(),
             NsPattern::Any => true,
@@ -233,7 +236,7 @@ fn key_reveals(key_ref: &Option<String>, pattern_key: &KeyPattern) -> bool {
 /// `true` iff `ns` is covered by `root`: `ns` equals `root`, or `ns` is a
 /// dot-delimited descendant of it (SPEC.md §7 — `.` is a hierarchy
 /// separator between namespace path components, unlike in keys).
-fn covers(ns: &str, root: &str) -> bool {
+pub(crate) fn covers(ns: &str, root: &str) -> bool {
     ns == root || (ns.starts_with(root) && ns.as_bytes().get(root.len()) == Some(&b'.'))
 }
 
@@ -397,29 +400,32 @@ impl Index {
     }
 
     /// The schema rules (SPEC.md §10–§12, with §8 `arity` and §9 `type`)
-    /// derived from every `tagma.*` config tag in the store, plus the
-    /// comparators registered via [`Self::register_type`].
-    ///
-    /// **STUB** (`todo!()`): specified in SPEC.md, not implemented yet.
+    /// derived from every `tagma`-family config tag in the store, plus the
+    /// comparators registered via [`Self::register_type`] — exactly what
+    /// [`Rules::from_tags`] derives from the same tags.
     pub fn rules(&self) -> Rules {
-        todo!("SPEC.md §10-§12: derive Rules from the store")
+        let mut rules = Rules::from_tags(&self.config_tags());
+        for (name, cmp) in &self.type_comparators {
+            rules.register_type(name, Arc::clone(cmp));
+        }
+        rules
     }
 
     /// SPEC.md §13: validates the tag set item `id` would carry after
     /// `change` (empty current set for an unknown id), against
-    /// [`Self::rules`]. Pure — the index is not mutated.
-    ///
-    /// **STUB** (`todo!()`): specified in SPEC.md, not implemented yet.
+    /// [`Self::rules`] — the config as it stands before the change. Pure —
+    /// the index is not mutated.
     pub fn validate(&self, id: &str, change: &Change) -> Vec<Finding> {
-        let _ = (id, change);
-        todo!("SPEC.md §13: Index::validate")
+        let current: &[Tag] = match self.id_lookup.get(id) {
+            Some(&iid) => &self.tags_by_id[iid as usize],
+            None => &[],
+        };
+        self.rules().validate(current, change)
     }
 
-    /// SPEC.md §14: the findings about the store's own config.
-    ///
-    /// **STUB** (`todo!()`): specified in SPEC.md, not implemented yet.
+    /// SPEC.md §14: the findings about the store's own config. Pure.
     pub fn check(&self) -> Vec<Finding> {
-        todo!("SPEC.md §14: Index::check")
+        self.rules().check()
     }
 
     /// Parses and adds a `<id> <tag> <tag>...` line (ARCHITECTURE.md bulk
@@ -631,31 +637,22 @@ impl Index {
     /// `scalar` nor `set` configures nothing and is omitted, so lookups fall
     /// through to the `Set` default.
     fn arity_config(&self) -> BTreeMap<(Option<String>, String), Arity> {
-        let mut config = BTreeMap::new();
         let config_ns = Some(ARITY_CONFIG_NAMESPACE.to_string());
+        let mut facts: Vec<(&str, &str)> = Vec::new();
         if let Some(targets) = self.keys_by_ns.get(&config_ns) {
             for target in targets {
-                let says_scalar = self.by_ns_key_value.contains_key(&(
-                    config_ns.clone(),
-                    target.clone(),
-                    "scalar".to_string(),
-                ));
-                let says_set = self.by_ns_key_value.contains_key(&(
-                    config_ns.clone(),
-                    target.clone(),
-                    "set".to_string(),
-                ));
-                let arity = if says_scalar {
-                    Arity::Scalar
-                } else if says_set {
-                    Arity::Set
-                } else {
-                    continue;
-                };
-                config.insert(split_target(target), arity);
+                for value in ["scalar", "set"] {
+                    if self.by_ns_key_value.contains_key(&(
+                        config_ns.clone(),
+                        target.clone(),
+                        value.to_string(),
+                    )) {
+                        facts.push((target.as_str(), value));
+                    }
+                }
             }
         }
-        config
+        resolve_arity(facts)
     }
 
     /// The current `tagma.type` config (SPEC.md §9), derived by reading
@@ -673,17 +670,44 @@ impl Index {
     /// simply omitted here (falling through to the §6 numeric grammar),
     /// rather than resolving to some picked winner.
     fn type_config(&self) -> BTreeMap<(Option<String>, String), String> {
-        let mut config = BTreeMap::new();
         let config_ns = Some(TYPE_CONFIG_NAMESPACE.to_string());
+        let mut facts: Vec<(&str, &str)> = Vec::new();
         if let Some(targets) = self.keys_by_ns.get(&config_ns) {
             for target in targets {
-                let mut names = self.value_entries(&config_ns, target).map(|(v, _)| v);
-                if let (Some(only), None) = (names.next(), names.next()) {
-                    config.insert(split_target(target), only.to_string());
+                facts.extend(
+                    self.value_entries(&config_ns, target)
+                        .map(|(v, _)| (target.as_str(), v)),
+                );
+            }
+        }
+        resolve_types(facts)
+    }
+
+    /// Every distinct tag in the `tagma` namespace family (SPEC.md §14
+    /// "Reserved facets") on record, read from the items that carry one —
+    /// the config [`Self::rules`] derives from. Bypasses the query-time
+    /// hide, as [`Self::arity_config`] does.
+    fn config_tags(&self) -> Vec<Tag> {
+        let mut out: Vec<Tag> = Vec::new();
+        for ns in self.namespaces.iter().filter(|ns| in_tagma_family(ns)) {
+            let Some(keys) = self.keys_by_ns.get(ns) else {
+                continue;
+            };
+            for key in keys {
+                let Some(ids) = self.by_ns_key.get(&(ns.clone(), key.clone())) else {
+                    continue;
+                };
+                for &iid in ids {
+                    out.extend(
+                        self.tags_by_id[iid as usize]
+                            .iter()
+                            .filter(|t| t.namespace == *ns && t.key == *key)
+                            .cloned(),
+                    );
                 }
             }
         }
-        config
+        out
     }
 
     /// Builds a [`TypeCtx`] against the store's current `tagma.type`
@@ -926,10 +950,79 @@ pub(crate) fn atom_reference(atom: &Atom) -> BTreeSet<(Option<String>, Option<St
     BTreeSet::from([(ns_ref, key_ref)])
 }
 
+/// `true` iff `ns` is in the reserved `tagma` namespace family: `tagma`
+/// itself or a dot-descendant of it (SPEC.md §10's permit exemption, §14
+/// "Reserved facets").
+pub(crate) fn in_tagma_family(ns: &Option<String>) -> bool {
+    ns.as_deref().is_some_and(|n| covers(n, "tagma"))
+}
+
+/// Recovers an **exact** target `(namespace?, key)` from a config tag's
+/// `<target>` key (SPEC.md §8's first-colon split, shared by `arity`,
+/// `type`, `enum` and `range`), or `None` when it configures nothing (§14
+/// `malformed-target`): an empty namespace or key part (`":k"`, `"ns:"`),
+/// or a `*` in either — those facets take exact targets, not §7 patterns.
+pub(crate) fn exact_target(target: &str) -> Option<(Option<String>, String)> {
+    let (ns, key) = split_target(target);
+    let bad = |part: &str| part.is_empty() || part == "*";
+    if bad(&key) || ns.as_deref().is_some_and(bad) {
+        return None;
+    }
+    Some((ns, key))
+}
+
+/// SPEC.md §8's arity resolution over `(target, value)` facts — one per
+/// `tagma.arity:<target>=<value>` tag on record, whatever its source (the
+/// index's postings, or [`Rules::from_tags`]'s tag list): `scalar` wins
+/// over `set` on one exact target; any other value, or a malformed target
+/// ([`exact_target`]), configures nothing.
+pub(crate) fn resolve_arity<'a>(
+    facts: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> BTreeMap<(Option<String>, String), Arity> {
+    let mut config = BTreeMap::new();
+    for (target, value) in facts {
+        let arity = match value {
+            "scalar" => Arity::Scalar,
+            "set" => Arity::Set,
+            _ => continue,
+        };
+        let Some(t) = exact_target(target) else {
+            continue;
+        };
+        let slot = config.entry(t).or_insert(arity);
+        if arity == Arity::Scalar {
+            *slot = Arity::Scalar;
+        }
+    }
+    config
+}
+
+/// SPEC.md §9's type resolution over `(target, name)` facts — one per
+/// valued `tagma.type:<target>=<name>` tag on record: a target with exactly
+/// one distinct declared name maps to it; more than one disables typed
+/// comparison for that target (omitted, as is a malformed target).
+pub(crate) fn resolve_types<'a>(
+    facts: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> BTreeMap<(Option<String>, String), String> {
+    let mut names: BTreeMap<(Option<String>, String), BTreeSet<&str>> = BTreeMap::new();
+    for (target, name) in facts {
+        if let Some(t) = exact_target(target) {
+            names.entry(t).or_default().insert(name);
+        }
+    }
+    names
+        .into_iter()
+        .filter_map(|(t, set)| match set.len() {
+            1 => set.first().map(|n| (t, (*n).to_string())),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Looks up `(ns, key)`'s declared arity in a config built by
 /// [`Index::arity_config`], defaulting to [`Arity::Set`] for any
 /// undeclared target (SPEC.md §8).
-fn arity_lookup(
+pub(crate) fn arity_lookup(
     config: &BTreeMap<(Option<String>, String), Arity>,
     ns: &Option<String>,
     key: &str,
@@ -974,7 +1067,7 @@ fn split_target(target: &str) -> (Option<String>, String) {
 /// quoting `<target>` at config-write time) is indistinguishable from the
 /// wildcard token here — the same documented-not-solved posture as the
 /// colon-in-key case.
-fn parse_hide_target(target: &str) -> HidePattern {
+pub(crate) fn parse_hide_target(target: &str) -> HidePattern {
     let (ns_str, key_str) = first_colon_split(target);
     let ns = match ns_str {
         None => NsPattern::Null,

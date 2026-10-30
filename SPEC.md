@@ -1134,7 +1134,23 @@ requires both to be revealed.
 
 A config tag reported `unknown-facet`, `malformed-value` or
 `malformed-target` configures nothing, so it draws no further finding (a
-malformed permit target is never `shadowed-permit`, for instance).
+malformed permit target is never `shadowed-permit`, for instance). A tag
+whose target and value are both malformed is reported `malformed-target`
+only: the target is judged first.
+
+Where a finding could name more than one thing, it names one:
+
+- `shadowed-permit`'s `by` is the **broadest** covering pattern — one no
+  other covering pattern covers — the first by target spelling if several
+  are. An explicit `"*:*"=true` is never shadowed by the implicit default:
+  they are the same target.
+- `range-empty`: a declaration with `lo > hi` is reported once, against
+  itself, and is left out of the pairwise comparison (it would otherwise
+  be empty against every other declaration too). For the rest, pairwise is
+  enough: intervals on one total order that meet pairwise meet jointly.
+- `dead-enum-value`: a value the target's type cannot order is reported
+  `type-mismatch` alone; otherwise it is reported once per distinct reason
+  any `range` on the target gives (`out-of-range`, `not-comparable`).
 
 `check` never changes what §7–§13 do. A store with findings evaluates
 exactly as before; the findings only say why.
