@@ -3,9 +3,29 @@
 // build, running the shared ../../features suite. Mirrors the semantics of
 // crates/tagma-core/tests/conformance.rs (the cucumber-rs reference
 // harness) exactly.
-import { Given, When, Then, setWorldConstructor } from "@cucumber/cucumber";
+import {
+  Given,
+  When,
+  Then,
+  defineParameterType,
+  setWorldConstructor,
+} from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import { Index, compile, parseTag } from "../src/node.mjs";
+
+// docs/steps.md's {string} argument, taken VERBATIM between its delimiters.
+// cucumber-js's built-in {string} also rewrites `\"` to `"` and `\'` to `'`
+// in the captured text — even inside a '-delimited argument — so the
+// QUOTING fixture 'x="say \"hi\""' (features/tags.feature) reached the
+// binding as x="say "hi"", a different and invalid tag. cucumber-rs and the
+// Go port's stringArg/unquoteArg both pass the bytes through untouched; this
+// is the same rule: a "-delimited or '-delimited literal, delimiters
+// stripped, nothing unescaped.
+defineParameterType({
+  name: "verbatim",
+  regexp: /"[^"]*"|'[^']*'/,
+  transformer: (s) => s.slice(1, -1),
+});
 
 class TagmaWorld {
   constructor() {
@@ -17,13 +37,13 @@ class TagmaWorld {
 }
 setWorldConstructor(TagmaWorld);
 
-Given("an item {string} tagged {string}", function (id, tags) {
+Given("an item {verbatim} tagged {verbatim}", function (id, tags) {
   // Composes the bulk-ingest line format (id + " " + tags) and fails loudly
   // (an uncaught throw fails the step) on an invalid tag.
   this.index.add(`${id} ${tags}`);
 });
 
-When("the tag {string} is parsed", function (tag) {
+When("the tag {verbatim} is parsed", function (tag) {
   try {
     this.lastTag = { ok: true, value: parseTag(tag) };
   } catch (error) {
@@ -31,7 +51,7 @@ When("the tag {string} is parsed", function (tag) {
   }
 });
 
-When("the query {string} is compiled", function (query) {
+When("the query {verbatim} is compiled", function (query) {
   try {
     this.lastCompile = { ok: true, value: compile(query) };
   } catch (error) {
@@ -39,7 +59,7 @@ When("the query {string} is compiled", function (query) {
   }
 });
 
-When("the query {string} is run", function (query) {
+When("the query {verbatim} is run", function (query) {
   try {
     this.lastMatch = { ok: true, value: this.index.query(query) };
   } catch (error) {
@@ -47,7 +67,7 @@ When("the query {string} is run", function (query) {
   }
 });
 
-When("the postfix query {string} is run", function (query) {
+When("the postfix query {verbatim} is run", function (query) {
   try {
     this.lastMatch = { ok: true, value: this.index.queryPostfix(query) };
   } catch (error) {
@@ -56,7 +76,7 @@ When("the postfix query {string} is run", function (query) {
 });
 
 Then(
-  "it parses with namespace {string}, key {string}, value {string}",
+  "it parses with namespace {verbatim}, key {verbatim}, value {verbatim}",
   function (namespace, key, value) {
     assert.ok(this.lastTag, "no tag parse was attempted");
     assert.ok(
@@ -81,7 +101,7 @@ Then("parsing fails", function () {
   );
 });
 
-Then("the postfix is {string}", function (expected) {
+Then("the postfix is {verbatim}", function (expected) {
   assert.ok(this.lastCompile, "no compile was attempted");
   assert.ok(
     this.lastCompile.ok,
@@ -99,7 +119,7 @@ Then("compilation fails", function () {
   );
 });
 
-Then("it matches exactly {string}", function (expected) {
+Then("it matches exactly {verbatim}", function (expected) {
   assert.ok(this.lastMatch, "no query was run");
   assert.ok(
     this.lastMatch.ok,
