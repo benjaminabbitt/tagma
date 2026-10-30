@@ -1,14 +1,10 @@
 package tagma_test
 
-// Godog conformance harness (PLAN.md G2): implements exactly the nine (ten,
-// see below) steps of the frozen vocabulary in docs/steps.md against this
-// package's public API, run against the shared ../../features suite.
-//
-// docs/steps.md's header count ("Nine steps") undercounts its own listed
-// step vocabulary by one — the fenced block lists four `When` steps and
-// five `Then` steps (plus one `Given`), i.e. ten total. All ten are
-// implemented here regardless of the header's count, since the feature
-// files use exactly these ten step texts.
+// Godog conformance harness (PLAN.md G2): implements exactly the fourteen
+// steps of the frozen vocabulary in docs/steps.md against this package's
+// public API, run against the shared ../../features suite — the four
+// validate/check steps (SPEC.md §13/§14) against Index.Validate and
+// Index.Check.
 //
 // docs/steps.md: "{string} is a quoted cucumber-expression string" — the
 // QUOTING extension (SPEC.md §2) needs fixtures that embed a literal '"'
@@ -49,6 +45,10 @@ type conformanceState struct {
 
 	matchResult []string
 	matchErr    error
+
+	// findings is the last validate or check call's result (docs/steps.md);
+	// nil until one runs.
+	findings []tagma.Finding
 }
 
 func (c *conformanceState) reset() {
@@ -399,6 +399,94 @@ func (c *conformanceState) itMatchesExactly(want string) error {
 	return nil
 }
 
+// When item {string} is validated adding {string} and removing {string}
+func (c *conformanceState) itemIsValidated(id, adding, removing string) error {
+	add, err := parseTagList(unquoteArg(adding))
+	if err != nil {
+		return err
+	}
+	remove, err := parseTagList(unquoteArg(removing))
+	if err != nil {
+		return err
+	}
+	c.findings = c.idx.Validate(unquoteArg(id), tagma.Change{Add: add, Remove: remove})
+	return nil
+}
+
+// When the config is checked
+func (c *conformanceState) theConfigIsChecked() error {
+	c.findings = c.idx.Check()
+	return nil
+}
+
+// Then the findings are {string}
+func (c *conformanceState) theFindingsAre(want string) error {
+	return c.assertFindings(unquoteArg(want), func(tagma.Finding) bool { return true })
+}
+
+// Then the introduced findings are {string}
+func (c *conformanceState) theIntroducedFindingsAre(want string) error {
+	return c.assertFindings(unquoteArg(want), func(f tagma.Finding) bool {
+		return f.Origin == tagma.OriginIntroduced
+	})
+}
+
+// assertFindings compares the last call's findings that keep admits with a
+// "<code> <tag> ; ..." list as a multiset of (code, parsed tag) pairs,
+// ignoring order, args and origin (docs/steps.md). Reads c.findings
+// without consuming it.
+func (c *conformanceState) assertFindings(want string, keep func(tagma.Finding) bool) error {
+	if c.findings == nil {
+		return fmt.Errorf("no validate or check was run")
+	}
+	var got []string
+	for _, f := range c.findings {
+		if keep(f) {
+			got = append(got, string(f.Code)+" "+f.Tag.String())
+		}
+	}
+	var expected []string
+	for _, entry := range strings.Split(want, " ; ") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		code, spelling, ok := strings.Cut(entry, " ")
+		if !ok {
+			return fmt.Errorf("finding %q is not `<code> <tag>`", entry)
+		}
+		t, err := tagma.ParseTag(spelling)
+		if err != nil {
+			return fmt.Errorf("invalid tag %q in expected findings: %w", spelling, err)
+		}
+		expected = append(expected, code+" "+t.String())
+	}
+	sort.Strings(got)
+	sort.Strings(expected)
+	if !equalStringSlices(got, expected) {
+		return fmt.Errorf("findings %q, want %q", got, expected)
+	}
+	return nil
+}
+
+// parseTagList parses a whitespace-separated tag list (docs/steps.md; ""
+// is empty), split as the bulk-ingest line format splits it.
+func parseTagList(s string) ([]tagma.Tag, error) {
+	fields, err := tagma.SplitUnquotedWhitespace(s)
+	if err != nil {
+		return nil, err
+	}
+	tags := make([]tagma.Tag, 0, len(fields))
+	for _, f := range fields {
+		t, err := tagma.ParseTag(f)
+		if err != nil {
+			return nil, fmt.Errorf("invalid tag %q: %w", f, err)
+		}
+		tags = append(tags, t)
+	}
+	return tags, nil
+}
+
 func equalStringSlices(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
@@ -432,6 +520,10 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	sc.Then(`^the postfix is `+stringArg+`$`, state.thePostfixIs)
 	sc.Then(`^compilation fails$`, state.compilationFails)
 	sc.Then(`^it matches exactly `+stringArg+`$`, state.itMatchesExactly)
+	sc.When(`^item `+stringArg+` is validated adding `+stringArg+` and removing `+stringArg+`$`, state.itemIsValidated)
+	sc.When(`^the config is checked$`, state.theConfigIsChecked)
+	sc.Then(`^the findings are `+stringArg+`$`, state.theFindingsAre)
+	sc.Then(`^the introduced findings are `+stringArg+`$`, state.theIntroducedFindingsAre)
 }
 
 // stringArg is the regex fragment for a single {string}-style step

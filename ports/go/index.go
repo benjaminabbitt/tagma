@@ -478,44 +478,60 @@ func (idx *Index) HideConfig() HideConfig {
 
 // arityConfig derives the current tagma.arity config (SPEC.md §8) by
 // reading tagma.arity:<target>=<arity> tags back out of the store — the
-// same self-hosted pattern as hiddenNamespaces: an internal scan of
+// same self-hosted pattern as hiddenPatterns: an internal scan of
 // idx.items that bypasses the query-time hide (tagma.arity is itself under
-// the hidden "tagma" family).
-//
-// Each config tag's key is a <target> string packing the target
-// (namespace?, key) pair; splitConfigTarget recovers the pair via a
-// first-colon split. On a target with both a "=scalar" and a "=set" tag on
-// record (possible since this port has no untag/delete operation), scalar
-// wins — the same fail-safe posture as hide-ns's hide-wins rule. A target
-// whose only recorded value is neither "scalar" nor "set" configures
-// nothing and is omitted, so lookups fall through to the Set default.
+// the hidden "tagma" family). Resolution is resolveArity's, shared with
+// RulesFromTags (SPEC.md §13), so a write and a validate read the config
+// the same way.
 func (idx *Index) arityConfig() map[configTarget]arity {
-	type verdict struct{ saysScalar, saysSet bool }
-	targets := map[string]verdict{}
+	var facts []configFact
 	for _, tags := range idx.items {
 		for _, t := range tags {
-			if t.Namespace == nil || *t.Namespace != arityConfigNamespace || t.Value == nil {
-				continue
+			if t.Namespace != nil && *t.Namespace == arityConfigNamespace && t.Value != nil {
+				facts = append(facts, configFact{target: t.Key, value: *t.Value})
 			}
-			v := targets[t.Key]
-			switch *t.Value {
-			case "scalar":
-				v.saysScalar = true
-			case "set":
-				v.saysSet = true
-			default:
-				continue // uninterpretable value configures nothing (SPEC.md §8/§4)
-			}
-			targets[t.Key] = v
 		}
 	}
+	return resolveArity(facts)
+}
+
+// configFact is one (target, value) fact — as if decoded from a single
+// valued tagma.<facet>:<target>=<value> config tag: target is the tag's own
+// key, value its value.
+type configFact struct {
+	target string
+	value  string
+}
+
+// exactTarget recovers an exact target (namespace?, key) from a config
+// tag's <target> key (SPEC.md §8's first-colon split, shared by arity,
+// type, enum and range), or false when it configures nothing (SPEC.md §14
+// malformed-target): an empty namespace or key part (":k", "ns:"), or a
+// "*" in either — those facets take exact targets, not §7 patterns.
+func exactTarget(target string) (configTarget, bool) {
+	t := splitConfigTarget(target)
+	bad := func(part string) bool { return part == "" || part == "*" }
+	if bad(t.key) || (t.nsPresent && bad(t.ns)) {
+		return configTarget{}, false
+	}
+	return t, true
+}
+
+// resolveArity is SPEC.md §8's arity resolution over (target, value)
+// facts — one per tagma.arity:<target>=<value> tag on record, whatever its
+// source (the index's items, or RulesFromTags's tag list). A target with a
+// "scalar" fact is scalar (scalar wins over set); every other target is
+// the Set default (arityLookup), which an explicit "set", any other value,
+// or a malformed target (exactTarget) leaves it at — so only the scalar
+// targets are recorded.
+func resolveArity(facts []configFact) map[configTarget]arity {
 	config := map[configTarget]arity{}
-	for target, v := range targets {
-		switch {
-		case v.saysScalar:
-			config[splitConfigTarget(target)] = arityScalar
-		case v.saysSet:
-			config[splitConfigTarget(target)] = arityDefault
+	for _, f := range facts {
+		if f.value != "scalar" {
+			continue
+		}
+		if t, ok := exactTarget(f.target); ok {
+			config[t] = arityScalar
 		}
 	}
 	return config
@@ -560,37 +576,48 @@ const typeConfigNamespace = "tagma.type"
 // reading tagma.type:<target>=<typename> tags back out of the store — the
 // same self-hosted pattern as arityConfig/hiddenPatterns: an internal
 // scan of idx.items that bypasses the query-time hide (tagma.type is
-// itself under the hidden "tagma" family).
-//
-// Unlike arity's scalar/set (an ordered pair with a most-restrictive
-// winner) or hide's true/false (hide-wins), declared type *names* have no
-// ordering to break a tie with — SPEC.md §9's conflict rule is instead: a
-// target with more than one *distinct* declared type name on record
-// disables typed comparison for that target outright, so such a target is
-// simply omitted here (falling through to the numeric grammar), rather
-// than resolving to some picked winner.
+// itself under the hidden "tagma" family). Resolution is resolveTypes's,
+// shared with RulesFromTags.
 func (idx *Index) typeConfig() map[configTarget]string {
-	names := map[string]map[string]struct{}{} // target -> set of distinct declared names
+	var facts []configFact
 	for _, tags := range idx.items {
 		for _, t := range tags {
-			if t.Namespace == nil || *t.Namespace != typeConfigNamespace || t.Value == nil {
-				continue
+			if t.Namespace != nil && *t.Namespace == typeConfigNamespace && t.Value != nil {
+				facts = append(facts, configFact{target: t.Key, value: *t.Value})
 			}
-			set, ok := names[t.Key]
-			if !ok {
-				set = map[string]struct{}{}
-				names[t.Key] = set
-			}
-			set[*t.Value] = struct{}{}
 		}
 	}
+	return resolveTypes(facts)
+}
+
+// resolveTypes is SPEC.md §9's type resolution over (target, name) facts —
+// one per valued tagma.type:<target>=<name> tag on record. Unlike arity's
+// scalar/set (an ordered pair with a most-restrictive winner) or hide's
+// true/false (hide-wins), declared type *names* have no ordering to break
+// a tie with — SPEC.md §9's conflict rule is instead: a target with more
+// than one *distinct* declared type name on record disables typed
+// comparison for that target outright, so such a target (like a malformed
+// one, exactTarget) is simply omitted here, falling through to the
+// numeric grammar, rather than resolving to some picked winner.
+func resolveTypes(facts []configFact) map[configTarget]string {
+	names := map[configTarget]map[string]struct{}{}
+	for _, f := range facts {
+		t, ok := exactTarget(f.target)
+		if !ok {
+			continue
+		}
+		if names[t] == nil {
+			names[t] = map[string]struct{}{}
+		}
+		names[t][f.value] = struct{}{}
+	}
 	config := map[configTarget]string{}
-	for target, set := range names {
+	for t, set := range names {
 		if len(set) != 1 {
-			continue // no declaration, or a conflicting one: fall back to numeric
+			continue // a conflicting declaration: fall back to numeric
 		}
 		for name := range set {
-			config[splitConfigTarget(target)] = name
+			config[t] = name
 		}
 	}
 	return config
