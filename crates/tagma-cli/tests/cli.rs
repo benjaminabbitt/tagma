@@ -346,3 +346,122 @@ fn findings_keep_a_space_literal_rather_than_escaping_it() {
         .success()
         .stdout(predicate::str::contains(r#""tag":"note=\"a b\"""#));
 }
+
+#[test]
+fn query_with_two_arguments_not_led_by_postfix_is_a_bad_invocation() {
+    tagma()
+        .args(["query", "urgent", "note"])
+        .write_stdin(FIXTURE)
+        .assert()
+        .failure()
+        .code(2)
+        .stdout(predicate::str::is_empty());
+}
+
+// --- rules validate / rules check: a standalone rule set ----------------
+
+/// Config tags as `rules` reads them: whitespace-separated, several lines,
+/// no ids; non-config tags are ignored.
+const RULES_CONFIG: &str = "tagma.enum:k=a\n\n  tagma.enum:j=a unrelated=1\n";
+
+#[test]
+fn rules_validate_judges_the_current_set_like_validate_judges_an_item() {
+    let via_index = tagma()
+        .args(["validate", "item", "--add", "k=y", "--remove", "k=z"])
+        .write_stdin(RULES_FIXTURE)
+        .assert()
+        .success();
+    let via_index = via_index.get_output().stdout.clone();
+    assert!(!via_index.is_empty());
+    tagma()
+        .args([
+            "rules",
+            "validate",
+            "--current",
+            "k=z",
+            "--current",
+            "j=bad",
+        ])
+        .args(["--add", "k=y", "--remove", "k=z"])
+        .write_stdin(RULES_CONFIG)
+        .assert()
+        .success()
+        .stdout(via_index);
+}
+
+#[test]
+fn rules_validate_with_no_current_set_starts_from_nothing() {
+    tagma()
+        .args(["rules", "validate", "--add", "k=b"])
+        .write_stdin(RULES_CONFIG)
+        .assert()
+        .success()
+        .stdout(concat!(
+            r#"{"code":"not-in-enum","tag":"k=b","args":[["allowed","a"]],"origin":"introduced"}"#,
+            "\n"
+        ));
+}
+
+#[test]
+fn rules_check_reports_the_stdin_config() {
+    tagma()
+        .args(["rules", "check"])
+        .write_stdin("tagma.arity:k=scalar\ntagma.arity:k=set\n")
+        .assert()
+        .success()
+        .stdout(concat!(
+            r#"{"code":"conflict","tag":"tagma.arity:k=set","args":[["facet","arity"],["resolution","scalar"]],"origin":"existing"}"#,
+            "\n"
+        ));
+    tagma()
+        .args(["rules", "check"])
+        .write_stdin("")
+        .assert()
+        .success()
+        .stdout("");
+}
+
+#[test]
+fn rules_bad_tags_fail_with_exit_1() {
+    tagma()
+        .args(["rules", "validate", "--current", "=5"])
+        .write_stdin(RULES_CONFIG)
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("--current"));
+    tagma()
+        .args(["rules", "check"])
+        .write_stdin("tagma.enum:k=a\n=5\n")
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(predicate::str::is_empty());
+    tagma()
+        .args(["rules", "validate"])
+        .write_stdin("k=\"open\n")
+        .assert()
+        .failure()
+        .code(1);
+}
+
+#[test]
+fn rules_bad_invocations_exit_2() {
+    for args in [
+        &["rules"][..],
+        &["rules", "bogus"],
+        &["rules", "check", "extra"],
+        &["rules", "validate", "--current"],
+        &["rules", "validate", "--bogus", "k=1"],
+        // --current belongs to `rules validate` only.
+        &["validate", "item", "--current", "k=1"],
+    ] {
+        tagma()
+            .args(args)
+            .write_stdin(RULES_FIXTURE)
+            .assert()
+            .failure()
+            .code(2)
+            .stdout(predicate::str::is_empty());
+    }
+}

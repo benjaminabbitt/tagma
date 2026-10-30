@@ -5,7 +5,7 @@ use std::io::{self, BufRead, Write};
 use std::process::ExitCode;
 
 use tagma_core::token::split_unquoted_whitespace;
-use tagma_core::{Change, Finding, Index, Tag};
+use tagma_core::{Change, Finding, Index, Rules, Tag};
 
 const USAGE: &str = "\
 usage: tagma <command> [args]
@@ -19,6 +19,10 @@ commands:
                              store; one JSON finding per line
     check                    check the stdin store's tagma.* config; one
                              JSON finding per line
+    rules validate [--current <tags>]... [--add <tags>]... [--remove <tags>]...
+    rules check              as validate/check, against config tags read from
+                             stdin (whitespace-separated, no ids) instead of
+                             a store; validate judges --current, not an item
 ";
 
 fn main() -> ExitCode {
@@ -44,6 +48,13 @@ fn main() -> ExitCode {
         "validate" => run_validate(rest, &mut stdout, &mut stderr),
         "check" => match rest {
             [] => run_check(&mut stdout, &mut stderr),
+            _ => bad_invocation(&mut stderr),
+        },
+        "rules" => match rest {
+            [sub, flags @ ..] if sub == "validate" => {
+                run_rules_validate(flags, &mut stdout, &mut stderr)
+            }
+            [sub] if sub == "check" => run_rules_check(&mut stdout, &mut stderr),
             _ => bad_invocation(&mut stderr),
         },
         _ => bad_invocation(&mut stderr),
@@ -159,32 +170,105 @@ fn parse_tag_list(list: &str) -> Result<Vec<Tag>, String> {
 /// every finding for the tag set item `<id>` of the stdin store would carry
 /// after the change, one JSON object per line.
 fn run_validate(rest: &[String], stdout: &mut impl Write, stderr: &mut impl Write) -> ExitCode {
-    let Some((id, mut flags)) = rest.split_first() else {
+    let Some((id, flags)) = rest.split_first() else {
         return bad_invocation(stderr);
     };
-    let mut change = Change::default();
-    while let Some((flag, tail)) = flags.split_first() {
-        let Some((list, tail)) = tail.split_first() else {
-            return bad_invocation(stderr);
-        };
-        let into = match flag.as_str() {
-            "--add" => &mut change.add,
-            "--remove" => &mut change.remove,
-            _ => return bad_invocation(stderr),
-        };
-        match parse_tag_list(list) {
-            Ok(tags) => into.extend(tags),
-            Err(e) => {
-                let _ = writeln!(stderr, "{flag}: {e}");
-                return ExitCode::FAILURE;
-            }
-        }
-        flags = tail;
-    }
+    let (change, _) = match parse_change_flags(flags, false) {
+        Ok(parsed) => parsed,
+        Err(code) => return code_exit(code, stderr),
+    };
     let Some(index) = read_store(stderr) else {
         return ExitCode::FAILURE;
     };
     print_findings(&index.validate(id, &change), stdout)
+}
+
+/// How a flag list failed: a bad invocation (exit 2), or a bad tag in the
+/// named flag (exit 1).
+enum FlagError {
+    Usage,
+    Tag(String, String),
+}
+
+/// Reports a [`FlagError`] and returns its exit code.
+fn code_exit(e: FlagError, stderr: &mut impl Write) -> ExitCode {
+    match e {
+        FlagError::Usage => bad_invocation(stderr),
+        FlagError::Tag(flag, e) => {
+            let _ = writeln!(stderr, "{flag}: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Parses `--add`/`--remove` (and, with `with_current`, `--current`) flag
+/// pairs, each value a tag list, every flag repeatable.
+fn parse_change_flags(
+    mut flags: &[String],
+    with_current: bool,
+) -> Result<(Change, Vec<Tag>), FlagError> {
+    let mut change = Change::default();
+    let mut current = Vec::new();
+    while let Some((flag, tail)) = flags.split_first() {
+        let Some((list, tail)) = tail.split_first() else {
+            return Err(FlagError::Usage);
+        };
+        let into = match flag.as_str() {
+            "--add" => &mut change.add,
+            "--remove" => &mut change.remove,
+            "--current" if with_current => &mut current,
+            _ => return Err(FlagError::Usage),
+        };
+        into.extend(parse_tag_list(list).map_err(|e| FlagError::Tag(flag.clone(), e))?);
+        flags = tail;
+    }
+    Ok((change, current))
+}
+
+/// Reads config tags from stdin — whitespace-separated, any number per
+/// line, no item ids — into a standalone rule set ([`Rules::from_tags`];
+/// tags outside the `tagma` family are ignored).
+fn read_rules(stderr: &mut impl Write) -> Option<Rules> {
+    let mut tags = Vec::new();
+    for line in io::stdin().lock().lines() {
+        let parsed = line
+            .map_err(|e| format!("failed to read stdin: {e}"))
+            .and_then(|l| parse_tag_list(&l));
+        match parsed {
+            Ok(t) => tags.extend(t),
+            Err(e) => {
+                let _ = writeln!(stderr, "{e}");
+                return None;
+            }
+        }
+    }
+    Some(Rules::from_tags(&tags))
+}
+
+/// `rules validate [--current <tags>]... [--add <tags>]... [--remove
+/// <tags>]...` (SPEC.md §13): `validate` against the config tags on stdin,
+/// judging the caller's `--current` set rather than an item of a store.
+fn run_rules_validate(
+    flags: &[String],
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+) -> ExitCode {
+    let (change, current) = match parse_change_flags(flags, true) {
+        Ok(parsed) => parsed,
+        Err(code) => return code_exit(code, stderr),
+    };
+    let Some(rules) = read_rules(stderr) else {
+        return ExitCode::FAILURE;
+    };
+    print_findings(&rules.validate(&current, &change), stdout)
+}
+
+/// `rules check` (SPEC.md §14): `check` against the config tags on stdin.
+fn run_rules_check(stdout: &mut impl Write, stderr: &mut impl Write) -> ExitCode {
+    let Some(rules) = read_rules(stderr) else {
+        return ExitCode::FAILURE;
+    };
+    print_findings(&rules.check(), stdout)
 }
 
 /// `check` (SPEC.md §14): every finding about the stdin store's own
