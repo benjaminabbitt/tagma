@@ -28,3 +28,37 @@ jobs:
 
       - name: Check
         run: just check
+
+  # The JS binding: wasm-pack builds tagma-core to wasm, then the node:test
+  # smoke tests and cucumber-js conformance run against it. Its own job so
+  # `just check` stays toolchain-light (no node, no wasm toolchain).
+  conformance-js:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      # Pinned to the versions conformance-js is verified with locally.
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.2
+
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack@0.15.0
+
+      - name: Install just
+        uses: extractions/setup-just@v2
+
+      - name: Setup JS
+        run: just setup-js
+
+      - name: Conformance (JS)
+        run: just conformance-js
