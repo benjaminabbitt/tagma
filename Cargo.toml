@@ -1,3 +1,11 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
+
+# Complexity gate (architecture-fixes G1), as taskloom's: clippy's defaults
+# for cognitive complexity (25) and function length (100 lines), and a
+# nesting threshold of 6 set in clippy.toml. `just lint` denies warnings.
+[workspace.lints.clippy]
+cognitive_complexity = "warn"
+too_many_lines = "warn"
+excessive_nesting = "warn"

@@ -17,3 +17,6 @@ tagma-core = { version = "0.1.0", path = "../tagma-core" }
 # PATH (or PROTOC).
 [build-dependencies]
 prost-build = "0.14"
+
+[lints]
+workspace = true

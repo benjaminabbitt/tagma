@@ -10,3 +10,6 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 tagma-core = { path = "../tagma-core" }
+
+[lints]
+workspace = true

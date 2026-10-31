@@ -18,3 +18,6 @@ harness = false
 [[bench]]
 name = "engine"
 harness = false
+
+[lints]
+workspace = true

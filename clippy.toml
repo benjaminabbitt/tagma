@@ -1,0 +1,2 @@
+# Workspace clippy settings (the complexity gate, architecture-fixes G1).
+excessive-nesting-threshold = 6
