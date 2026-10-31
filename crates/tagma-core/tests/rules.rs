@@ -1,7 +1,6 @@
-//! Red tests for SPEC.md §10–§15 (draft): the `permit`, `enum`, `range` and
-//! `keys-per-item` facets, `validate` (§13) and `check` (§14). Written before the
-//! implementation, for the owner's review — every test here fails today on
-//! the `todo!()` stubs in `src/rules.rs` / `Index::{rules,validate,check}`.
+//! SPEC.md §10–§15: the `permit`, `enum`, `range` and `keys-per-item`
+//! facets, `validate` (§13) and `check` (§14). Each was written before its
+//! implementation, for the owner's review.
 
 use std::cmp::Ordering;
 use std::sync::Arc;
