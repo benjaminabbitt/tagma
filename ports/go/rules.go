@@ -20,12 +20,158 @@ import (
 // tagma.permit:"*:*"=true were always on record.
 const permitDefaultTarget = "*:*"
 
-// facets are the tagma facets (SPEC.md §14 "Reserved facets"); any other
-// namespace in the family is unknown-facet.
-var facets = []string{"hide", "arity", "type", "permit", "enum", "range", keysPerItem}
+// facet is a tagma facet (SPEC.md §14 "Reserved facets"): what a config tag
+// in the namespace tagma.<facet> configures, and so how its target and value
+// are read and how two tags on one target settle. Its static properties are
+// its row in facetTable.
+type facet int
 
-// keysPerItem is the tagma.keys-per-item facet (SPEC.md §15).
-const keysPerItem = "keys-per-item"
+const (
+	facetHide facet = iota
+	facetArity
+	facetType
+	facetPermit
+	facetEnum
+	facetRange
+	facetKeysPerItem
+)
+
+// targetShape is the shape of target a facet reads from a config tag's key
+// (SPEC.md §14 malformed-target).
+type targetShape int
+
+const (
+	// shapePattern is a §7 pattern (hide, permit): neither side of its
+	// first-colon split empty.
+	shapePattern targetShape = iota
+	// shapeExact is an exact (namespace?, key) (§8): no empty side, no "*".
+	shapeExact
+	// shapeNamespace is one exact, named namespace (§15).
+	shapeNamespace
+)
+
+// accepts reports whether key is a well-formed target of this shape.
+func (s targetShape) accepts(key string) bool {
+	switch s {
+	case shapePattern:
+		return patternTargetOK(key)
+	case shapeExact:
+		_, ok := exactTarget(key)
+		return ok
+	default:
+		return namespaceTarget(key)
+	}
+}
+
+// settlement is how the distinct sound tags on one target settle (SPEC.md
+// §14 conflict): the resolution and the tags that lose to it, or ok false
+// when nothing conflicts.
+type settlement func(tags []Tag) (resolution string, losers []Tag, ok bool)
+
+// facetSpec is one facet's row of facetTable.
+type facetSpec struct {
+	// name is the facet's name, the namespace tagma.<name> its tags live in.
+	name string
+	// target is the shape of target its tags take.
+	target targetShape
+	// expected is the expected spelling of its malformed-value (§14).
+	expected string
+	// defaultTarget is a boolean facet's implicit default target (§7, §10),
+	// which a =false can deactivate with no =true on record; "" for a facet
+	// with no default.
+	defaultTarget string
+	// conflict settles two or more tags on one target; nil when the
+	// facet's values accumulate instead (enum, range).
+	conflict settlement
+}
+
+// facetTable holds every facet's static properties, indexed by facet.
+var facetTable = [...]facetSpec{
+	facetHide:        {"hide", shapePattern, "true|false", hideDefaultTarget, twoValued("true", "false")},
+	facetArity:       {"arity", shapeExact, "scalar|set", "", twoValued("scalar", "set")},
+	facetType:        {"type", shapeExact, "type name", "", noWinner("disabled")},
+	facetPermit:      {"permit", shapePattern, "true|false", permitDefaultTarget, twoValued("false", "true")},
+	facetEnum:        {"enum", shapeExact, "value", "", nil},
+	facetRange:       {"range", shapeExact, "lo..hi", "", nil},
+	facetKeysPerItem: {"keys-per-item", shapeNamespace, "non-negative integer", "", leastLimit},
+}
+
+// spec is f's row of facetTable.
+func (f facet) spec() facetSpec { return facetTable[f] }
+
+// name is the facet's name, the namespace tagma.<name> its tags live in.
+func (f facet) name() string { return f.spec().name }
+
+// facetNamed is the facet a tagma-family namespace names, or ok false and
+// the unknown facet name it spells instead (SPEC.md §14 unknown-facet): ""
+// for tagma itself, else the namespace with its leading "tagma." removed.
+func facetNamed(ns *string) (f facet, name string, ok bool) {
+	if ns != nil {
+		if rest, found := strings.CutPrefix(*ns, "tagma."); found {
+			name = rest
+		}
+	}
+	for i, s := range facetTable {
+		if s.name == name {
+			return facet(i), name, true
+		}
+	}
+	return 0, name, false
+}
+
+// conflict settles the distinct sound tags on one target (SPEC.md §14
+// conflict): a lone tag, or a facet whose values accumulate, settles
+// nothing.
+func (f facet) conflict(tags []Tag) (resolution string, losers []Tag, ok bool) {
+	settle := f.spec().conflict
+	if settle == nil || len(tags) < 2 {
+		return "", nil, false
+	}
+	return settle(tags)
+}
+
+// twoValued settles a two-valued facet (hide, permit, arity): the tags
+// carrying loser lose to winner.
+func twoValued(winner, loser string) settlement {
+	return func(tags []Tag) (string, []Tag, bool) {
+		var losers []Tag
+		for _, t := range tags {
+			if t.Value != nil && *t.Value == loser {
+				losers = append(losers, t)
+			}
+		}
+		return winner, losers, true
+	}
+}
+
+// noWinner settles a facet whose distinct values have no winner (type):
+// every tag loses, and the target resolves to resolution.
+func noWinner(resolution string) settlement {
+	return func(tags []Tag) (string, []Tag, bool) {
+		return resolution, tags, true
+	}
+}
+
+// leastLimit is §15's settlement of the limits on one keys-per-item target:
+// the smallest wins, and every larger one loses to it.
+func leastLimit(tags []Tag) (string, []Tag, bool) {
+	least, found := "", false
+	for _, t := range tags {
+		if limit, ok := limitValue(t); ok && (!found || cmpDigits(limit, least) < 0) {
+			least, found = limit, true
+		}
+	}
+	if !found {
+		return "", nil, false
+	}
+	var losers []Tag
+	for _, t := range tags {
+		if limit, ok := limitValue(t); ok && cmpDigits(limit, least) > 0 {
+			losers = append(losers, t)
+		}
+	}
+	return least, losers, true
+}
 
 // namespaceTarget reports whether a tagma.keys-per-item <target> is one
 // exact, named namespace (SPEC.md §15): non-empty, with no ":" and not the
@@ -193,20 +339,6 @@ func inTagmaFamily(ns *string) bool {
 	return ns != nil && covers(*ns, "tagma")
 }
 
-// facetOf is the facet a tagma-family namespace names: "" for tagma
-// itself, else the namespace with its leading "tagma." removed (SPEC.md
-// §14).
-func facetOf(ns *string) string {
-	if ns == nil {
-		return ""
-	}
-	rest, found := strings.CutPrefix(*ns, "tagma.")
-	if !found {
-		return ""
-	}
-	return rest
-}
-
 // patternTargetOK reports whether a hide/permit <target> is well-formed:
 // neither the namespace nor the key part of its first-colon split is empty
 // (SPEC.md §14 malformed-target).
@@ -256,16 +388,6 @@ func bound(b string) *string {
 	}
 	return &b
 }
-
-// rangeFit is how one value fares against one range declaration (SPEC.md
-// §12).
-type rangeFit int
-
-const (
-	fitWithin rangeFit = iota
-	fitOutside
-	fitNotComparable
-)
 
 // rawFinding is a finding before its origin is known.
 type rawFinding struct {
@@ -375,6 +497,29 @@ func sortedUnique(s []string) []string {
 // other tag is ignored. The result has no comparators registered (see
 // Rules.RegisterType).
 func RulesFromTags(tags []Tag) *Rules {
+	config := configTags(tags)
+	permit := activePermits(facetTags(config, facetPermit))
+	permitTargets := make([]string, 0, len(permit))
+	for target := range permit {
+		permitTargets = append(permitTargets, target)
+	}
+	sort.Strings(permitTargets)
+	return &Rules{
+		config:        config,
+		permit:        permit,
+		permitTargets: permitTargets,
+		arity:         resolveArity(configFacts(facetTags(config, facetArity))),
+		types:         resolveTypes(configFacts(facetTags(config, facetType))),
+		enums:         valuesByTarget(facetTags(config, facetEnum)),
+		ranges:        valuesByTarget(facetTags(config, facetRange)),
+		keysPerItem:   leastLimits(facetTags(config, facetKeysPerItem)),
+		comparators:   map[string]TypeComparator{},
+	}
+}
+
+// configTags is every distinct tagma-family tag among tags, sorted by
+// spelling.
+func configTags(tags []Tag) []Tag {
 	var config []Tag
 	for _, t := range tags {
 		if inTagmaFamily(t.Namespace) {
@@ -388,30 +533,39 @@ func RulesFromTags(tags []Tag) *Rules {
 			deduped = append(deduped, t)
 		}
 	}
-	config = deduped
+	return deduped
+}
 
-	of := func(facet string) []Tag {
-		var out []Tag
-		for _, t := range config {
-			if facetOf(t.Namespace) == facet {
-				out = append(out, t)
-			}
+// facetTags is the tags of config in f's namespace.
+func facetTags(config []Tag, f facet) []Tag {
+	var out []Tag
+	for _, t := range config {
+		if g, _, ok := facetNamed(t.Namespace); ok && g == f {
+			out = append(out, t)
 		}
-		return out
 	}
-	facts := func(facet string) []configFact {
-		var out []configFact
-		for _, t := range of(facet) {
-			if t.Value != nil {
-				out = append(out, configFact{target: t.Key, value: *t.Value})
-			}
-		}
-		return out
-	}
+	return out
+}
 
+// configFacts is the valued tags among tags as (target, value) facts, for
+// the §8/§9 resolution.
+func configFacts(tags []Tag) []configFact {
+	var out []configFact
+	for _, t := range tags {
+		if t.Value != nil {
+			out = append(out, configFact{target: t.Key, value: *t.Value})
+		}
+	}
+	return out
+}
+
+// activePermits is the active permit patterns by target string (SPEC.md
+// §10) the permit tags configure: the implicit default and every =true
+// target, less every target with a =false.
+func activePermits(permits []Tag) map[string]hidePattern {
 	permitTrue := map[string]bool{}
 	permitFalse := map[string]bool{}
-	for _, t := range of("permit") {
+	for _, t := range permits {
 		if !patternTargetOK(t.Key) {
 			continue
 		}
@@ -433,27 +587,29 @@ func RulesFromTags(tags []Tag) *Rules {
 			permit[target] = parseHideTarget(target)
 		}
 	}
-	permitTargets := make([]string, 0, len(permit))
-	for target := range permit {
-		permitTargets = append(permitTargets, target)
-	}
-	sort.Strings(permitTargets)
+	return permit
+}
 
-	valued := func(facet string) map[configTarget][]string {
-		m := map[configTarget][]string{}
-		for _, t := range of(facet) {
-			if target, ok := exactTarget(t.Key); ok && t.Value != nil {
-				m[target] = append(m[target], *t.Value)
-			}
+// valuesByTarget is each exact target's distinct declared values among tags
+// (enum §11, range §12), sorted.
+func valuesByTarget(tags []Tag) map[configTarget][]string {
+	m := map[configTarget][]string{}
+	for _, t := range tags {
+		if target, ok := exactTarget(t.Key); ok && t.Value != nil {
+			m[target] = append(m[target], *t.Value)
 		}
-		for target, vs := range m {
-			m[target] = sortedUnique(vs)
-		}
-		return m
 	}
+	for target, vs := range m {
+		m[target] = sortedUnique(vs)
+	}
+	return m
+}
 
+// leastLimits is each limited namespace's smallest declared
+// keys-per-item limit (SPEC.md §15), canonical.
+func leastLimits(tags []Tag) map[string]string {
 	limits := map[string]string{}
-	for _, t := range of(keysPerItem) {
+	for _, t := range tags {
 		limit, ok := limitValue(t)
 		if !ok || !namespaceTarget(t.Key) {
 			continue
@@ -462,18 +618,7 @@ func RulesFromTags(tags []Tag) *Rules {
 			limits[t.Key] = limit
 		}
 	}
-
-	return &Rules{
-		config:        config,
-		permit:        permit,
-		permitTargets: permitTargets,
-		arity:         resolveArity(facts("arity")),
-		types:         resolveTypes(facts("type")),
-		enums:         valued("enum"),
-		ranges:        valued("range"),
-		keysPerItem:   limits,
-		comparators:   map[string]TypeComparator{},
-	}
+	return limits
 }
 
 // RegisterType registers a §9 comparator under name, as Index.RegisterType
@@ -532,18 +677,20 @@ func (r *Rules) parseRange(target configTarget, raw string) (lo, hi *string, ok 
 	return lo, hi, true
 }
 
-// fit is how value fares against the range raw on target (SPEC.md §12),
-// or ok == false if raw configures nothing.
-func (r *Rules) fit(target configTarget, raw string, value *string) (rangeFit, bool) {
+// rangeFault is the §13 finding value draws from the range raw on target
+// (SPEC.md §12): CodeOutOfRange or CodeNotComparable, or ok false when it
+// lies within, or when raw configures nothing. Validate's range findings
+// and Check's dead-enum-value reasons both read it.
+func (r *Rules) rangeFault(target configTarget, raw string, value *string) (Code, bool) {
 	lo, hi, ok := r.parseRange(target, raw)
 	if !ok {
-		return 0, false
+		return "", false
 	}
 	if value == nil {
-		return fitNotComparable, true
+		return CodeNotComparable, true
 	}
-	fit := fitWithin
-	for _, side := range []struct {
+	var fault Code
+	for _, side := range [...]struct {
 		bound *string
 		bad   int
 	}{{lo, -1}, {hi, 1}} {
@@ -552,13 +699,25 @@ func (r *Rules) fit(target configTarget, raw string, value *string) (rangeFit, b
 		}
 		c, ok := r.compare(target, *value, *side.bound)
 		if !ok {
-			return fitNotComparable, true
+			return CodeNotComparable, true
 		}
 		if sign(c) == side.bad {
-			fit = fitOutside
+			fault = CodeOutOfRange
 		}
 	}
-	return fit, true
+	return fault, fault != ""
+}
+
+// typeMismatch reports whether target's declared, registered comparator
+// cannot order v against itself (SPEC.md §9, §13 type-mismatch). Validate's
+// type findings and Check's dead-enum-value reasons both read it.
+func (r *Rules) typeMismatch(target configTarget, v string) bool {
+	cmp, ok := r.comparatorFor(target)
+	if !ok {
+		return false
+	}
+	c, ok := cmp.Compare(v, v)
+	return !ok || c != 0
 }
 
 // sign is c pinned to -1, 0 or 1.
@@ -638,59 +797,80 @@ func (r *Rules) apply(current []Tag, change Change) []Tag {
 // assigned.
 func (r *Rules) judge(set []Tag) []rawFinding {
 	var out []rawFinding
+	for _, tag := range set {
+		out = append(out, r.tagFaults(tag)...)
+	}
+	out = append(out, r.arityExceeded(set)...)
+	return append(out, r.tooManyKeys(set)...)
+}
+
+// tagFaults is the §13 findings one tag draws on its own: not permitted,
+// not in its target's enum, outside one of its ranges, or a value its
+// target's type cannot order.
+func (r *Rules) tagFaults(tag Tag) []rawFinding {
+	var out []rawFinding
+	target := targetOf(tag)
+	if !r.permitted(tag.Namespace, tag.Key) {
+		out = append(out, newFinding(CodeNotPermitted, tag))
+	}
+	if allowed, ok := r.enums[target]; ok {
+		if tag.Value == nil || !containsString(allowed, *tag.Value) {
+			args := make([]Arg, len(allowed))
+			for i, a := range allowed {
+				args[i] = Arg{"allowed", a}
+			}
+			out = append(out, newFinding(CodeNotInEnum, tag, args...))
+		}
+	}
+	for _, raw := range r.ranges[target] {
+		if code, ok := r.rangeFault(target, raw, tag.Value); ok {
+			out = append(out, newFinding(code, tag, Arg{"range", raw}))
+		}
+	}
+	if tag.Value != nil && r.typeMismatch(target, *tag.Value) {
+		out = append(out, newFinding(CodeTypeMismatch, tag, Arg{"type", r.types[target]}))
+	}
+	return out
+}
+
+// arityExceeded is §13 arity-exceeded: every tag on a scalar target that
+// carries more than one distinct tag in set.
+func (r *Rules) arityExceeded(set []Tag) []rawFinding {
 	// Distinct tags per scalar target, by spelling.
 	byScalarTarget := map[configTarget]map[string]Tag{}
 	for _, tag := range set {
 		target := targetOf(tag)
-		if !r.permitted(tag.Namespace, tag.Key) {
-			out = append(out, rawFinding{CodeNotPermitted, tag, nil})
+		if r.arity[target] != arityScalar {
+			continue
 		}
-		if allowed, ok := r.enums[target]; ok {
-			if tag.Value == nil || !containsString(allowed, *tag.Value) {
-				args := make([]Arg, len(allowed))
-				for i, a := range allowed {
-					args[i] = Arg{"allowed", a}
-				}
-				out = append(out, rawFinding{CodeNotInEnum, tag, args})
-			}
+		if byScalarTarget[target] == nil {
+			byScalarTarget[target] = map[string]Tag{}
 		}
-		for _, raw := range r.ranges[target] {
-			fit, ok := r.fit(target, raw, tag.Value)
-			if !ok || fit == fitWithin {
-				continue
-			}
-			code := CodeOutOfRange
-			if fit == fitNotComparable {
-				code = CodeNotComparable
-			}
-			out = append(out, rawFinding{code, tag, []Arg{{"range", raw}}})
-		}
-		if cmp, ok := r.comparatorFor(target); ok && tag.Value != nil {
-			if c, ok := cmp.Compare(*tag.Value, *tag.Value); !ok || c != 0 {
-				out = append(out, rawFinding{CodeTypeMismatch, tag, []Arg{{"type", r.types[target]}}})
-			}
-		}
-		if r.arity[target] == arityScalar {
-			if byScalarTarget[target] == nil {
-				byScalarTarget[target] = map[string]Tag{}
-			}
-			byScalarTarget[target][tag.String()] = tag
-		}
+		byScalarTarget[target][tag.String()] = tag
 	}
+	var out []rawFinding
 	for _, tags := range byScalarTarget {
 		if len(tags) < 2 {
 			continue
 		}
 		for _, tag := range tags {
-			out = append(out, rawFinding{CodeArityExceeded, tag, []Arg{{"arity", "scalar"}}})
+			out = append(out, newFinding(CodeArityExceeded, tag, Arg{"arity", "scalar"}))
 		}
 	}
-	// §15: per limited namespace, its distinct keys and its tags.
-	type keyed struct {
-		keys map[string]bool
-		tags map[string]Tag
-	}
-	byNamespace := map[string]*keyed{}
+	return out
+}
+
+// namespaceKeys is one limited namespace's distinct keys and distinct tags
+// (by spelling) in a set (SPEC.md §15).
+type namespaceKeys struct {
+	keys map[string]bool
+	tags map[string]Tag
+}
+
+// tooManyKeys is §15 too-many-keys: every tag in a namespace whose distinct
+// keys in set exceed its keys-per-item limit.
+func (r *Rules) tooManyKeys(set []Tag) []rawFinding {
+	byNamespace := map[string]*namespaceKeys{}
 	for _, tag := range set {
 		if tag.Namespace == nil {
 			continue
@@ -701,12 +881,13 @@ func (r *Rules) judge(set []Tag) []rawFinding {
 		}
 		k := byNamespace[ns]
 		if k == nil {
-			k = &keyed{map[string]bool{}, map[string]Tag{}}
+			k = &namespaceKeys{map[string]bool{}, map[string]Tag{}}
 			byNamespace[ns] = k
 		}
 		k.keys[tag.Key] = true
 		k.tags[tag.String()] = tag
 	}
+	var out []rawFinding
 	for ns, k := range byNamespace {
 		limit := r.keysPerItem[ns]
 		if cmpDigits(strconv.Itoa(len(k.keys)), limit) <= 0 {
@@ -722,7 +903,7 @@ func (r *Rules) judge(set []Tag) []rawFinding {
 			args = append(args, Arg{"keys", key})
 		}
 		for _, tag := range k.tags {
-			out = append(out, rawFinding{CodeTooManyKeys, tag, args})
+			out = append(out, newFinding(CodeTooManyKeys, tag, args...))
 		}
 	}
 	return out
@@ -770,227 +951,215 @@ func (r *Rules) Validate(current []Tag, change Change) []Finding {
 	})
 }
 
-// group is the sound config tags of one facet on one target string.
-type group struct {
-	facet, target string
+// newFinding is a finding before its origin is known: code on tag, with
+// args.
+func newFinding(code Code, tag Tag, args ...Arg) rawFinding {
+	return rawFinding{code, tag, args}
 }
+
+// group names the sound config tags of one facet on one target string.
+type group struct {
+	facet  facet
+	target string
+}
+
+// byTarget is the sound config tags of a Check, grouped by facet and target
+// string.
+type byTarget map[group][]Tag
 
 // Check implements SPEC.md §14: the findings about the config itself,
 // every one OriginExisting. Pure; sorted as Validate's; never nil.
+//
+// Each config tag is first judged sound or not (soundFacet); the sound
+// ones, grouped by facet and target, are then judged per target
+// (checkTarget), per tag (checkRule) and, for permits, against each other
+// (checkShadowedPermits).
 func (r *Rules) Check() []Finding {
 	var out []rawFinding
-	finding := func(code Code, tag Tag, args ...Arg) {
-		out = append(out, rawFinding{code, tag, args})
-	}
-
-	// Pass 1: unknown facets, malformed targets and values. What survives
-	// configures something and is judged further.
-	type soundTag struct {
-		facet string
-		tag   Tag
-	}
-	var sound []soundTag
+	by := byTarget{}
 	for _, tag := range r.config {
-		facet := facetOf(tag.Namespace)
-		if !containsString(facets, facet) {
-			finding(CodeUnknownFacet, tag, Arg{"facet", facet})
+		f, fault, ok := r.soundFacet(tag)
+		if !ok {
+			out = append(out, fault)
 			continue
 		}
-		var targetOK bool
-		switch facet {
-		case "hide", "permit":
-			targetOK = patternTargetOK(tag.Key)
-		case keysPerItem:
-			targetOK = namespaceTarget(tag.Key)
-		default:
-			_, targetOK = exactTarget(tag.Key)
-		}
-		if !targetOK {
-			finding(CodeMalformedTarget, tag, Arg{"facet", facet})
-			continue
-		}
-		expected := ""
-		switch facet {
-		case "hide", "permit":
-			if _, ok := boolValue(tag); !ok {
-				expected = "true|false"
-			}
-		case "arity":
-			if tag.Value == nil || (*tag.Value != "scalar" && *tag.Value != "set") {
-				expected = "scalar|set"
-			}
-		case "enum":
-			if tag.Value == nil {
-				expected = "value"
-			}
-		case "type":
-			if tag.Value == nil {
-				expected = "type name"
-			}
-		case keysPerItem:
-			if _, ok := limitValue(tag); !ok {
-				expected = "non-negative integer"
-			}
-		default: // range
-			target, _ := exactTarget(tag.Key)
-			if tag.Value == nil {
-				expected = "lo..hi"
-			} else if _, _, ok := r.parseRange(target, *tag.Value); !ok {
-				expected = "lo..hi"
-			}
-		}
-		if expected != "" {
-			finding(CodeMalformedValue, tag, Arg{"facet", facet}, Arg{"expected", expected})
-			continue
-		}
-		sound = append(sound, soundTag{facet, tag})
+		g := group{f, tag.Key}
+		by[g] = append(by[g], tag)
 	}
+	for g, tags := range by {
+		out = append(out, checkTarget(g, tags)...)
+		for _, tag := range tags {
+			out = append(out, r.checkRule(g.facet, tag)...)
+		}
+	}
+	out = append(out, r.checkShadowedPermits(by)...)
+	return finish(out, func(rawFinding) Origin { return OriginExisting })
+}
 
-	// Group the sound tags by facet and target string.
-	by := map[group][]Tag{}
-	var groups []group
-	for _, s := range sound {
-		g := group{s.facet, s.tag.Key}
-		if _, seen := by[g]; !seen {
-			groups = append(groups, g)
-		}
-		by[g] = append(by[g], s.tag)
+// soundFacet is SPEC.md §14 for one config tag on its own: its facet when
+// the tag is sound (a known facet, a well-formed target and value), else ok
+// false and the unknown-facet, malformed-target or malformed-value finding.
+// Only sound tags configure anything, so only they are judged further.
+func (r *Rules) soundFacet(tag Tag) (f facet, fault rawFinding, ok bool) {
+	f, name, ok := facetNamed(tag.Namespace)
+	if !ok {
+		return 0, newFinding(CodeUnknownFacet, tag, Arg{"facet", name}), false
 	}
-	has := func(facet, target, value string) bool {
-		for _, t := range by[group{facet, target}] {
-			if t.Value != nil && *t.Value == value {
-				return true
-			}
-		}
-		return false
+	spec := f.spec()
+	if !spec.target.accepts(tag.Key) {
+		return 0, newFinding(CodeMalformedTarget, tag, Arg{"facet", name}), false
 	}
+	if !r.valueOK(f, tag) {
+		fault := newFinding(CodeMalformedValue, tag, Arg{"facet", name}, Arg{"expected", spec.expected})
+		return 0, fault, false
+	}
+	return f, rawFinding{}, true
+}
 
-	for _, g := range groups {
-		tags := by[g]
-		// §15: every limit larger than the smallest loses to it.
-		if g.facet == keysPerItem {
-			least := ""
-			for _, tag := range tags {
-				if limit, _ := limitValue(tag); least == "" || cmpDigits(limit, least) < 0 {
-					least = limit
-				}
-			}
-			for _, tag := range tags {
-				if limit, _ := limitValue(tag); cmpDigits(limit, least) > 0 {
-					finding(CodeConflict, tag, Arg{"facet", g.facet}, Arg{"resolution", least})
-				}
-			}
-			continue
+// valueOK reports whether tag's value is one f reads (SPEC.md §14
+// malformed-value); a range's bounds must be ones its target's comparison
+// can order (§12).
+func (r *Rules) valueOK(f facet, tag Tag) bool {
+	switch f {
+	case facetHide, facetPermit:
+		_, ok := boolValue(tag)
+		return ok
+	case facetArity:
+		return tag.Value != nil && (*tag.Value == "scalar" || *tag.Value == "set")
+	case facetKeysPerItem:
+		_, ok := limitValue(tag)
+		return ok
+	case facetRange:
+		target, ok := exactTarget(tag.Key)
+		if !ok || tag.Value == nil {
+			return false
 		}
-		// Conflicts: the losing tag(s), and what won.
-		var loser, resolution, defaultTarget string
-		switch g.facet {
-		case "hide":
-			loser, resolution, defaultTarget = "false", "true", hideDefaultTarget
-		case "permit":
-			loser, resolution, defaultTarget = "true", "false", permitDefaultTarget
-		case "arity":
-			loser, resolution = "set", "scalar"
-		case "type":
-			resolution = "disabled" // no winner: every name loses
-		default:
-			continue
-		}
-		// Sound hide/permit/arity values are two-valued, and type names
-		// have no winner, so two distinct tags on one target conflict.
-		if len(tags) > 1 {
-			for _, tag := range tags {
-				if loser == "" || *tag.Value == loser {
-					finding(CodeConflict, tag, Arg{"facet", g.facet}, Arg{"resolution", resolution})
-				}
-			}
-		}
-		// A false with no true on record deactivates nothing.
-		if defaultTarget == "" {
-			continue
-		}
-		if g.target != defaultTarget && !has(g.facet, g.target, "true") {
-			for _, tag := range tags {
-				finding(CodeInertFalse, tag, Arg{"facet", g.facet})
-			}
+		_, _, ok = r.parseRange(target, *tag.Value)
+		return ok
+	default: // enum, type: any value
+		return tag.Value != nil
+	}
+}
+
+// checkTarget is SPEC.md §14 for the sound tags on one target: each tag
+// that loses a conflict (facet.conflict), and each =false that deactivates
+// nothing — on a boolean facet's non-default target with no =true on
+// record.
+func checkTarget(g group, tags []Tag) []rawFinding {
+	var out []rawFinding
+	name := g.facet.name()
+	if resolution, losers, ok := g.facet.conflict(tags); ok {
+		for _, tag := range losers {
+			out = append(out, newFinding(CodeConflict, tag, Arg{"facet", name}, Arg{"resolution", resolution}))
 		}
 	}
+	def := g.facet.spec().defaultTarget
+	if def != "" && g.target != def && !carries(tags, "true") {
+		for _, tag := range tags {
+			out = append(out, newFinding(CodeInertFalse, tag, Arg{"facet", name}))
+		}
+	}
+	return out
+}
 
-	// Shadowed permits: an active explicit pattern another active pattern
-	// covers, named by the broadest such cover.
+// carries reports whether some tag in tags has the value v.
+func carries(tags []Tag, v string) bool {
+	return firstCarrying(tags, v) != nil
+}
+
+// firstCarrying is the first tag in tags with the value v, or nil.
+func firstCarrying(tags []Tag, v string) *Tag {
+	for i, t := range tags {
+		if t.Value != nil && *t.Value == v {
+			return &tags[i]
+		}
+	}
+	return nil
+}
+
+// checkShadowedPermits is SPEC.md §14 shadowed-permit: an active explicit
+// pattern another active pattern covers, named by the broadest such cover.
+func (r *Rules) checkShadowedPermits(by byTarget) []rawFinding {
+	var out []rawFinding
 	for _, target := range r.permitTargets {
-		pattern := r.permit[target]
-		var covering []string
-		for _, t := range r.permitTargets {
-			if t != target && patternCovers(r.permit[t], pattern) {
-				covering = append(covering, t)
-			}
-		}
-		broadest := ""
-		for _, t := range covering {
-			covered := false
-			for _, u := range covering {
-				if u != t && patternCovers(r.permit[u], r.permit[t]) {
-					covered = true
-					break
-				}
-			}
-			if !covered {
-				broadest = t
-				break
-			}
-		}
-		if broadest == "" {
-			continue
-		}
-		for _, tag := range by[group{"permit", target}] {
-			if *tag.Value == "true" {
-				finding(CodeShadowedPermit, tag, Arg{"by", broadest})
-				break
-			}
-		}
-	}
-
-	// Rules on exact targets: unpermitted targets, empty ranges, dead enum
-	// values, unregistered types.
-	for _, s := range sound {
-		if s.facet == keysPerItem {
-			if !r.permitsNamespace(s.tag.Key) {
-				finding(CodeRuleOnUnpermitted, s.tag, Arg{"facet", s.facet})
-			}
-			continue
-		}
-		target, ok := exactTarget(s.tag.Key)
+		broadest, ok := r.broadestCover(target)
 		if !ok {
 			continue
 		}
-		switch s.facet {
-		case "arity", "type", "enum", "range":
-			if !r.permitted(target.nsOf(), target.key) {
-				finding(CodeRuleOnUnpermitted, s.tag, Arg{"facet", s.facet})
-			}
-		}
-		if s.tag.Value == nil {
-			continue
-		}
-		v := *s.tag.Value
-		switch s.facet {
-		case "range":
-			out = append(out, r.checkRangeEmpty(target, s.tag, v)...)
-		case "enum":
-			for _, reason := range r.deadEnumReasons(target, v) {
-				finding(CodeDeadEnumValue, s.tag, Arg{"reason", reason})
-			}
-		case "type":
-			if _, declared := r.types[target]; declared {
-				if _, registered := r.comparators[v]; !registered {
-					finding(CodeTypeUnregistered, s.tag, Arg{"type", v})
-				}
-			}
+		if tag := firstCarrying(by[group{facetPermit, target}], "true"); tag != nil {
+			out = append(out, newFinding(CodeShadowedPermit, *tag, Arg{"by", broadest}))
 		}
 	}
+	return out
+}
 
-	return finish(out, func(rawFinding) Origin { return OriginExisting })
+// broadestCover is the first active permit target, in sorted order, that
+// covers the active permit target and is itself covered by no other cover
+// of it; ok false when nothing covers it.
+func (r *Rules) broadestCover(target string) (string, bool) {
+	var covering []string
+	for _, t := range r.permitTargets {
+		if t != target && patternCovers(r.permit[t], r.permit[target]) {
+			covering = append(covering, t)
+		}
+	}
+	for _, t := range covering {
+		covered := false
+		for _, u := range covering {
+			if u != t && patternCovers(r.permit[u], r.permit[t]) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			return t, true
+		}
+	}
+	return "", false
+}
+
+// checkRule is SPEC.md §14 for one sound config tag as a rule: a rule on a
+// target no permit admits, an empty range, a dead enum value, an
+// unregistered type.
+func (r *Rules) checkRule(f facet, tag Tag) []rawFinding {
+	var out []rawFinding
+	if !r.rulePermitted(f, tag.Key) {
+		out = append(out, newFinding(CodeRuleOnUnpermitted, tag, Arg{"facet", f.name()}))
+	}
+	target, ok := exactTarget(tag.Key)
+	if !ok || tag.Value == nil {
+		return out
+	}
+	v := *tag.Value
+	switch f {
+	case facetRange:
+		out = append(out, r.checkRangeEmpty(target, tag, v)...)
+	case facetEnum:
+		for _, reason := range r.deadEnumReasons(target, v) {
+			out = append(out, newFinding(CodeDeadEnumValue, tag, Arg{"reason", reason}))
+		}
+	case facetType:
+		_, declared := r.types[target]
+		if _, registered := r.comparators[v]; declared && !registered {
+			out = append(out, newFinding(CodeTypeUnregistered, tag, Arg{"type", v}))
+		}
+	}
+	return out
+}
+
+// rulePermitted reports whether a sound f tag on the target key governs
+// tags some active permit pattern admits (SPEC.md §14 rule-on-unpermitted),
+// or is no rule at all: hide and permit patterns are exempt.
+func (r *Rules) rulePermitted(f facet, key string) bool {
+	switch f.spec().target {
+	case shapePattern:
+		return true
+	case shapeExact:
+		target, ok := exactTarget(key)
+		return !ok || r.permitted(target.nsOf(), target.key)
+	default:
+		return r.permitsNamespace(key)
+	}
 }
 
 // checkRangeEmpty is SPEC.md §14 range-empty for the range raw on target:
@@ -1010,7 +1179,7 @@ func (r *Rules) checkRangeEmpty(target configTarget, tag Tag, raw string) []rawF
 		return ok && above(lo, hi)
 	}
 	if selfEmpty(raw) {
-		return []rawFinding{{CodeRangeEmpty, tag, []Arg{{"range", raw}}}}
+		return []rawFinding{newFinding(CodeRangeEmpty, tag, Arg{"range", raw})}
 	}
 	lo, hi, ok := r.parseRange(target, raw)
 	if !ok {
@@ -1027,7 +1196,7 @@ func (r *Rules) checkRangeEmpty(target configTarget, tag Tag, raw string) []rawF
 			continue
 		}
 		if above(lo, ohi) || above(olo, hi) {
-			out = append(out, rawFinding{CodeRangeEmpty, tag, []Arg{{"range", other}}})
+			out = append(out, newFinding(CodeRangeEmpty, tag, Arg{"range", other}))
 		}
 	}
 	return out
@@ -1038,18 +1207,13 @@ func (r *Rules) checkRangeEmpty(target configTarget, tag Tag, raw string) []rawF
 // cannot order it, else each distinct way a range on the target fails it,
 // sorted.
 func (r *Rules) deadEnumReasons(target configTarget, v string) []string {
-	if cmp, ok := r.comparatorFor(target); ok {
-		if c, ok := cmp.Compare(v, v); !ok || c != 0 {
-			return []string{"type-mismatch"}
-		}
+	if r.typeMismatch(target, v) {
+		return []string{string(CodeTypeMismatch)}
 	}
 	var reasons []string
 	for _, raw := range r.ranges[target] {
-		switch fit, ok := r.fit(target, raw, &v); {
-		case ok && fit == fitOutside:
-			reasons = append(reasons, "out-of-range")
-		case ok && fit == fitNotComparable:
-			reasons = append(reasons, "not-comparable")
+		if code, ok := r.rangeFault(target, raw, &v); ok {
+			reasons = append(reasons, string(code))
 		}
 	}
 	return sortedUnique(reasons)
