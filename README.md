@@ -35,8 +35,11 @@ position is genuinely absent, with no sentinel or default: `urgent` and
   leftover operands fold with `and`.
 - **An infix gateway.** `lang=en or area:mcp` compiles to that postfix. Only
   postfix is ever evaluated, and every surface exposes `compile`.
-- **Wildcards and comparisons in queries.** These include namespace and key
-  patterns and numeric value comparisons. See SPEC §2–§5.
+- **Explicit quantifiers.** `*` means any position, including absent. `+`
+  means any present position. So `+:cli` matches `cli` under any named
+  namespace, `key=+` means the key has a value, and the universe is `*:*`.
+  Nothing wildcards implicitly. See SPEC §3.
+- **Value operators.** Comparisons on the value position, cast per SPEC §4.
 - **Typed comparison.** Clients can register a comparator for a declared
   type (e.g. `semver`) with `tagma.type`.
 - **Self-hosted rules.** tagma configures itself with ordinary tags in the
