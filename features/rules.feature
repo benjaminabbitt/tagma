@@ -1,4 +1,4 @@
-Feature: Schema rules — tagma.permit, tagma.enum, tagma.range, validate and check
+Feature: Schema rules — tagma.permit, tagma.enum, tagma.range, tagma.keys-per-item, validate and check
 
   Clients self-host tag-schema rules as ordinary config tags in their own
   store (SPEC.md §10-§12): `tagma.permit:<pattern>=<bool>` (which tags a
@@ -6,7 +6,9 @@ Feature: Schema rules — tagma.permit, tagma.enum, tagma.range, validate and ch
   one exact target, never reconciled across targets), `tagma.enum:<target>=<value>`
   (one tag per admitted value; the declared values form one set) and
   `tagma.range:<target>=<lo>..<hi>` (inclusive, either bound optional;
-  several declarations intersect). Writes stay infallible: a caller asks
+  several declarations intersect) and `tagma.keys-per-item:<namespace>=<n>`
+  (at most n distinct keys per item under one exact namespace, the
+  smallest declared limit winning, SPEC.md §15). Writes stay infallible: a caller asks
   first with `validate` (SPEC.md §13), which judges the tag set the item
   WOULD carry after the change — removes, then adds with §8 scalar
   collapse — and returns findings. `check` (SPEC.md §14) reports what is
@@ -86,3 +88,34 @@ Feature: Schema rules — tagma.permit, tagma.enum, tagma.range, validate and ch
     Given an item "cfg" tagged 'tagma.range:k=1..3 tagma.range:k=5..9 tagma.permit:"*:secret"=false'
     When the config is checked
     Then the findings are 'range-empty tagma.range:k=1..3 ; range-empty tagma.range:k=5..9 ; inert-false tagma.permit:"*:secret"=false'
+
+  Scenario: keys-per-item limits the distinct keys an item carries under one exact namespace
+    Given an item "cfg" tagged "tagma.keys-per-item:area=1"
+    Given an item "a" tagged "area:cli area:core area.sub:x"
+    When item "a" is validated adding "area:docs area:cli=2" and removing ""
+    Then the findings are "too-many-keys area:cli ; too-many-keys area:cli=2 ; too-many-keys area:core ; too-many-keys area:docs"
+    Then the introduced findings are "too-many-keys area:cli=2 ; too-many-keys area:docs"
+    When item "a" is validated adding "" and removing "area:core"
+    Then the findings are ""
+
+  Scenario: a removal that leaves an item over its keys-per-item limit introduces nothing
+    Given an item "cfg" tagged "tagma.keys-per-item:area=1"
+    Given an item "a" tagged "area:cli area:core area:docs"
+    When item "a" is validated adding "" and removing "area:docs"
+    Then the findings are "too-many-keys area:cli ; too-many-keys area:core"
+    Then the introduced findings are ""
+
+  Scenario: the smallest keys-per-item limit wins and check names the larger one
+    Given an item "cfg1" tagged "tagma.keys-per-item:area=3"
+    Given an item "cfg2" tagged "tagma.keys-per-item:area=01"
+    When item "a" is validated adding "area:x area:y" and removing ""
+    Then the findings are "too-many-keys area:x ; too-many-keys area:y"
+    When the config is checked
+    Then the findings are "conflict tagma.keys-per-item:area=3"
+
+  Scenario: a keys-per-item that is not an exact namespace and a non-negative integer configures nothing
+    Given an item "cfg" tagged 'tagma.keys-per-item:area=one tagma.keys-per-item:"area:cli"=0 tagma.keys-per-item:"*"=0'
+    When item "a" is validated adding "area:x area:y" and removing ""
+    Then the findings are ""
+    When the config is checked
+    Then the findings are 'malformed-value tagma.keys-per-item:area=one ; malformed-target tagma.keys-per-item:"area:cli"=0 ; malformed-target tagma.keys-per-item:"*"=0'

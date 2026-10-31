@@ -62,6 +62,9 @@ pub enum Code {
     TypeMismatch,
     /// A `scalar` target carries more than one value in the resulting set.
     ArityExceeded,
+    /// A namespace carries more distinct keys in the resulting set than its
+    /// `tagma.keys-per-item` limit (§15).
+    TooManyKeys,
     // --- check (§14) ---
     /// A `tagma`-family namespace that is not a known facet.
     UnknownFacet,
@@ -96,6 +99,7 @@ impl Code {
             Code::NotComparable => "not-comparable",
             Code::TypeMismatch => "type-mismatch",
             Code::ArityExceeded => "arity-exceeded",
+            Code::TooManyKeys => "too-many-keys",
             Code::UnknownFacet => "unknown-facet",
             Code::MalformedValue => "malformed-value",
             Code::MalformedTarget => "malformed-target",

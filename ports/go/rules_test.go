@@ -678,6 +678,7 @@ func TestOriginsAndCodesHaveStableSpellings(t *testing.T) {
 		CodeNotPermitted: "not-permitted", CodeNotInEnum: "not-in-enum",
 		CodeOutOfRange: "out-of-range", CodeNotComparable: "not-comparable",
 		CodeTypeMismatch: "type-mismatch", CodeArityExceeded: "arity-exceeded",
+		CodeTooManyKeys:  "too-many-keys",
 		CodeUnknownFacet: "unknown-facet", CodeMalformedValue: "malformed-value",
 		CodeMalformedTarget: "malformed-target", CodeConflict: "conflict",
 		CodeInertFalse: "inert-false", CodeShadowedPermit: "shadowed-permit",
@@ -709,5 +710,146 @@ func TestLessArgsIsLexicographicByNameThenValueShorterFirst(t *testing.T) {
 		if got := lessArgs(c.a, c.b); got != c.want {
 			t.Errorf("lessArgs(%v, %v) = %v, want %v", c.a, c.b, got, c.want)
 		}
+	}
+}
+
+// --- §15 keys-per-item ---------------------------------------------------
+
+// over is too-many-keys' args (SPEC.md §15): the namespace, the effective
+// limit, then one keys per distinct key the namespace carries, sorted.
+func over(ns, limit string, keys ...string) []string {
+	args := []string{"namespace", ns, "limit", limit}
+	for _, k := range keys {
+		args = append(args, "keys", k)
+	}
+	return args
+}
+
+func TestKeysPerItemLimitsTheDistinctKeysUnderItsExactNamespace(t *testing.T) {
+	idx := rulesIndex(t, "cfg tagma.keys-per-item:area=1")
+	args := over("area", "1", "cli", "core")
+	assertFindings(t, idx.Validate("a", adding(t, "area:cli", "area:core", "area.sub:x", "repo:a")),
+		introduced(CodeTooManyKeys, "area:cli", args...),
+		introduced(CodeTooManyKeys, "area:core", args...))
+	assertFindings(t, idx.Validate("a", adding(t, "area:cli", "area.sub:x")))
+}
+
+func TestKeysPerItemCountsKeysNotValuesAndReportsEveryTagOnThem(t *testing.T) {
+	idx := rulesIndex(t, "cfg tagma.keys-per-item:area=1")
+	assertFindings(t, idx.Validate("a", adding(t, "area:cli=1", "area:cli=2", "area:cli")))
+	args := over("area", "1", "cli", "core")
+	assertFindings(t, idx.Validate("a", adding(t, "area:cli=1", "area:cli=2", "area:core")),
+		introduced(CodeTooManyKeys, "area:cli=1", args...),
+		introduced(CodeTooManyKeys, "area:cli=2", args...),
+		introduced(CodeTooManyKeys, "area:core", args...))
+}
+
+func TestKeysPerItemZeroAdmitsNoKeyUnderTheNamespace(t *testing.T) {
+	idx := rulesIndex(t, "cfg tagma.keys-per-item:legacy=0")
+	assertFindings(t, idx.Validate("a", adding(t, "legacy:x", "k")),
+		introduced(CodeTooManyKeys, "legacy:x", over("legacy", "0", "x")...))
+}
+
+func TestKeysPerItemSmallestLimitWinsAndIsReportedCanonically(t *testing.T) {
+	idx := rulesIndex(t, "cfg1 tagma.keys-per-item:area=3", "cfg2 tagma.keys-per-item:area=002")
+	args := over("area", "2", "a", "b", "c")
+	assertFindings(t, idx.Validate("x", adding(t, "area:a", "area:b", "area:c")),
+		introduced(CodeTooManyKeys, "area:a", args...),
+		introduced(CodeTooManyKeys, "area:b", args...),
+		introduced(CodeTooManyKeys, "area:c", args...))
+}
+
+func TestKeysPerItemALimitPastAnyMachineIntegerStillComparesExactly(t *testing.T) {
+	idx := rulesIndex(t, "cfg tagma.keys-per-item:area=000123456789012345678901234567890")
+	assertFindings(t, idx.Validate("x", adding(t, "area:a", "area:b")))
+}
+
+func TestKeysPerItemOriginIsExistingForATagThatAlreadyExceededTheSameLimit(t *testing.T) {
+	idx := rulesIndex(t, "cfg tagma.keys-per-item:area=1", "item area:a area:b area:c")
+	args := over("area", "1", "a", "b")
+	assertFindings(t, idx.Validate("item", removing(t, "area:c")),
+		existing(CodeTooManyKeys, "area:a", args...),
+		existing(CodeTooManyKeys, "area:b", args...))
+	args = over("area", "1", "a", "b", "c", "d")
+	assertFindings(t, idx.Validate("item", adding(t, "area:d")),
+		existing(CodeTooManyKeys, "area:a", args...),
+		existing(CodeTooManyKeys, "area:b", args...),
+		existing(CodeTooManyKeys, "area:c", args...),
+		introduced(CodeTooManyKeys, "area:d", args...))
+	assertFindings(t, idx.Validate("item", removing(t, "area:a", "area:b")))
+}
+
+func TestKeysPerItemATagFirstOverTheLimitIsIntroduced(t *testing.T) {
+	idx := rulesIndex(t, "cfg tagma.keys-per-item:area=1", "item area:a")
+	args := over("area", "1", "a", "b")
+	assertFindings(t, idx.Validate("item", adding(t, "area:b")),
+		introduced(CodeTooManyKeys, "area:a", args...),
+		introduced(CodeTooManyKeys, "area:b", args...))
+}
+
+func TestKeysPerItemSwappingTheOneKeyIsClean(t *testing.T) {
+	idx := rulesIndex(t, "cfg tagma.keys-per-item:area=1", "item area:cli")
+	change := Change{Add: rulesTags(t, "area:core"), Remove: rulesTags(t, "area:cli")}
+	assertFindings(t, idx.Validate("item", change))
+}
+
+func TestKeysPerItemUninterpretableValuesAndTargetsConfigureNothing(t *testing.T) {
+	idx := rulesIndex(t,
+		`cfg tagma.keys-per-item:area=one tagma.keys-per-item:area=-1 tagma.keys-per-item:area=1.5`,
+		`cfg tagma.keys-per-item:area tagma.keys-per-item:area="+1" tagma.keys-per-item:area=" 1"`,
+		`cfg tagma.keys-per-item:"*"=0 tagma.keys-per-item:"area:cli"=0`)
+	assertFindings(t, idx.Validate("x", adding(t, "area:a", "area:b", "k")))
+}
+
+func TestCheckReportsKeysPerItemMalformedValuesAndTargets(t *testing.T) {
+	idx := rulesIndex(t,
+		`cfg tagma.keys-per-item:area=one tagma.keys-per-item:area=-1 tagma.keys-per-item:area`,
+		`cfg tagma.keys-per-item:"*"=0 tagma.keys-per-item:"area:cli"=0 tagma.keys-per-item:"*"=x`)
+	value := func(tag string) want {
+		return existing(CodeMalformedValue, tag, "facet", "keys-per-item", "expected", "non-negative integer")
+	}
+	target := func(tag string) want {
+		return existing(CodeMalformedTarget, tag, "facet", "keys-per-item")
+	}
+	assertFindings(t, idx.Check(),
+		value("tagma.keys-per-item:area=one"),
+		value("tagma.keys-per-item:area=-1"),
+		value("tagma.keys-per-item:area"),
+		target(`tagma.keys-per-item:"*"=0`),
+		target(`tagma.keys-per-item:"area:cli"=0`),
+		target(`tagma.keys-per-item:"*"=x`))
+}
+
+func TestCheckReportsAKeysPerItemConflictOnEveryLargerLimit(t *testing.T) {
+	idx := rulesIndex(t,
+		"cfg tagma.keys-per-item:area=1 tagma.keys-per-item:area=3",
+		"cfg2 tagma.keys-per-item:area=01 tagma.keys-per-item:area=2",
+		"cfg3 tagma.keys-per-item:repo=1 tagma.keys-per-item:repo=001")
+	assertFindings(t, idx.Check(),
+		existing(CodeConflict, "tagma.keys-per-item:area=2", "facet", "keys-per-item", "resolution", "1"),
+		existing(CodeConflict, "tagma.keys-per-item:area=3", "facet", "keys-per-item", "resolution", "1"))
+}
+
+func TestCheckReportsKeysPerItemOnANamespaceNoPermitAdmits(t *testing.T) {
+	idx := rulesIndex(t,
+		`cfg tagma.permit:"*:*"=false tagma.permit:"triage:*"=true tagma.permit:"repo:main"=true`,
+		"cfg tagma.keys-per-item:area=1 tagma.keys-per-item:triage.sub=1 tagma.keys-per-item:repo=1")
+	assertFindings(t, idx.Check(),
+		existing(CodeRuleOnUnpermitted, "tagma.keys-per-item:area=1", "facet", "keys-per-item"))
+}
+
+func TestCheckAcceptsASoundKeysPerItemDeclaration(t *testing.T) {
+	idx := rulesIndex(t, "cfg tagma.keys-per-item:area=1 tagma.keys-per-item:tagma.enum=4")
+	assertFindings(t, idx.Check())
+}
+
+func TestRulesFromTagsValidatesKeysPerItemLikeTheIndex(t *testing.T) {
+	line := "cfg tagma.keys-per-item:area=2 tagma.keys-per-item:area=1"
+	idx := rulesIndex(t, line)
+	config := rulesTags(t, strings.Fields(line)[1:]...)
+	change := adding(t, "area:a", "area:b")
+	got := RulesFromTags(config).Validate(nil, change)
+	if !reflect.DeepEqual(got, idx.Validate("x", change)) || len(got) == 0 {
+		t.Errorf("RulesFromTags: %v, index: %v", got, idx.Validate("x", change))
 	}
 }

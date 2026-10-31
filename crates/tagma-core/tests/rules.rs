@@ -873,7 +873,7 @@ fn check_reports_a_type_name_with_no_registered_comparator() {
 
 #[test]
 fn rules_from_tags_checks_like_the_index_it_was_read_from() {
-    let line = r#"cfg tagma.permit:"triage:kind"=true tagma.enum:"*:k"=a tagma.bogus:x=1"#;
+    let line = r#"cfg tagma.permit:"triage:kind"=true tagma.enum:"*:k"=a tagma.bogus:x=1 tagma.keys-per-item:area=1 tagma.keys-per-item:area=2"#;
     let idx = index(&[line]);
     let config: Vec<Tag> = line.split_whitespace().skip(1).map(tag).collect();
     assert_eq!(Rules::from_tags(&config).check(), idx.check());
@@ -895,6 +895,7 @@ fn finding_codes_have_stable_spellings() {
         (Code::NotComparable, "not-comparable"),
         (Code::TypeMismatch, "type-mismatch"),
         (Code::ArityExceeded, "arity-exceeded"),
+        (Code::TooManyKeys, "too-many-keys"),
         (Code::UnknownFacet, "unknown-facet"),
         (Code::MalformedValue, "malformed-value"),
         (Code::MalformedTarget, "malformed-target"),
@@ -909,4 +910,259 @@ fn finding_codes_have_stable_spellings() {
     for (code, s) in all {
         assert_eq!(code.as_str(), s);
     }
+}
+
+// --- §15 keys-per-item ---------------------------------------------------
+
+/// `too-many-keys`' args (SPEC.md §15): the namespace, the effective limit,
+/// then one `keys` per distinct key the namespace carries, sorted.
+fn over(ns: &str, limit: &str, keys: &[&str]) -> Vec<(String, String)> {
+    let mut args = vec![
+        ("namespace".to_string(), ns.to_string()),
+        ("limit".to_string(), limit.to_string()),
+    ];
+    args.extend(keys.iter().map(|k| ("keys".to_string(), k.to_string())));
+    args
+}
+
+fn too_many(t: &str, args: &[(String, String)], origin: Origin) -> Finding {
+    Finding {
+        code: Code::TooManyKeys,
+        tag: tag(t),
+        args: args.to_vec(),
+        origin,
+    }
+}
+
+#[test]
+fn keys_per_item_limits_the_distinct_keys_under_its_exact_namespace() {
+    let idx = index(&["cfg tagma.keys-per-item:area=1"]);
+    // area.sub is another namespace: an exact target, not a subtree.
+    let change = add(&["area:cli", "area:core", "area.sub:x", "repo:a"]);
+    let args = over("area", "1", &["cli", "core"]);
+    assert_findings(
+        idx.validate("a", &change),
+        vec![
+            too_many("area:cli", &args, Origin::Introduced),
+            too_many("area:core", &args, Origin::Introduced),
+        ],
+    );
+    // At the limit: nothing.
+    assert_findings(idx.validate("a", &add(&["area:cli", "area.sub:x"])), vec![]);
+}
+
+#[test]
+fn keys_per_item_counts_keys_not_values_and_reports_every_tag_on_them() {
+    let idx = index(&["cfg tagma.keys-per-item:area=1"]);
+    assert_findings(
+        idx.validate("a", &add(&["area:cli=1", "area:cli=2", "area:cli"])),
+        vec![],
+    );
+    let args = over("area", "1", &["cli", "core"]);
+    assert_findings(
+        idx.validate("a", &add(&["area:cli=1", "area:cli=2", "area:core"])),
+        vec![
+            too_many("area:cli=1", &args, Origin::Introduced),
+            too_many("area:cli=2", &args, Origin::Introduced),
+            too_many("area:core", &args, Origin::Introduced),
+        ],
+    );
+}
+
+#[test]
+fn keys_per_item_zero_admits_no_key_under_the_namespace() {
+    let idx = index(&["cfg tagma.keys-per-item:legacy=0"]);
+    assert_findings(
+        idx.validate("a", &add(&["legacy:x", "k"])),
+        vec![too_many(
+            "legacy:x",
+            &over("legacy", "0", &["x"]),
+            Origin::Introduced,
+        )],
+    );
+}
+
+#[test]
+fn keys_per_item_smallest_limit_wins_and_is_reported_canonically() {
+    // Declared on different items, with leading zeros: the smallest wins,
+    // spelled without them.
+    let idx = index(&[
+        "cfg1 tagma.keys-per-item:area=3",
+        "cfg2 tagma.keys-per-item:area=002",
+    ]);
+    let change = add(&["area:a", "area:b", "area:c"]);
+    let args = over("area", "2", &["a", "b", "c"]);
+    assert_findings(
+        idx.validate("x", &change),
+        vec![
+            too_many("area:a", &args, Origin::Introduced),
+            too_many("area:b", &args, Origin::Introduced),
+            too_many("area:c", &args, Origin::Introduced),
+        ],
+    );
+}
+
+#[test]
+fn keys_per_item_a_limit_past_any_machine_integer_still_compares_exactly() {
+    let idx = index(&["cfg tagma.keys-per-item:area=000123456789012345678901234567890"]);
+    assert_findings(idx.validate("x", &add(&["area:a", "area:b"])), vec![]);
+}
+
+#[test]
+fn keys_per_item_origin_is_existing_for_a_tag_that_already_exceeded_the_same_limit() {
+    let idx = index(&[
+        "cfg tagma.keys-per-item:area=1",
+        "item area:a area:b area:c",
+    ]);
+    // A removal that improves the item but leaves it over the limit:
+    // what remains already exceeded the same limit, so nothing is
+    // introduced, though the reported keys shrink.
+    let args = over("area", "1", &["a", "b"]);
+    assert_findings(
+        idx.validate("item", &remove(&["area:c"])),
+        vec![
+            too_many("area:a", &args, Origin::Existing),
+            too_many("area:b", &args, Origin::Existing),
+        ],
+    );
+    // A new key over the limit is introduced; the keys already there stay
+    // existing.
+    let args = over("area", "1", &["a", "b", "c", "d"]);
+    assert_findings(
+        idx.validate("item", &add(&["area:d"])),
+        vec![
+            too_many("area:a", &args, Origin::Existing),
+            too_many("area:b", &args, Origin::Existing),
+            too_many("area:c", &args, Origin::Existing),
+            too_many("area:d", &args, Origin::Introduced),
+        ],
+    );
+    // Moving to one key fixes the item.
+    assert_findings(idx.validate("item", &remove(&["area:a", "area:b"])), vec![]);
+}
+
+#[test]
+fn keys_per_item_a_tag_first_over_the_limit_is_introduced() {
+    // The item was within its limit: the change puts both tags over it,
+    // the one it already carried included.
+    let idx = index(&["cfg tagma.keys-per-item:area=1", "item area:a"]);
+    let args = over("area", "1", &["a", "b"]);
+    assert_findings(
+        idx.validate("item", &add(&["area:b"])),
+        vec![
+            too_many("area:a", &args, Origin::Introduced),
+            too_many("area:b", &args, Origin::Introduced),
+        ],
+    );
+}
+
+#[test]
+fn keys_per_item_swapping_the_one_key_is_clean() {
+    let idx = index(&["cfg tagma.keys-per-item:area=1", "item area:cli"]);
+    let change = Change {
+        add: tags(&["area:core"]),
+        remove: tags(&["area:cli"]),
+    };
+    assert_findings(idx.validate("item", &change), vec![]);
+}
+
+#[test]
+fn keys_per_item_uninterpretable_values_and_targets_configure_nothing() {
+    let idx = index(&[
+        r#"cfg tagma.keys-per-item:area=one tagma.keys-per-item:area=-1 tagma.keys-per-item:area=1.5"#,
+        r#"cfg tagma.keys-per-item:area tagma.keys-per-item:area="+1" tagma.keys-per-item:area=" 1""#,
+        r#"cfg tagma.keys-per-item:"*"=0 tagma.keys-per-item:"area:cli"=0"#,
+    ]);
+    assert_findings(idx.validate("x", &add(&["area:a", "area:b", "k"])), vec![]);
+}
+
+#[test]
+fn check_reports_keys_per_item_malformed_values_and_targets() {
+    let idx = index(&[
+        r#"cfg tagma.keys-per-item:area=one tagma.keys-per-item:area=-1 tagma.keys-per-item:area"#,
+        r#"cfg tagma.keys-per-item:"*"=0 tagma.keys-per-item:"area:cli"=0 tagma.keys-per-item:"*"=x"#,
+    ]);
+    let value = |t: &str| {
+        existing(
+            Code::MalformedValue,
+            t,
+            &[
+                ("facet", "keys-per-item"),
+                ("expected", "non-negative integer"),
+            ],
+        )
+    };
+    let target = |t: &str| existing(Code::MalformedTarget, t, &[("facet", "keys-per-item")]);
+    assert_findings(
+        idx.check(),
+        vec![
+            value("tagma.keys-per-item:area=one"),
+            value("tagma.keys-per-item:area=-1"),
+            value("tagma.keys-per-item:area"),
+            target(r#"tagma.keys-per-item:"*"=0"#),
+            target(r#"tagma.keys-per-item:"area:cli"=0"#),
+            // The target is judged first.
+            target(r#"tagma.keys-per-item:"*"=x"#),
+        ],
+    );
+}
+
+#[test]
+fn check_reports_a_keys_per_item_conflict_on_every_larger_limit() {
+    let idx = index(&[
+        "cfg tagma.keys-per-item:area=1 tagma.keys-per-item:area=3",
+        "cfg2 tagma.keys-per-item:area=01 tagma.keys-per-item:area=2",
+        "cfg3 tagma.keys-per-item:repo=1 tagma.keys-per-item:repo=001",
+    ]);
+    let lost = |t: &str| {
+        existing(
+            Code::Conflict,
+            t,
+            &[("facet", "keys-per-item"), ("resolution", "1")],
+        )
+    };
+    // 1 and 01 are one limit: neither loses, and repo has no conflict.
+    assert_findings(
+        idx.check(),
+        vec![
+            lost("tagma.keys-per-item:area=2"),
+            lost("tagma.keys-per-item:area=3"),
+        ],
+    );
+}
+
+#[test]
+fn check_reports_keys_per_item_on_a_namespace_no_permit_admits() {
+    let idx = index(&[
+        r#"cfg tagma.permit:"*:*"=false tagma.permit:"triage:*"=true tagma.permit:"repo:main"=true"#,
+        "cfg tagma.keys-per-item:area=1 tagma.keys-per-item:triage.sub=1 tagma.keys-per-item:repo=1",
+    ]);
+    // triage.sub is in the triage subtree, and repo admits one key.
+    assert_findings(
+        idx.check(),
+        vec![existing(
+            Code::RuleOnUnpermitted,
+            "tagma.keys-per-item:area=1",
+            &[("facet", "keys-per-item")],
+        )],
+    );
+}
+
+#[test]
+fn check_accepts_a_sound_keys_per_item_declaration() {
+    let idx = index(&["cfg tagma.keys-per-item:area=1 tagma.keys-per-item:tagma.enum=4"]);
+    assert_findings(idx.check(), vec![]);
+}
+
+#[test]
+fn rules_from_tags_validates_keys_per_item_like_the_index() {
+    let line = "cfg tagma.keys-per-item:area=2 tagma.keys-per-item:area=1";
+    let idx = index(&[line]);
+    let config: Vec<Tag> = line.split_whitespace().skip(1).map(tag).collect();
+    let change = add(&["area:a", "area:b"]);
+    assert_eq!(
+        Rules::from_tags(&config).validate(&[], &change),
+        idx.validate("x", &change)
+    );
+    assert!(!idx.validate("x", &change).is_empty());
 }

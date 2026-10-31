@@ -53,6 +53,9 @@ const (
 	CodeTypeMismatch Code = "type-mismatch"
 	// CodeArityExceeded: a scalar target carries more than one value in the resulting set.
 	CodeArityExceeded Code = "arity-exceeded"
+	// CodeTooManyKeys: a namespace carries more distinct keys in the
+	// resulting set than its tagma.keys-per-item limit (§15).
+	CodeTooManyKeys Code = "too-many-keys"
 )
 
 // The check (SPEC.md §14) finding codes.
