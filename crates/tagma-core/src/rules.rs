@@ -599,126 +599,83 @@ impl Rules {
     /// [`Origin::Existing`]. Pure.
     pub fn check(&self) -> Vec<Finding> {
         let mut out: Vec<Raw> = Vec::new();
-        let finding = |code: Code, tag: &Tag, args: &[(&str, &str)]| -> Raw {
-            let args = args.iter().map(|(k, v)| arg(k, v)).collect();
-            (code, tag.clone(), args)
-        };
 
         // Pass 1: unknown facets, malformed targets and values. What
         // survives configures something and is judged further.
         let mut sound: Vec<(&str, &Tag)> = Vec::new();
         for tag in &self.config {
-            let facet = facet_of(&tag.namespace);
-            let Some(&facet) = FACETS.iter().find(|f| **f == facet) else {
-                out.push(finding(Code::UnknownFacet, tag, &[("facet", facet)]));
-                continue;
-            };
-            let target_ok = match facet {
-                "hide" | "permit" => pattern_target_ok(&tag.key),
-                KEYS_PER_ITEM => namespace_target(&tag.key).is_some(),
-                _ => exact_target(&tag.key).is_some(),
-            };
-            if !target_ok {
-                out.push(finding(Code::MalformedTarget, tag, &[("facet", facet)]));
-                continue;
+            match self.sound_facet(tag) {
+                Ok(facet) => sound.push((facet, tag)),
+                Err(raw) => out.push(raw),
             }
-            let expected = match facet {
-                "hide" | "permit" => bool_value(tag).is_none().then_some("true|false"),
-                "arity" => (!matches!(tag.value.as_deref(), Some("scalar" | "set")))
-                    .then_some("scalar|set"),
-                "enum" => tag.value.is_none().then_some("value"),
-                "type" => tag.value.is_none().then_some("type name"),
-                KEYS_PER_ITEM => limit_value(tag).is_none().then_some("non-negative integer"),
-                _ => {
-                    let parsed = exact_target(&tag.key).and_then(|t| {
-                        let raw = tag.value.as_deref()?;
-                        self.parse_range(&t, raw).map(|_| ())
-                    });
-                    parsed.is_none().then_some("lo..hi")
-                }
-            };
-            if let Some(expected) = expected {
-                out.push(finding(
-                    Code::MalformedValue,
-                    tag,
-                    &[("facet", facet), ("expected", expected)],
-                ));
-                continue;
-            }
-            sound.push((facet, tag));
         }
 
         // Group the sound tags by facet and target string.
-        let mut by: BTreeMap<(&str, &str), Vec<&Tag>> = BTreeMap::new();
+        let mut by: ByTarget = BTreeMap::new();
         for &(facet, tag) in &sound {
             by.entry((facet, tag.key.as_str())).or_default().push(tag);
         }
-        let has = |facet: &str, target: &str, value: &str| {
-            by.get(&(facet, target))
-                .is_some_and(|ts| ts.iter().any(|t| t.value.as_deref() == Some(value)))
-        };
 
         for (&(facet, target), tags) in &by {
-            // §15: every limit larger than the smallest loses to it.
             if facet == KEYS_PER_ITEM {
-                let limits: Vec<(String, &Tag)> = tags
-                    .iter()
-                    .filter_map(|t| Some((limit_value(t)?, *t)))
-                    .collect();
-                let Some(least) = limits
-                    .iter()
-                    .map(|(l, _)| l)
-                    .min_by(|a, b| cmp_digits(a, b))
-                else {
-                    continue;
-                };
-                for (limit, tag) in &limits {
-                    if cmp_digits(limit, least) == Ordering::Greater {
-                        out.push(finding(
-                            Code::Conflict,
-                            tag,
-                            &[("facet", facet), ("resolution", least)],
-                        ));
-                    }
-                }
-                continue;
-            }
-            // Conflicts: the losing tag(s), and what won.
-            let (loser, resolution) = match facet {
-                "hide" => (Some("false"), "true"),
-                "permit" => (Some("true"), "false"),
-                "arity" => (Some("set"), "scalar"),
-                "type" => (None, "disabled"),
-                _ => continue,
-            };
-            // Sound hide/permit/arity values are two-valued, and type names
-            // have no winner, so two distinct tags on one target conflict.
-            if tags.len() > 1 {
-                for tag in tags {
-                    if loser.is_none_or(|l| tag.value.as_deref() == Some(l)) {
-                        out.push(finding(
-                            Code::Conflict,
-                            tag,
-                            &[("facet", facet), ("resolution", resolution)],
-                        ));
-                    }
-                }
-            }
-            // A false with no true on record deactivates nothing.
-            let default = match facet {
-                "hide" => HIDE_DEFAULT_TARGET,
-                "permit" => PERMIT_DEFAULT_TARGET,
-                _ => continue,
-            };
-            if target != default && !has(facet, target, "true") {
-                for tag in tags {
-                    out.push(finding(Code::InertFalse, tag, &[("facet", facet)]));
-                }
+                check_limits(facet, tags, &mut out);
+            } else {
+                check_conflicts(&by, facet, target, tags, &mut out);
             }
         }
+        self.check_shadowed_permits(&by, &mut out);
+        for &(facet, tag) in &sound {
+            self.check_exact_rule(facet, tag, &mut out);
+        }
 
-        // Shadowed permits: an active explicit pattern another active
-        // pattern covers, named by the broadest such cover.
+        finish(out, |_| Origin::Existing)
+    }
+
+    /// SPEC.md §14 pass 1 for one config tag: its facet when the tag is
+    /// sound (a known facet, a well-formed target and value), else the
+    /// `unknown-facet`, `malformed-target` or `malformed-value` finding.
+    fn sound_facet(&self, tag: &Tag) -> Result<&'static str, Raw> {
+        let facet = facet_of(&tag.namespace);
+        let Some(&facet) = FACETS.iter().find(|f| **f == facet) else {
+            return Err(finding(Code::UnknownFacet, tag, &[("facet", facet)]));
+        };
+        if !target_ok(facet, tag) {
+            return Err(finding(Code::MalformedTarget, tag, &[("facet", facet)]));
+        }
+        if let Some(expected) = self.expected_value(facet, tag) {
+            return Err(finding(
+                Code::MalformedValue,
+                tag,
+                &[("facet", facet), ("expected", expected)],
+            ));
+        }
+        Ok(facet)
+    }
+
+    /// What `tag`'s value should have been under `facet`, when it is
+    /// malformed; `None` when it is well formed.
+    fn expected_value(&self, facet: &str, tag: &Tag) -> Option<&'static str> {
+        match facet {
+            "hide" | "permit" => bool_value(tag).is_none().then_some("true|false"),
+            "arity" => {
+                (!matches!(tag.value.as_deref(), Some("scalar" | "set"))).then_some("scalar|set")
+            }
+            "enum" => tag.value.is_none().then_some("value"),
+            "type" => tag.value.is_none().then_some("type name"),
+            KEYS_PER_ITEM => limit_value(tag).is_none().then_some("non-negative integer"),
+            _ => {
+                let parsed = exact_target(&tag.key).and_then(|t| {
+                    let raw = tag.value.as_deref()?;
+                    self.parse_range(&t, raw).map(|_| ())
+                });
+                parsed.is_none().then_some("lo..hi")
+            }
+        }
+    }
+
+    /// Shadowed permits: an active explicit pattern another active
+    /// pattern covers, named by the broadest such cover.
+    fn check_shadowed_permits(&self, by: &ByTarget, out: &mut Vec<Raw>) {
         for (target, pattern) in &self.permit {
             let covering: Vec<(&String, &HidePattern)> = self
                 .permit
@@ -735,41 +692,39 @@ impl Rules {
                 out.push(finding(Code::ShadowedPermit, tag, &[("by", by_target)]));
             }
         }
+    }
 
-        // Rules on exact targets: unpermitted targets, empty ranges, dead
-        // enum values, unregistered types.
-        for &(facet, tag) in &sound {
-            if facet == KEYS_PER_ITEM {
-                if !self.permits_namespace(&tag.key) {
-                    out.push(finding(Code::RuleOnUnpermitted, tag, &[("facet", facet)]));
-                }
-                continue;
-            }
-            let Some(target) = exact_target(&tag.key) else {
-                continue;
-            };
-            if matches!(facet, "arity" | "type" | "enum" | "range")
-                && !self.permitted(&target.0, &target.1)
-            {
+    /// Rules on exact targets, for one sound config tag: unpermitted
+    /// targets, empty ranges, dead enum values, unregistered types.
+    fn check_exact_rule(&self, facet: &str, tag: &Tag, out: &mut Vec<Raw>) {
+        if facet == KEYS_PER_ITEM {
+            if !self.permits_namespace(&tag.key) {
                 out.push(finding(Code::RuleOnUnpermitted, tag, &[("facet", facet)]));
             }
-            match (facet, tag.value.as_deref()) {
-                ("range", Some(raw)) => self.check_range_empty(&target, tag, raw, &mut out),
-                ("enum", Some(v)) => {
-                    for reason in self.dead_enum_reasons(&target, v) {
-                        out.push(finding(Code::DeadEnumValue, tag, &[("reason", reason)]));
-                    }
-                }
-                ("type", Some(name))
-                    if self.types.contains_key(&target) && !self.comparators.contains_key(name) =>
-                {
-                    out.push(finding(Code::TypeUnregistered, tag, &[("type", name)]));
-                }
-                _ => {}
-            }
+            return;
         }
-
-        finish(out, |_| Origin::Existing)
+        let Some(target) = exact_target(&tag.key) else {
+            return;
+        };
+        if matches!(facet, "arity" | "type" | "enum" | "range")
+            && !self.permitted(&target.0, &target.1)
+        {
+            out.push(finding(Code::RuleOnUnpermitted, tag, &[("facet", facet)]));
+        }
+        match (facet, tag.value.as_deref()) {
+            ("range", Some(raw)) => self.check_range_empty(&target, tag, raw, out),
+            ("enum", Some(v)) => {
+                for reason in self.dead_enum_reasons(&target, v) {
+                    out.push(finding(Code::DeadEnumValue, tag, &[("reason", reason)]));
+                }
+            }
+            ("type", Some(name))
+                if self.types.contains_key(&target) && !self.comparators.contains_key(name) =>
+            {
+                out.push(finding(Code::TypeUnregistered, tag, &[("type", name)]));
+            }
+            _ => {}
+        }
     }
 
     /// SPEC.md §14 `range-empty` for the range `raw` on `target`: against
@@ -825,6 +780,92 @@ impl Rules {
                 Some(RangeFit::Within) | None => None,
             })
             .collect()
+    }
+}
+
+/// The sound config tags of a [`Rules::check`], grouped by facet and
+/// target string.
+type ByTarget<'a> = BTreeMap<(&'a str, &'a str), Vec<&'a Tag>>;
+
+/// A [`Rules::check`] finding: `code` on `tag`, with `args`.
+fn finding(code: Code, tag: &Tag, args: &[(&str, &str)]) -> Raw {
+    let args = args.iter().map(|(k, v)| arg(k, v)).collect();
+    (code, tag.clone(), args)
+}
+
+/// Whether `tag`'s target is well formed for `facet`.
+fn target_ok(facet: &str, tag: &Tag) -> bool {
+    match facet {
+        "hide" | "permit" => pattern_target_ok(&tag.key),
+        KEYS_PER_ITEM => namespace_target(&tag.key).is_some(),
+        _ => exact_target(&tag.key).is_some(),
+    }
+}
+
+/// Whether any sound `facet` tag on `target` has the value `value`.
+fn has(by: &ByTarget, facet: &str, target: &str, value: &str) -> bool {
+    by.get(&(facet, target))
+        .is_some_and(|ts| ts.iter().any(|t| t.value.as_deref() == Some(value)))
+}
+
+/// §15: every `keys-per-item` limit on one target larger than the
+/// smallest loses to it.
+fn check_limits(facet: &str, tags: &[&Tag], out: &mut Vec<Raw>) {
+    let limits: Vec<(String, &Tag)> = tags
+        .iter()
+        .filter_map(|t| Some((limit_value(t)?, *t)))
+        .collect();
+    let Some(least) = limits
+        .iter()
+        .map(|(l, _)| l)
+        .min_by(|a, b| cmp_digits(a, b))
+    else {
+        return;
+    };
+    for (limit, tag) in &limits {
+        if cmp_digits(limit, least) == Ordering::Greater {
+            out.push(finding(
+                Code::Conflict,
+                tag,
+                &[("facet", facet), ("resolution", least)],
+            ));
+        }
+    }
+}
+
+/// Conflicts on one target of a two-valued facet (the losing tag(s), and
+/// what won), then a `false` with no `true` on record, which deactivates
+/// nothing.
+fn check_conflicts(by: &ByTarget, facet: &str, target: &str, tags: &[&Tag], out: &mut Vec<Raw>) {
+    let (loser, resolution) = match facet {
+        "hide" => (Some("false"), "true"),
+        "permit" => (Some("true"), "false"),
+        "arity" => (Some("set"), "scalar"),
+        "type" => (None, "disabled"),
+        _ => return,
+    };
+    // Sound hide/permit/arity values are two-valued, and type names
+    // have no winner, so two distinct tags on one target conflict.
+    if tags.len() > 1 {
+        for tag in tags {
+            if loser.is_none_or(|l| tag.value.as_deref() == Some(l)) {
+                out.push(finding(
+                    Code::Conflict,
+                    tag,
+                    &[("facet", facet), ("resolution", resolution)],
+                ));
+            }
+        }
+    }
+    let default = match facet {
+        "hide" => HIDE_DEFAULT_TARGET,
+        "permit" => PERMIT_DEFAULT_TARGET,
+        _ => return,
+    };
+    if target != default && !has(by, facet, target, "true") {
+        for tag in tags {
+            out.push(finding(Code::InertFalse, tag, &[("facet", facet)]));
+        }
     }
 }
 
