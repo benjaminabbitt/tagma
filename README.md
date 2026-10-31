@@ -65,6 +65,19 @@ The rules are a **description, not a program**. They state facts about tags
 and will never grow into a programming language: no expressions,
 conditionals or code-valued facets. See SPEC §7.
 
+## What tagma is not (yet)
+
+tagma is a **human-readable tagging system, not a database**. Its query
+language is built to be read and written by people, and to behave the same in
+every implementation. It is not built for speed. Evaluation is a
+straightforward postfix stack machine over an in-memory index. There is almost
+certainly performance left on the table: query planning, index access paths
+and fusing `x/not/and` into set difference are all possible, and SPEC §5
+leaves room for them. None of that is a priority at the scales tagma is used
+at today: a project's tasks and a handful of fragments. If tagma ever has to
+serve as a database, performance becomes a design concern, with measurements
+first and the spec's semantics unchanged.
+
 ## Try it
 
 ```console
