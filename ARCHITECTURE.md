@@ -94,10 +94,10 @@ compiler.
   the workspace depends on it. The tag string is still the portable form:
   the message carries decoded components, and `Display for Tag` spells them.
 
-## Rules: validate and check (SPEC.md §10–§14)
+## Rules: validate and check (SPEC.md §10–§15)
 
-The schema facets (`permit`, `enum`, `range`, plus the existing `arity` and
-`type`) and the two calls that read them live in `tagma-core`'s `rules`
+The schema facets (`permit`, `enum`, `range`, `keys-per-item`, plus the
+existing `arity` and `type`) and the two calls that read them live in `tagma-core`'s `rules`
 module. Nothing in the write or query path changes: writes stay infallible
 and queries ignore these facets.
 
@@ -120,7 +120,8 @@ Public shape (Rust reference; ports mirror it in their own idiom):
   `Origin` is `Introduced` or `Existing` (`as_str()`: `"introduced"`,
   `"existing"`): a validate finding is `Existing` iff the same
   `(code, tag, args)` finding holds for the item's current set under the
-  same config (SPEC.md §13 "Introduced or existing"); every check finding
+  same config (SPEC.md §13 "Introduced or existing"; a `too-many-keys`
+  compared without its `keys` args, §15); every check finding
   is `Existing`. A client refusing writes refuses on `Introduced` only.
 
 Every surface exposes both calls, against an index and against a

@@ -1,7 +1,7 @@
-//! Tag-schema rules a client self-hosts as config tags (SPEC.md §10–§14):
-//! the `permit`, `enum` and `range` facets alongside §8's `arity` and §9's
-//! `type`, and the two pure calls that read them — [`Rules::validate`]
-//! (§13) and [`Rules::check`] (§14).
+//! Tag-schema rules a client self-hosts as config tags (SPEC.md §10–§15):
+//! the `permit`, `enum`, `range` and `keys-per-item` facets alongside §8's
+//! `arity` and §9's `type`, and the two pure calls that read them —
+//! [`Rules::validate`] (§13) and [`Rules::check`] (§14).
 //!
 //! Pattern parsing (§7, reused by `permit`) and the `arity`/`type`
 //! resolution (§8/§9) are the index's own ([`crate::index`]), shared rather
@@ -32,7 +32,18 @@ const HIDE_DEFAULT_TARGET: &str = "tagma:*";
 
 /// The `tagma` facets (SPEC.md §14 "Reserved facets"); any other namespace
 /// in the family is `unknown-facet`.
-const FACETS: [&str; 6] = ["hide", "arity", "type", "permit", "enum", "range"];
+const FACETS: [&str; 7] = [
+    "hide",
+    "arity",
+    "type",
+    "permit",
+    "enum",
+    "range",
+    "keys-per-item",
+];
+
+/// The `tagma.keys-per-item` facet (SPEC.md §15).
+const KEYS_PER_ITEM: &str = "keys-per-item";
 
 /// A proposed change to one item's tags (SPEC.md §13): `remove` applies
 /// first, then `add`, by tagma's own write rules (§8 scalar collapse).
@@ -175,6 +186,8 @@ pub struct Rules {
     /// §12: target -> its distinct declared range spellings, interpreted on
     /// use (a bound's meaning depends on the registered comparators).
     ranges: BTreeMap<Target, BTreeSet<String>>,
+    /// §15: namespace -> its smallest declared limit, canonical.
+    keys_per_item: BTreeMap<String, String>,
     /// §9 comparators by type name.
     comparators: HashMap<String, Arc<dyn TypeComparator>>,
 }
@@ -234,6 +247,30 @@ fn split_range(raw: &str) -> Option<(Option<&str>, Option<&str>)> {
         return None;
     }
     Some((bound(lo), bound(hi)))
+}
+
+/// A `tagma.keys-per-item` target (SPEC.md §15): one exact, named
+/// namespace — non-empty, with no `:` and not the `*` wildcard — or `None`
+/// (§14 `malformed-target`).
+fn namespace_target(target: &str) -> Option<&str> {
+    (!target.is_empty() && !target.contains(':') && target != "*").then_some(target)
+}
+
+/// A `tagma.keys-per-item` limit (SPEC.md §15): a value of ASCII digits
+/// only, canonical — leading zeros dropped, `0` for all zeros — or `None`
+/// (§14 `malformed-value`). Kept as digits so any length compares exactly.
+fn limit_value(tag: &Tag) -> Option<String> {
+    let v = tag.value.as_deref()?;
+    if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let canonical = v.trim_start_matches('0');
+    Some(if canonical.is_empty() { "0" } else { canonical }.to_string())
+}
+
+/// Orders two canonical limits (or counts) as the integers they spell.
+fn cmp_digits(a: &str, b: &str) -> Ordering {
+    (a.len(), a).cmp(&(b.len(), b))
 }
 
 /// A range bound, absent when spelled empty.
@@ -333,6 +370,20 @@ impl Rules {
             }
         }
 
+        let mut keys_per_item: BTreeMap<String, String> = BTreeMap::new();
+        for t in of(KEYS_PER_ITEM) {
+            if let (Some(ns), Some(limit)) = (namespace_target(&t.key), limit_value(t)) {
+                keys_per_item
+                    .entry(ns.to_string())
+                    .and_modify(|held| {
+                        if cmp_digits(&limit, held) == Ordering::Less {
+                            *held = limit.clone();
+                        }
+                    })
+                    .or_insert(limit);
+            }
+        }
+
         Rules {
             config,
             permit,
@@ -340,6 +391,7 @@ impl Rules {
             types,
             enums,
             ranges,
+            keys_per_item,
             comparators: HashMap::new(),
         }
     }
@@ -404,6 +456,18 @@ impl Rules {
     /// in the exempt `tagma` family (SPEC.md §10).
     fn permitted(&self, ns: &Option<String>, key: &str) -> bool {
         in_tagma_family(ns) || self.permit.values().any(|p| p.matches(ns, key))
+    }
+
+    /// `true` iff some tag in the named namespace `ns` is permitted: an
+    /// active permit pattern's ns side matches it, whatever its key side,
+    /// or `ns` is in the exempt `tagma` family (SPEC.md §10, §15).
+    fn permits_namespace(&self, ns: &str) -> bool {
+        in_tagma_family(&Some(ns.to_string()))
+            || self.permit.values().any(|p| match &p.ns {
+                NsPattern::Any => true,
+                NsPattern::Named(root) => covers(ns, root),
+                NsPattern::Null => false,
+            })
     }
 
     /// The tag set `current` becomes under `change` (SPEC.md §13): removes
@@ -475,15 +539,49 @@ impl Rules {
                 ));
             }
         }
+        // §15: per limited namespace, its distinct keys and its tags.
+        let mut by_namespace: BTreeMap<&str, (BTreeSet<&str>, BTreeMap<String, &Tag>)> =
+            BTreeMap::new();
+        for tag in set {
+            if let Some(ns) = tag.namespace.as_deref() {
+                if self.keys_per_item.contains_key(ns) {
+                    let (keys, tags) = by_namespace.entry(ns).or_default();
+                    keys.insert(tag.key.as_str());
+                    tags.insert(tag.to_string(), tag);
+                }
+            }
+        }
+        for (ns, (keys, tags)) in by_namespace {
+            let Some(limit) = self.keys_per_item.get(ns) else {
+                continue;
+            };
+            if cmp_digits(&keys.len().to_string(), limit) != Ordering::Greater {
+                continue;
+            }
+            let mut args = vec![arg("namespace", ns), arg("limit", limit)];
+            args.extend(keys.iter().map(|k| arg("keys", k)));
+            for &tag in tags.values() {
+                out.push((Code::TooManyKeys, tag.clone(), args.clone()));
+            }
+        }
         out
     }
 
     /// SPEC.md §13: the findings for the tag set `current` would become
     /// under `change` (removes, then adds with §8 scalar collapse), each
     /// [`Origin::Existing`] iff the same `(code, tag, args)` finding already
-    /// holds for `current` itself, else [`Origin::Introduced`]. Pure.
+    /// holds for `current` itself, else [`Origin::Introduced`] — the
+    /// `keys` args of a `too-many-keys` left out of the comparison (§15),
+    /// so a tag that already exceeded the same limit stays existing. Pure.
     pub fn validate(&self, current: &[Tag], change: &Change) -> Vec<Finding> {
-        let key = |r: &Raw| (r.0, r.1.to_string(), r.2.clone());
+        let key = |r: &Raw| {
+            let args: Vec<_> =
+                r.2.iter()
+                    .filter(|(name, _)| r.0 != Code::TooManyKeys || name != "keys")
+                    .cloned()
+                    .collect();
+            (r.0, r.1.to_string(), args)
+        };
         let before: BTreeSet<_> = self.judge(current).iter().map(key).collect();
         let after = self.judge(&self.apply(current, change));
         finish(after, |r| {
@@ -515,6 +613,7 @@ impl Rules {
             };
             let target_ok = match facet {
                 "hide" | "permit" => pattern_target_ok(&tag.key),
+                KEYS_PER_ITEM => namespace_target(&tag.key).is_some(),
                 _ => exact_target(&tag.key).is_some(),
             };
             if !target_ok {
@@ -527,6 +626,7 @@ impl Rules {
                     .then_some("scalar|set"),
                 "enum" => tag.value.is_none().then_some("value"),
                 "type" => tag.value.is_none().then_some("type name"),
+                KEYS_PER_ITEM => limit_value(tag).is_none().then_some("non-negative integer"),
                 _ => {
                     let parsed = exact_target(&tag.key).and_then(|t| {
                         let raw = tag.value.as_deref()?;
@@ -557,6 +657,30 @@ impl Rules {
         };
 
         for (&(facet, target), tags) in &by {
+            // §15: every limit larger than the smallest loses to it.
+            if facet == KEYS_PER_ITEM {
+                let limits: Vec<(String, &Tag)> = tags
+                    .iter()
+                    .filter_map(|t| Some((limit_value(t)?, *t)))
+                    .collect();
+                let Some(least) = limits
+                    .iter()
+                    .map(|(l, _)| l)
+                    .min_by(|a, b| cmp_digits(a, b))
+                else {
+                    continue;
+                };
+                for (limit, tag) in &limits {
+                    if cmp_digits(limit, least) == Ordering::Greater {
+                        out.push(finding(
+                            Code::Conflict,
+                            tag,
+                            &[("facet", facet), ("resolution", least)],
+                        ));
+                    }
+                }
+                continue;
+            }
             // Conflicts: the losing tag(s), and what won.
             let (loser, resolution) = match facet {
                 "hide" => (Some("false"), "true"),
@@ -613,6 +737,12 @@ impl Rules {
         // Rules on exact targets: unpermitted targets, empty ranges, dead
         // enum values, unregistered types.
         for &(facet, tag) in &sound {
+            if facet == KEYS_PER_ITEM {
+                if !self.permits_namespace(&tag.key) {
+                    out.push(finding(Code::RuleOnUnpermitted, tag, &[("facet", facet)]));
+                }
+                continue;
+            }
             let Some(target) = exact_target(&tag.key) else {
                 continue;
             };

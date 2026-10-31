@@ -819,7 +819,7 @@ practice, since typed comparison is opt-in, per target, by construction.
 ## 10. Self-hosted meta-configuration — `tagma.permit`
 
 *(owner-approved 2026-10-30 — §10–§14 are the "rules travel with the data"
-slice: tag-schema rules a client self-hosts as config tags in its own
+slice, which §15 extends: tag-schema rules a client self-hosts as config tags in its own
 store, plus the two calls that read them. Nothing here changes how a write
 or a query behaves; §13 and §14 are new, read-only calls.)*
 
@@ -999,8 +999,8 @@ reports that as `range-empty` rather than silently admitting nothing.
 
 ## 13. Validate — asking before writing
 
-Writes stay infallible (§4, §8): `permit`, `enum`, `range`, `type` and
-`arity` never make a write fail. A caller that wants a store to refuse a
+Writes stay infallible (§4, §8): `permit`, `enum`, `range`, `type`,
+`arity` and `keys-per-item` (§15) never make a write fail. A caller that wants a store to refuse a
 bad tag **validates first**, and decides itself what to do with the
 findings. Validation is pure: it reads the store's config and one item's
 tags, and mutates nothing.
@@ -1044,7 +1044,8 @@ be the item's current tag set and *after* the resulting set above, and
 judge **both under the same config** — the store's, as it stands before
 the change. A finding of *after* is **`existing`** iff a finding with the
 same `code`, the same `tag` (namespace, key and value) and the same `args`
-is among *before*'s findings; otherwise it is **`introduced`**.
+is among *before*'s findings — for `too-many-keys`, the same args but its
+`keys` (§15) — otherwise it is **`introduced`**.
 
 - It is defined on outcomes, not on the edit, so it does not depend on how
   the change is spelled: re-adding a tag the item already carries,
@@ -1052,9 +1053,14 @@ is among *before*'s findings; otherwise it is **`introduced`**.
   all leave its findings `existing`.
 - `permit`, `enum`, `range` and `type` judge one tag on its own, against a
   config that is the same on both sides, so such a finding is `existing`
-  iff its tag was already on the item. Only `arity-exceeded` depends on a
-  tag's siblings; requiring equal `args` and `tag` makes it `existing`
-  exactly when the same tag already exceeded the same declared arity.
+  iff its tag was already on the item. Only `arity-exceeded` and
+  `too-many-keys` depend on a tag's siblings; requiring equal `args` and
+  `tag` makes `arity-exceeded` `existing` exactly when the same tag already
+  exceeded the same declared arity, and `too-many-keys` (its `keys` aside)
+  exactly when the same tag already exceeded the same limit on the same
+  namespace. Its `keys` are left out because they name every sibling: a
+  change that drops one key but leaves the item over its limit would
+  otherwise turn every finding `introduced`, refusing an improvement.
 - A violation the change fixes is simply absent from the result — there is
   no "fixed" origin. An empty change reports every finding `existing`.
 - Comparing the *change's* tags instead ("is the tag in `add`?") is not
@@ -1072,6 +1078,7 @@ rule):
 | `not-comparable` | the target has a range and the value is absent or cannot be compared to its bounds | the tag | `range` |
 | `type-mismatch` | the target has an active, registered `tagma.type` (§9) and the comparator cannot order the value against itself (`compare(v, v) ≠ Equal`) | the tag | `type` |
 | `arity-exceeded` | the target is `scalar` (§8) and the resulting set carries more than one value for it | each tag on that target | `arity` = `scalar` |
+| `too-many-keys` | the namespace has a `tagma.keys-per-item` limit (§15) and the resulting set carries more distinct keys under it than the limit | each tag in that namespace | `namespace`; `limit` — the effective limit, canonical (§15); `keys` — one arg per distinct key in the namespace, sorted |
 
 `out-of-range` and `not-comparable` are reported once per violated
 declaration (a value below two overlapping ranges yields two findings). A valueless tag on a typed
@@ -1104,9 +1111,10 @@ check() -> [finding]
 
 **Reserved facets.** The `tagma` namespace family is reserved for
 self-hosted config. Its facets are exactly `hide` (§7), `arity` (§8),
-`type` (§9), `permit` (§10), `enum` (§11) and `range` (§12). A tag in
-namespace `tagma` itself, or in any `tagma.<x>` (including deeper
-`tagma.<x>.<y>`) that is not one of those six, is reported as
+`type` (§9), `permit` (§10), `enum` (§11), `range` (§12) and
+`keys-per-item` (§15). A tag in namespace `tagma` itself, or in any
+`tagma.<x>` (including deeper `tagma.<x>.<y>`) that is not one of those
+seven, is reported as
 `unknown-facet`.
 
 **Finding codes (stable).** `tag` is always the config tag the finding is
@@ -1115,12 +1123,12 @@ about — for a conflict, the tag that **lost**.
 | code | when | args |
 |---|---|---|
 | `unknown-facet` | namespace in the `tagma` family that is not a facet above | `facet` — the namespace with its leading `tagma.` removed (empty for `tagma` itself) |
-| `malformed-value` | `hide`/`permit` value not `true`/`false`; `arity` not `scalar`/`set`; `enum`, `type` or `range` with no value; a `range` that does not parse or has an uninterpretable bound (§12) | `facet`, `expected` — `true\|false`, `scalar\|set`, `value` (enum), `type name` (type), `lo..hi` (range) |
-| `malformed-target` | a target with an empty namespace or key part (`":k"`, `"ns:"`); a `*` in an `arity`/`type`/`enum`/`range` target (exact targets only) | `facet` |
-| `conflict` | one exact target carries contradictory values: `hide` `true`+`false`, `permit` `true`+`false`, `arity` `scalar`+`set`, `type` two names | `facet`, `resolution` — what won: `true` (hide), `false` (permit), `scalar` (arity), `disabled` (type, §9) |
+| `malformed-value` | `hide`/`permit` value not `true`/`false`; `arity` not `scalar`/`set`; `enum`, `type` or `range` with no value; a `range` that does not parse or has an uninterpretable bound (§12); a `keys-per-item` value that is not a non-negative integer (§15) | `facet`, `expected` — `true\|false`, `scalar\|set`, `value` (enum), `type name` (type), `lo..hi` (range), `non-negative integer` (keys-per-item) |
+| `malformed-target` | a target with an empty namespace or key part (`":k"`, `"ns:"`); a `*` in an `arity`/`type`/`enum`/`range` target (exact targets only); a `keys-per-item` target that is not one exact namespace (`*`, or containing `:`, §15) | `facet` |
+| `conflict` | one exact target carries contradictory values: `hide` `true`+`false`, `permit` `true`+`false`, `arity` `scalar`+`set`, `type` two names, `keys-per-item` two different limits (every limit larger than the smallest loses) | `facet`, `resolution` — what won: `true` (hide), `false` (permit), `scalar` (arity), `disabled` (type, §9), the smallest limit, canonical (keys-per-item) |
 | `inert-false` | a `hide`/`permit` `=false` on a target with no `=true` on record (and not the facet's default target: `"tagma:*"` for hide, `"*:*"` for permit) — it deactivates nothing | `facet` |
 | `shadowed-permit` | an active `permit` pattern whose every match is already matched by another active pattern (§10), the implicit `"*:*"` included | `by` — the covering target |
-| `rule-on-unpermitted` | an `enum`/`range`/`type`/`arity` declaration on a target `(ns, key)` that no active permit pattern admits — it can never constrain a valid tag | `facet` |
+| `rule-on-unpermitted` | an `enum`/`range`/`type`/`arity` declaration on a target `(ns, key)` that no active permit pattern admits, or a `keys-per-item` on a namespace no active permit pattern admits any key of (§15) — it can never constrain a valid tag | `facet` |
 | `range-empty` | two `range` declarations on one target (or one with `lo > hi`) whose intersection admits nothing (§12) | `range` — the other declaration (itself when `lo > hi`) |
 | `dead-enum-value` | an `enum` value that a `range` or `type` declaration on the same target never admits | `reason` — `out-of-range`, `not-comparable` or `type-mismatch` |
 | `type-unregistered` | a non-conflicting `type` declaration whose name has no registered comparator — §9 falls back to the numeric grammar | `type` |
@@ -1152,5 +1160,75 @@ Where a finding could name more than one thing, it names one:
   `type-mismatch` alone; otherwise it is reported once per distinct reason
   any `range` on the target gives (`out-of-range`, `not-comparable`).
 
-`check` never changes what §7–§13 do. A store with findings evaluates
-exactly as before; the findings only say why.
+`check` never changes what §7–§13 and §15 do. A store with findings
+evaluates exactly as before; the findings only say why.
+
+## 15. Self-hosted meta-configuration — `tagma.keys-per-item`
+
+*(proposed 2026-10-30, for the owner's review: the one-area/one-repo rule —
+an item belongs to at most one `area`, one `repo` — as a facet, not as
+application code. Like §10–§12 it never refuses a write; §13's `validate`
+reports it and §14's `check` vets it.)*
+
+`keys-per-item` limits how many **distinct keys** one item may carry under
+one namespace: `tagma.keys-per-item:area=1` admits `area:cli` or
+`area:core`, never both on one item. It is §8's `arity` one level up —
+`arity` counts the values under one key, `keys-per-item` the keys under one
+namespace — and it is specified the same way.
+
+**Config tag form.** `tagma.keys-per-item:<target>=<limit>`.
+
+**Target — one exact, named namespace.** `<target>` is the namespace
+itself, spelled as the config tag's key (`tagma.keys-per-item:area=1`,
+`tagma.keys-per-item:triage.sub=1`; quoting, §2, only where the namespace
+needs it). It is **exact**, not a §7 pattern:
+
+- the limit counts the keys of tags whose namespace **equals** `<target>`;
+  a dot-descendant is another namespace (`area.sub:x` is not under
+  `area`), with a limit of its own or none;
+- a `*` target, a target containing `:`, and an empty one configure
+  nothing (§14: `malformed-target`);
+- the **null namespace has no target**: a bare `<target>` already names a
+  namespace, so there is no spelling left for "no namespace". Documented,
+  not solved.
+
+Exact rather than §7's subtree-or-`*` patterns, because the facet is a
+*constraint*, like `arity`, `enum` and `range`, which all take exact
+targets (§8, §11, §12), and not a *membership* predicate like `hide` and
+`permit`: a subtree target would have to say whether `area:x` and
+`area.sub:x` are one key or two, and a `*` target would cap every
+namespace at once, which no use asks for.
+
+**Limit — a non-negative integer.** `<limit>` is one or more ASCII digits
+(`[0-9]+`), compared as the integer it spells, at any length: leading zeros
+are allowed and ignored (`01` is `1`), and a limit beyond any machine
+integer still compares exactly. Its **canonical** spelling — the digits
+without leading zeros, `0` for all zeros — is what findings report. Any
+other value (a sign, a fraction, a word, spaces, no value) configures
+nothing (§14: `malformed-value`, expected `non-negative integer`). `0`
+admits no key at all under the namespace.
+
+**Semantics.** For a limited namespace, the resulting set (§13) is over the
+limit iff it carries more distinct keys under the namespace than the limit;
+values do not count (`area:cli=1` and `area:cli=2` are one key). Every tag
+in an over-limit namespace is reported `too-many-keys` (§13) — as
+`arity-exceeded` reports every value of a scalar key, since no tag among
+them is the one at fault. An unlimited namespace admits any number of keys.
+
+**Restrictive-wins = the smallest limit.** Several `tagma.keys-per-item`
+tags on one target (append-only, as everywhere) all hold: an item within
+the smallest is within every one, so the smallest limit is the one in
+force. Two different limits on one target contradict each other, and §14
+reports each larger one as a `conflict` naming the smallest; two spellings
+of one limit (`1`, `01`) do not.
+
+**Interaction with other facets.** Independent of `permit`, `enum`,
+`range`, `type` and `arity`: every tag counts toward its namespace's keys,
+permitted or not. A limit on a namespace no active permit pattern admits
+any key of can never constrain a valid tag (§14: `rule-on-unpermitted`).
+The `tagma` family is not exempt — a limit on a `tagma.<x>` namespace
+counts its config tags' keys, as any other.
+
+**Config is stored as tags and derived at read time**, store-wide and
+unconditional, as §7–§12: limit tags live on any item, and are hidden by
+§7's default like every `tagma.*` tag.

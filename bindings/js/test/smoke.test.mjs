@@ -138,6 +138,30 @@ test("Rules.fromTags: validate and check mirror the index they come from", () =>
   ]);
 });
 
+test("keys-per-item: a namespace over its limit, through the index and Rules", () => {
+  const keys = [["namespace", "area"], ["limit", "1"], ["keys", "a"], ["keys", "b"], ["keys", "c"]];
+  const expected = [
+    { code: "too-many-keys", tag: "area:a", args: keys, origin: "existing" },
+    { code: "too-many-keys", tag: "area:b", args: keys, origin: "existing" },
+    { code: "too-many-keys", tag: "area:c", args: keys, origin: "introduced" },
+  ];
+  const idx = new Index();
+  idx.add("cfg tagma.keys-per-item:area=1");
+  idx.add("item area:a area:b");
+  assert.deepEqual(idx.validate("item", ["area:c"], []), expected);
+  const rules = Rules.fromTags(["tagma.keys-per-item:area=1"]);
+  assert.deepEqual(rules.validate(["area:a", "area:b"], ["area:c"], []), expected);
+  const conflicted = Rules.fromTags(["tagma.keys-per-item:area=2", "tagma.keys-per-item:area=1"]);
+  assert.deepEqual(conflicted.check(), [
+    {
+      code: "conflict",
+      tag: "tagma.keys-per-item:area=2",
+      args: [["facet", "keys-per-item"], ["resolution", "1"]],
+      origin: "existing",
+    },
+  ]);
+});
+
 test("Rules: an invalid tag throws, naming its list", () => {
   assert.throws(() => Rules.fromTags(["=5"]), Error);
   const rules = Rules.fromTags([]);

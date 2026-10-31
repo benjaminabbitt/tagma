@@ -1,5 +1,5 @@
-//! Red tests for SPEC.md §10–§14 (draft): the `permit`, `enum` and `range`
-//! facets, `validate` (§13) and `check` (§14). Written before the
+//! Red tests for SPEC.md §10–§15 (draft): the `permit`, `enum`, `range` and
+//! `keys-per-item` facets, `validate` (§13) and `check` (§14). Written before the
 //! implementation, for the owner's review — every test here fails today on
 //! the `todo!()` stubs in `src/rules.rs` / `Index::{rules,validate,check}`.
 

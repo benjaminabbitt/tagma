@@ -170,6 +170,30 @@ def test_rules_from_tags_mirrors_the_index_it_comes_from():
     ]
 
 
+def test_keys_per_item_through_the_index_and_rules():
+    keys = [("namespace", "area"), ("limit", "1"), ("keys", "a"), ("keys", "b"), ("keys", "c")]
+    expected = [
+        {"code": "too-many-keys", "tag": "area:a", "args": keys, "origin": "existing"},
+        {"code": "too-many-keys", "tag": "area:b", "args": keys, "origin": "existing"},
+        {"code": "too-many-keys", "tag": "area:c", "args": keys, "origin": "introduced"},
+    ]
+    idx = tagma.Index()
+    idx.add("cfg tagma.keys-per-item:area=1")
+    idx.add("item area:a area:b")
+    assert idx.validate("item", ["area:c"]) == expected
+    rules = tagma.Rules.from_tags(["tagma.keys-per-item:area=1"])
+    assert rules.validate(["area:a", "area:b"], ["area:c"]) == expected
+    conflicted = tagma.Rules.from_tags(["tagma.keys-per-item:area=2", "tagma.keys-per-item:area=1"])
+    assert conflicted.check() == [
+        {
+            "code": "conflict",
+            "tag": "tagma.keys-per-item:area=2",
+            "args": [("facet", "keys-per-item"), ("resolution", "1")],
+            "origin": "existing",
+        }
+    ]
+
+
 def test_rules_invalid_tag_raises_naming_its_list():
     try:
         tagma.Rules.from_tags(["=5"])

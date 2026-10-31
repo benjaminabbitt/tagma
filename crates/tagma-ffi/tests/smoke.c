@@ -159,6 +159,39 @@ static void standalone_rules(void) {
     assert(tagma_rules_free(0) == 0);
 }
 
+/* tagma.keys-per-item (SPEC.md section 15) at the real ABI: a namespace
+ * over its limit draws one finding per tag in it, the keys it carries as
+ * args, through an index and a standalone rule set alike. */
+static void keys_per_item(void) {
+    const char *expected =
+        "{\"code\":\"too-many-keys\",\"tag\":\"area:a\",\"args\":[[\"namespace\",\"area\"],"
+        "[\"limit\",\"1\"],[\"keys\",\"a\"],[\"keys\",\"b\"]],\"origin\":\"existing\"}\n"
+        "{\"code\":\"too-many-keys\",\"tag\":\"area:b\",\"args\":[[\"namespace\",\"area\"],"
+        "[\"limit\",\"1\"],[\"keys\",\"a\"],[\"keys\",\"b\"]],\"origin\":\"existing\"}";
+    TagmaIndex idx = tagma_index_new();
+    assert(idx != 0);
+    assert(tagma_index_add(idx, "cfg tagma.keys-per-item:area=1") == 0);
+    assert(tagma_index_add(idx, "item area:a area:a=2") == 0);
+    char *found = tagma_validate(idx, "item", "area:b", "area:a=2");
+    assert(found != NULL);
+    assert(strcmp(found,
+                  "{\"code\":\"too-many-keys\",\"tag\":\"area:a\",\"args\":[[\"namespace\",\"area\"],"
+                  "[\"limit\",\"1\"],[\"keys\",\"a\"],[\"keys\",\"b\"]],\"origin\":\"introduced\"}\n"
+                  "{\"code\":\"too-many-keys\",\"tag\":\"area:b\",\"args\":[[\"namespace\",\"area\"],"
+                  "[\"limit\",\"1\"],[\"keys\",\"a\"],[\"keys\",\"b\"]],\"origin\":\"introduced\"}") == 0);
+    tagma_str_free(found);
+    assert(tagma_index_free(idx) == 0);
+
+    TagmaRules rules = tagma_rules_from_tags("tagma.keys-per-item:area=1");
+    assert(rules != 0);
+    char *over = tagma_rules_validate(rules, "area:a area:b area:c", "", "area:c");
+    assert(over != NULL);
+    /* Dropping one key leaves the item over the same limit: existing. */
+    assert(strcmp(over, expected) == 0);
+    tagma_str_free(over);
+    assert(tagma_rules_free(rules) == 0);
+}
+
 int main(void) {
     TagmaIndex idx = tagma_index_new();
     assert(idx != 0);
@@ -232,6 +265,7 @@ int main(void) {
     handle_safety();
     rules();
     standalone_rules();
+    keys_per_item();
 
     return 0;
 }

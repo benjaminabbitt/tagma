@@ -1,6 +1,7 @@
 package tagma
 
-// SPEC.md §10–§14: permit, enum and range, Validate (§13) and Check (§14).
+// SPEC.md §10–§15: permit, enum, range and keys-per-item, Validate (§13)
+// and Check (§14).
 // Mirrors crates/tagma-core/tests/rules.rs case for case, pinning what the
 // shared features/rules.feature does not: finding args, origins, order.
 

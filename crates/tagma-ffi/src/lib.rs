@@ -1240,6 +1240,38 @@ mod tests {
     }
 
     #[test]
+    fn keys_per_item_findings_cross_the_boundary_whole() {
+        unsafe {
+            let finding = |tag: &str, origin: &str| {
+                format!(
+                    r#"{{"code":"too-many-keys","tag":"{tag}","args":[["namespace","area"],["limit","1"],["keys","a"],["keys","b"],["keys","c"]],"origin":"{origin}"}}"#
+                )
+            };
+            let expected = [
+                finding("area:a", "existing"),
+                finding("area:b", "existing"),
+                finding("area:c", "introduced"),
+            ]
+            .join("\n");
+            let idx = rules_index(&["cfg tagma.keys-per-item:area=1", "item area:a area:b"]);
+            assert_eq!(from_c(validate(idx, "item", "area:c", "")), expected);
+            let rules = rules_from("tagma.keys-per-item:area=1");
+            assert_eq!(
+                from_c(rules_validate(rules, "area:a area:b", "area:c", "")),
+                expected
+            );
+            let conflict = rules_from("tagma.keys-per-item:area=2 tagma.keys-per-item:area=1");
+            assert_eq!(
+                from_c(tagma_rules_check(conflict)),
+                r#"{"code":"conflict","tag":"tagma.keys-per-item:area=2","args":[["facet","keys-per-item"],["resolution","1"]],"origin":"existing"}"#
+            );
+            assert_eq!(tagma_rules_free(rules), 0);
+            assert_eq!(tagma_rules_free(conflict), 0);
+            assert_eq!(tagma_index_free(idx), 0);
+        }
+    }
+
+    #[test]
     fn rules_from_tags_rejects_bad_input() {
         unsafe {
             assert_eq!(tagma_rules_from_tags(std::ptr::null()), 0);

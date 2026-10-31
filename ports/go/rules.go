@@ -1,7 +1,8 @@
 package tagma
 
-// Tag-schema rules a client self-hosts as config tags (SPEC.md §10–§14):
-// the permit, enum and range facets alongside §8's arity and §9's type,
+// Tag-schema rules a client self-hosts as config tags (SPEC.md §10–§15):
+// the permit, enum, range and keys-per-item facets alongside §8's arity and
+// §9's type,
 // and the two pure calls that read them — Rules.Validate (§13) and
 // Rules.Check (§14). Mirrors tagma-core's rules module; pattern parsing
 // (§7, reused by permit) and the arity/type resolution (§8/§9) are this
@@ -21,7 +22,46 @@ const permitDefaultTarget = "*:*"
 
 // facets are the tagma facets (SPEC.md §14 "Reserved facets"); any other
 // namespace in the family is unknown-facet.
-var facets = []string{"hide", "arity", "type", "permit", "enum", "range"}
+var facets = []string{"hide", "arity", "type", "permit", "enum", "range", keysPerItem}
+
+// keysPerItem is the tagma.keys-per-item facet (SPEC.md §15).
+const keysPerItem = "keys-per-item"
+
+// namespaceTarget reports whether a tagma.keys-per-item <target> is one
+// exact, named namespace (SPEC.md §15): non-empty, with no ":" and not the
+// "*" wildcard; otherwise it is §14 malformed-target.
+func namespaceTarget(target string) bool {
+	return target != "" && !strings.Contains(target, ":") && target != "*"
+}
+
+// limitValue is a tagma.keys-per-item limit (SPEC.md §15): a value of
+// ASCII digits only, canonical — leading zeros dropped, "0" for all zeros
+// — or ok false (§14 malformed-value). Kept as digits so any length
+// compares exactly.
+func limitValue(t Tag) (string, bool) {
+	if t.Value == nil || *t.Value == "" {
+		return "", false
+	}
+	for _, c := range []byte(*t.Value) {
+		if c < '0' || c > '9' {
+			return "", false
+		}
+	}
+	canonical := strings.TrimLeft(*t.Value, "0")
+	if canonical == "" {
+		canonical = "0"
+	}
+	return canonical, true
+}
+
+// cmpDigits orders two canonical limits (or counts) as the integers they
+// spell: -1, 0 or 1.
+func cmpDigits(a, b string) int {
+	if len(a) != len(b) {
+		return sign(len(a) - len(b))
+	}
+	return strings.Compare(a, b)
+}
 
 // Change is a proposed change to one item's tags (SPEC.md §13): Remove
 // applies first, then Add, by tagma's own write rules (§8 scalar
@@ -139,6 +179,9 @@ type Rules struct {
 	// sorted, interpreted on use (a bound's meaning depends on the
 	// registered comparators).
 	ranges map[configTarget][]string
+	// keysPerItem is §15: namespace -> its smallest declared limit,
+	// canonical.
+	keysPerItem map[string]string
 	// comparators is §9 comparators by type name.
 	comparators map[string]TypeComparator
 }
@@ -409,6 +452,17 @@ func RulesFromTags(tags []Tag) *Rules {
 		return m
 	}
 
+	limits := map[string]string{}
+	for _, t := range of(keysPerItem) {
+		limit, ok := limitValue(t)
+		if !ok || !namespaceTarget(t.Key) {
+			continue
+		}
+		if held, seen := limits[t.Key]; !seen || cmpDigits(limit, held) < 0 {
+			limits[t.Key] = limit
+		}
+	}
+
 	return &Rules{
 		config:        config,
 		permit:        permit,
@@ -417,6 +471,7 @@ func RulesFromTags(tags []Tag) *Rules {
 		types:         resolveTypes(facts("type")),
 		enums:         valued("enum"),
 		ranges:        valued("range"),
+		keysPerItem:   limits,
 		comparators:   map[string]TypeComparator{},
 	}
 }
@@ -531,6 +586,26 @@ func (r *Rules) permitted(ns *string, key string) bool {
 	return false
 }
 
+// permitsNamespace reports whether some tag in the named namespace ns is
+// permitted: an active permit pattern's ns side matches it, whatever its
+// key side, or ns is in the exempt tagma family (SPEC.md §10, §15).
+func (r *Rules) permitsNamespace(ns string) bool {
+	if inTagmaFamily(&ns) {
+		return true
+	}
+	for _, p := range r.permit {
+		switch p.ns.kind {
+		case nsPatternAny:
+			return true
+		case nsPatternNamed:
+			if covers(ns, p.ns.name) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // apply is the tag set current becomes under change (SPEC.md §13):
 // removes first, then adds with §8's scalar collapse, as a write would.
 func (r *Rules) apply(current []Tag, change Change) []Tag {
@@ -610,7 +685,63 @@ func (r *Rules) judge(set []Tag) []rawFinding {
 			out = append(out, rawFinding{CodeArityExceeded, tag, []Arg{{"arity", "scalar"}}})
 		}
 	}
+	// §15: per limited namespace, its distinct keys and its tags.
+	type keyed struct {
+		keys map[string]bool
+		tags map[string]Tag
+	}
+	byNamespace := map[string]*keyed{}
+	for _, tag := range set {
+		if tag.Namespace == nil {
+			continue
+		}
+		ns := *tag.Namespace
+		if _, limited := r.keysPerItem[ns]; !limited {
+			continue
+		}
+		k := byNamespace[ns]
+		if k == nil {
+			k = &keyed{map[string]bool{}, map[string]Tag{}}
+			byNamespace[ns] = k
+		}
+		k.keys[tag.Key] = true
+		k.tags[tag.String()] = tag
+	}
+	for ns, k := range byNamespace {
+		limit := r.keysPerItem[ns]
+		if cmpDigits(strconv.Itoa(len(k.keys)), limit) <= 0 {
+			continue
+		}
+		keys := make([]string, 0, len(k.keys))
+		for key := range k.keys {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		args := []Arg{{"namespace", ns}, {"limit", limit}}
+		for _, key := range keys {
+			args = append(args, Arg{"keys", key})
+		}
+		for _, tag := range k.tags {
+			out = append(out, rawFinding{CodeTooManyKeys, tag, args})
+		}
+	}
 	return out
+}
+
+// originKey is f's identity for SPEC.md §13's origin: its key, but for a
+// too-many-keys without its keys args (§15), so a tag that already
+// exceeded the same limit stays existing however the key list changes.
+func (f rawFinding) originKey() string {
+	if f.code != CodeTooManyKeys {
+		return f.key()
+	}
+	var args []Arg
+	for _, a := range f.args {
+		if a.Name != "keys" {
+			args = append(args, a)
+		}
+	}
+	return rawFinding{f.code, f.tag, args}.key()
 }
 
 // containsString reports whether s holds v.
@@ -626,15 +757,16 @@ func containsString(s []string, v string) bool {
 // Validate implements SPEC.md §13: the findings for the tag set current
 // would become under change (removes, then adds with §8 scalar collapse),
 // each OriginExisting iff the same (code, tag, args) finding already holds
-// for current itself, else OriginIntroduced. Pure; sorted by tag spelling,
-// code, args; never nil.
+// for current itself, else OriginIntroduced — a too-many-keys's keys args
+// left out of the comparison (§15). Pure; sorted by tag spelling, code,
+// args; never nil.
 func (r *Rules) Validate(current []Tag, change Change) []Finding {
 	before := map[string]bool{}
 	for _, f := range r.judge(current) {
-		before[f.key()] = true
+		before[f.originKey()] = true
 	}
 	return finish(r.judge(r.apply(current, change)), func(f rawFinding) Origin {
-		if before[f.key()] {
+		if before[f.originKey()] {
 			return OriginExisting
 		}
 		return OriginIntroduced
@@ -671,6 +803,8 @@ func (r *Rules) Check() []Finding {
 		switch facet {
 		case "hide", "permit":
 			targetOK = patternTargetOK(tag.Key)
+		case keysPerItem:
+			targetOK = namespaceTarget(tag.Key)
 		default:
 			_, targetOK = exactTarget(tag.Key)
 		}
@@ -695,6 +829,10 @@ func (r *Rules) Check() []Finding {
 		case "type":
 			if tag.Value == nil {
 				expected = "type name"
+			}
+		case keysPerItem:
+			if _, ok := limitValue(tag); !ok {
+				expected = "non-negative integer"
 			}
 		default: // range
 			target, _ := exactTarget(tag.Key)
@@ -732,6 +870,21 @@ func (r *Rules) Check() []Finding {
 
 	for _, g := range groups {
 		tags := by[g]
+		// §15: every limit larger than the smallest loses to it.
+		if g.facet == keysPerItem {
+			least := ""
+			for _, tag := range tags {
+				if limit, _ := limitValue(tag); least == "" || cmpDigits(limit, least) < 0 {
+					least = limit
+				}
+			}
+			for _, tag := range tags {
+				if limit, _ := limitValue(tag); cmpDigits(limit, least) > 0 {
+					finding(CodeConflict, tag, Arg{"facet", g.facet}, Arg{"resolution", least})
+				}
+			}
+			continue
+		}
 		// Conflicts: the losing tag(s), and what won.
 		var loser, resolution, defaultTarget string
 		switch g.facet {
@@ -804,6 +957,12 @@ func (r *Rules) Check() []Finding {
 	// Rules on exact targets: unpermitted targets, empty ranges, dead enum
 	// values, unregistered types.
 	for _, s := range sound {
+		if s.facet == keysPerItem {
+			if !r.permitsNamespace(s.tag.Key) {
+				finding(CodeRuleOnUnpermitted, s.tag, Arg{"facet", s.facet})
+			}
+			continue
+		}
 		target, ok := exactTarget(s.tag.Key)
 		if !ok {
 			continue

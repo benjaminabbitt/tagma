@@ -358,6 +358,55 @@ fn query_with_two_arguments_not_led_by_postfix_is_a_bad_invocation() {
         .stdout(predicate::str::is_empty());
 }
 
+/// SPEC.md §15 through the CLI: one finding per tag in the namespace over
+/// its limit, the keys it carries as args; the tags already over the same
+/// limit stay existing.
+const KEYS_PER_ITEM_FINDINGS: &str = concat!(
+    r#"{"code":"too-many-keys","tag":"area:a","args":[["namespace","area"],["limit","1"],["keys","a"],["keys","b"],["keys","c"]],"origin":"existing"}"#,
+    "\n",
+    r#"{"code":"too-many-keys","tag":"area:b","args":[["namespace","area"],["limit","1"],["keys","a"],["keys","b"],["keys","c"]],"origin":"existing"}"#,
+    "\n",
+    r#"{"code":"too-many-keys","tag":"area:c","args":[["namespace","area"],["limit","1"],["keys","a"],["keys","b"],["keys","c"]],"origin":"introduced"}"#,
+    "\n",
+);
+
+#[test]
+fn validate_reports_a_namespace_over_its_keys_per_item_limit() {
+    tagma()
+        .args(["validate", "item", "--add", "area:c"])
+        .write_stdin("cfg tagma.keys-per-item:area=1\nitem area:a area:b\n")
+        .assert()
+        .success()
+        .stdout(KEYS_PER_ITEM_FINDINGS);
+    tagma()
+        .args(["rules", "validate", "--current", "area:a area:b"])
+        .args(["--add", "area:c"])
+        .write_stdin("tagma.keys-per-item:area=1\n")
+        .assert()
+        .success()
+        .stdout(KEYS_PER_ITEM_FINDINGS);
+}
+
+#[test]
+fn check_reports_a_larger_keys_per_item_limit_as_the_conflicts_loser() {
+    let conflict = concat!(
+        r#"{"code":"conflict","tag":"tagma.keys-per-item:area=2","args":[["facet","keys-per-item"],["resolution","1"]],"origin":"existing"}"#,
+        "\n"
+    );
+    tagma()
+        .args(["check"])
+        .write_stdin("cfg tagma.keys-per-item:area=2 tagma.keys-per-item:area=1\n")
+        .assert()
+        .success()
+        .stdout(conflict);
+    tagma()
+        .args(["rules", "check"])
+        .write_stdin("tagma.keys-per-item:area=2 tagma.keys-per-item:area=1\n")
+        .assert()
+        .success()
+        .stdout(conflict);
+}
+
 // --- rules validate / rules check: a standalone rule set ----------------
 
 /// Config tags as `rules` reads them: whitespace-separated, several lines,
