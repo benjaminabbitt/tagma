@@ -147,4 +147,4 @@ CI runs `just check`, plus a separate JS conformance job.
 
 ## License
 
-BSD 3-Clause. See [`LICENSE`](LICENSE).
+AGPL-3.0-only. See [`LICENSE`](LICENSE).

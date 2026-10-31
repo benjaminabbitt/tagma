@@ -2,7 +2,7 @@
   "name": "tagma",
   "version": "0.1.0",
   "private": true,
-  "license": "BSD-3-Clause",
+  "license": "AGPL-3.0-only",
   "description": "tagma: tag parsing, query compilation and matching over a WASM-built tagma-core (placeholder package, not published).",
   "type": "module",
   "main": "./src/node.mjs",

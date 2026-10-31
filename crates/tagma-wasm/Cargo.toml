@@ -2,7 +2,7 @@
 name = "tagma-wasm"
 version = "0.1.0"
 edition = "2021"
-license = "BSD-3-Clause"
+license = "AGPL-3.0-only"
 description = "wasm-bindgen wrapper over tagma-core (PLAN.md Phase 5, task W1)."
 
 [lib]
