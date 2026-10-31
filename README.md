@@ -74,7 +74,13 @@ straightforward postfix stack machine over an in-memory index. There is almost
 certainly performance left on the table: query planning, index access paths
 and fusing `x/not/and` into set difference are all possible, and SPEC §5
 leaves room for them. None of that is a priority at the scales tagma is used
-at today: a project's tasks and a handful of fragments. If tagma ever has to
+at. Those uses are:
+
+- a project's tasks (taskloom);
+- a blog's articles, indexed and queried;
+- describing arbitrary data on things in games.
+
+All of them are low enough in volume to fit in memory comfortably. If tagma ever has to
 serve as a database, performance becomes a design concern, with measurements
 first and the spec's semantics unchanged.
 
