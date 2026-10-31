@@ -731,17 +731,14 @@ func (r *Rules) judge(set []Tag) []rawFinding {
 // originKey is f's identity for SPEC.md §13's origin: its key, but for a
 // too-many-keys without its keys args (§15), so a tag that already
 // exceeded the same limit stays existing however the key list changes.
+// Its other args, the namespace and the limit, follow from its tag under
+// the one config both sides are judged by, so it is keyed by code and tag
+// alone.
 func (f rawFinding) originKey() string {
 	if f.code != CodeTooManyKeys {
 		return f.key()
 	}
-	var args []Arg
-	for _, a := range f.args {
-		if a.Name != "keys" {
-			args = append(args, a)
-		}
-	}
-	return rawFinding{f.code, f.tag, args}.key()
+	return rawFinding{f.code, f.tag, nil}.key()
 }
 
 // containsString reports whether s holds v.

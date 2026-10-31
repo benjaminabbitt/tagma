@@ -572,14 +572,16 @@ impl Rules {
     /// [`Origin::Existing`] iff the same `(code, tag, args)` finding already
     /// holds for `current` itself, else [`Origin::Introduced`] — the
     /// `keys` args of a `too-many-keys` left out of the comparison (§15),
-    /// so a tag that already exceeded the same limit stays existing. Pure.
+    /// so a tag that already exceeded the same limit stays existing. Its
+    /// other args, the namespace and the limit, follow from its tag under
+    /// the one config both sides are judged by, so it is compared by code
+    /// and tag alone. Pure.
     pub fn validate(&self, current: &[Tag], change: &Change) -> Vec<Finding> {
         let key = |r: &Raw| {
-            let args: Vec<_> =
-                r.2.iter()
-                    .filter(|(name, _)| r.0 != Code::TooManyKeys || name != "keys")
-                    .cloned()
-                    .collect();
+            let args = match r.0 {
+                Code::TooManyKeys => Vec::new(),
+                _ => r.2.clone(),
+            };
             (r.0, r.1.to_string(), args)
         };
         let before: BTreeSet<_> = self.judge(current).iter().map(key).collect();
