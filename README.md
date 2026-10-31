@@ -4,27 +4,63 @@
 the thing done): a tagma is the result of tagging.*
 
 tagma is a small tagging model and query language with one specification and
-many implementations:
+many implementations.
 
-- **Tags** are three-position triples, `namespace:key=value`, where namespace
-  and value are each optional (`urgent`, `lang=en`, `area:cli`,
-  `triage:level=3`). Keys are multi-valued. Everything is a string at rest;
-  interpretation (numeric, typed) is chosen by the query operator.
-- **Queries** are postfix, the canonical and stored form
-  (`lang=en/area:mcp/or`). There is an infix front end (`lang=en or area:mcp`)
-  that is only a gateway: it compiles to postfix, and nothing evaluates infix.
-- **Self-hosted rules**: tagma configures itself with ordinary tags in the
-  reserved `tagma.*` namespaces. These include `hide`, `arity`, `type`,
-  `permit`, `enum`, `range` and `keys-per-item`. Rules travel with the data
-  they govern.
-- **Validate and check**: writes never fail. A client asks
-  `validate(item, change)` before writing and gets findings, each marked
-  `introduced` or `existing`. `check` is a doctor over the configuration
-  itself.
+## The tag: a namespace, key, value triple
 
-The rules are a **description, not a program**. They state facts about tags.
-They will not grow into a programming language: no expressions, conditionals
-or code-valued facets. See SPEC §7.
+Every tag is a triple, written `namespace:key=value`:
+
+| Position | Required? | Example | Meaning |
+|---|---|---|---|
+| **namespace** | optional | `area` in `area:cli` | groups keys; dotted namespaces nest (`triage.sub:kind`) |
+| **key** | **required** | `cli` in `area:cli`, `urgent` | what the tag says |
+| **value** | optional | `en` in `lang=en`, `3` in `triage:level=3` | a datum attached to the key |
+
+So `urgent` is a bare key, `lang=en` is a key with a value, `area:cli` is a key
+in a namespace, and `triage:level=3` uses all three positions. An absent
+position is genuinely absent, with no sentinel or default: `urgent` and
+`urgent=high` are different tags that share a key.
+
+## Features
+
+- **Multi-valued keys.** An item may carry `lang=en` and `lang=fr` at once. A
+  value atom matches if *some* tag on the item satisfies it.
+- **Strings at rest.** Every stored position is a string. Interpretation
+  (numeric comparison, typed ordering) is chosen by the query operator, never
+  at write time.
+- **Quoting.** A quoted token is always data, so values can hold spaces,
+  operators and `/`.
+- **Postfix queries.** The canonical and stored form is
+  `lang=en/area:mcp/or`. A query never fails on what's left on the stack; any
+  leftover operands fold with `and`.
+- **An infix gateway.** `lang=en or area:mcp` compiles to that postfix. Only
+  postfix is ever evaluated, and every surface exposes `compile`.
+- **Wildcards and comparisons in queries.** These include namespace and key
+  patterns and numeric value comparisons. See SPEC §2–§5.
+- **Typed comparison.** Clients can register a comparator for a declared
+  type (e.g. `semver`) with `tagma.type`.
+- **Self-hosted rules.** tagma configures itself with ordinary tags in the
+  reserved `tagma.*` namespaces, so the rules travel with the data they
+  govern. The facets are:
+  - `hide`: what ordinary queries don't see
+  - `arity`: one value or many per key
+  - `type`
+  - `permit`: an allowlist of namespaces and keys
+  - `enum`
+  - `range`
+  - `keys-per-item`: e.g. at most one `area:` key per item
+
+  Conflicting declarations resolve restrictively.
+- **Validate before writing.** Writes never fail. A client calls
+  `validate(item, change)`, gets findings each marked `introduced` or
+  `existing`, and decides what to refuse.
+- **Check.** A doctor over the configuration itself. It reports
+  contradictions, shadowed or inert declarations, malformed targets and
+  unknown facets.
+
+The rules are a **description, not a program**. They state facts about tags
+and will never grow into a programming language: no expressions,
+conditionals or code-valued facets. See SPEC §7.
 
 ## Try it
 
