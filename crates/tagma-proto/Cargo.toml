@@ -2,7 +2,7 @@
 name = "tagma-proto"
 version = "0.1.0"
 edition = "2021"
-license = "BSD-3-Clause"
+license = "Apache-2.0 OR BSD-3-Clause"
 description = "tagma's Tag as a protobuf message (proto/tagma/v1/tag.proto), with conversions to and from tagma-core's Tag"
 
 # prost only, and tagma-core for the conversions: a consumer's own messages

@@ -7,7 +7,7 @@ name = "tagma"
 version = "0.1.0"
 description = "Python bindings for tagma (PyO3, wraps tagma-core directly)"
 requires-python = ">=3.10"
-license = "BSD-3-Clause"
+license = "Apache-2.0 OR BSD-3-Clause"
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",

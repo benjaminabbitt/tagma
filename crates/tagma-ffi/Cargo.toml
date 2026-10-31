@@ -2,7 +2,7 @@
 name = "tagma-ffi"
 version = "0.1.0"
 edition = "2021"
-license = "BSD-3-Clause"
+license = "Apache-2.0 OR BSD-3-Clause"
 
 [lib]
 name = "tagma_ffi"

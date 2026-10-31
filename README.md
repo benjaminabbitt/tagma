@@ -147,4 +147,4 @@ CI runs `just check`, plus a separate JS conformance job.
 
 ## License
 
-BSD 3-Clause. See [`LICENSE`](LICENSE).
+Licensed under either of Apache License 2.0 or BSD 3-Clause, at your option.
