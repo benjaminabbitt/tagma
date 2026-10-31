@@ -69,7 +69,7 @@ const HIDE_CONFIG_NAMESPACE: &str = "tagma.hide";
 /// `tagma.hide:"tagma:*"=true` were always present — the whole `tagma.*`
 /// family, every key — unless overridden by an explicit
 /// `tagma.hide:"tagma:*"=false` naming the same target.
-const HIDE_DEFAULT_TARGET: &str = "tagma:*";
+pub(crate) const HIDE_DEFAULT_TARGET: &str = "tagma:*";
 
 /// The reserved namespace `tagma.arity` config tags live in (SPEC.md §8): a
 /// config tag is `tagma.arity:<target>=<arity>`, so this is the tag's own
