@@ -71,9 +71,14 @@ tagma is a **human-readable tagging system, not a database**. Its query
 language is built to be read and written by people, and to behave the same in
 every implementation. It is not built for speed. Evaluation is a
 straightforward postfix stack machine over an in-memory index. There is almost
-certainly performance left on the table: query planning, index access paths
-and fusing `x/not/and` into set difference are all possible, and SPEC §5
-leaves room for them. None of that is a priority at the scales tagma is used
+certainly performance left on the table. The postfix language is effectively
+RPN, so standard RPN and stack-machine techniques likely apply:
+- rebuilding the expression tree to rewrite it algebraically;
+- folding constants and sharing common subexpressions;
+- reordering `and` and `or` operands by selectivity;
+- peephole fusion, such as `x/not/and` into a set difference.
+
+Index access paths are possible too, and SPEC §5 leaves room for them. None of that is a priority at the scales tagma is used
 at. Those uses are:
 
 - a project's tasks (taskloom);
