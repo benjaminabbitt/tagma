@@ -307,6 +307,18 @@ served by scan until a value-level index earns its keep.
 
 ## 7. Self-hosted meta-configuration — `tagma.hide`
 
+**Self-hosted configuration is a description, not a program.** Every
+`tagma.*` facet in this and the following sections (§7–§15) *declares a
+fact* about tags — what is hidden, how many values a key holds, what is
+permitted, which values or ranges are admitted — and tagma derives the
+effective configuration from those facts by fixed rules (restrictive wins).
+It MUST NOT be construed as, or grown into, a programming language: no
+conditionals, variables, expressions, functions, loops, evaluation order or
+user-defined computation, and no facet whose value is code. A need the
+existing facets cannot describe is met by a new *declarative* facet with its
+own section here, or left to the client, never by making facet values
+executable.
+
 tagma configures itself using its own tag model: reserved `tagma.*`
 namespaces carry meta-configuration tags, written and read exactly like
 ordinary tags. `hide` is the first such feature: pattern-based visibility
