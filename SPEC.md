@@ -1,6 +1,9 @@
 # tagma — Specification (draft)
 
-*(from "tagmeme" — linguistics' slot-plus-filler unit: a key and its value)*
+*(tag + **-ma**, the Greek suffix (-μα) that names the result of an action — as in
+*pragma*, the thing done, or *schema*, the shape held: a tagma is the result of
+tagging. The name also echoes "tagmeme", linguistics' slot-plus-filler unit: a
+key and its value.)*
 
 A tagging model of three-position tags — `namespace:key=value` with namespace and
 value independently optional — plus a postfix query language (canonical/wire form)
