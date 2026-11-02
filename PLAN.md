@@ -342,6 +342,8 @@ setup          → rustup components; critical-path bootstrap only
 setup-js / setup-py / setup-go   → phase-gated toolchain installs
 check          → fmt-check + clippy (deny warnings) + test + conformance-rust
 fmt / lint / test                → the obvious cargo invocations, workspace-wide
+lint-py        → ruff over bindings/python (dev-only, installed by setup-py)
+hooks-install  → lefthook install (the git hooks in lefthook.yml)
 conformance    → every conformance-* whose artifact exists; fails on any red
 conformance-rust → cargo test -p tagma-core --test conformance
 conformance-js / conformance-py / conformance-go   → per-language harnesses

@@ -1,0 +1,24 @@
+# Git hooks, managed by lefthook (`just hooks-install`).
+# https://github.com/evilmartians/lefthook
+#
+# A failing hook is a finding: fix the cause and commit again; never bypass
+# it with --no-verify.
+
+pre-commit:
+  parallel: false
+  commands:
+    fmt:
+      # Formats the Rust rather than refusing it, and restages what it fixed.
+      glob: "*.rs"
+      run: just fmt
+      stage_fixed: true
+    lint:
+      run: just lint
+    lint-wasm:
+      glob: "crates/tagma-wasm/**"
+      run: just lint-wasm
+    lint-py:
+      glob: "bindings/python/**"
+      run: just lint-py
+    test:
+      run: just test

@@ -49,7 +49,9 @@ setup-py:
         python3 -m venv bindings/python/.venv
     fi
     bindings/python/.venv/bin/pip install --upgrade pip >/dev/null
-    bindings/python/.venv/bin/pip install maturin behave
+    # ruff is the binding's dev-only linter (`just lint-py`); nothing at
+    # runtime or build time imports it.
+    bindings/python/.venv/bin/pip install maturin behave 'ruff>=0.4.0'
     echo "setup-py: venv ready"
 
 setup-go:
@@ -57,6 +59,11 @@ setup-go:
     set -euo pipefail
     cd ports/go
     go mod download
+
+# Install the git hooks lefthook.yml declares. lefthook itself is a host
+# tool (https://github.com/evilmartians/lefthook), not a project dependency.
+hooks-install:
+    lefthook install
 
 # --- critical path -------------------------------------------------------
 
@@ -73,6 +80,12 @@ fmt-check:
 
 lint:
     cargo clippy --workspace --all-targets -- -D warnings
+
+# Lint the Python binding's own sources (bindings/python: the behave
+# environment and steps, the smoke test) with ruff, configured in
+# bindings/python/pyproject.toml. ruff is dev-only, installed by setup-py.
+lint-py: setup-py
+    cd bindings/python && .venv/bin/ruff check .
 
 # Panic-freedom gate for crates/tagma-wasm (task oily-wheat).
 #

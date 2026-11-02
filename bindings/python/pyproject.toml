@@ -16,3 +16,17 @@ classifiers = [
 [tool.maturin]
 module-name = "tagma"
 features = ["pyo3/extension-module"]
+
+# ruff is dev-only (installed by `just setup-py`, run by `just lint-py`). Its
+# default lint set (pycodestyle E4/E7/E9, pyflakes F) plus the stack's
+# complexity gate: mccabe complexity over 10, and pylint's branch, statement
+# and argument counts at ruff's defaults (12, 50 and 5). No noqa or per-file
+# escapes; a violator is refactored.
+[tool.ruff]
+extend-exclude = [".venv"]
+
+[tool.ruff.lint]
+extend-select = ["C901", "PLR0912", "PLR0915", "PLR0913"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
