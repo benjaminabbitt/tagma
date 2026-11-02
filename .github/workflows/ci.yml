@@ -29,6 +29,11 @@ jobs:
       - name: Check
         run: just check
 
+      # ruff over the Python binding's own sources, at the version setup-py
+      # pins; the runner's python3 makes the venv.
+      - name: Lint (Python)
+        run: just lint-py
+
   # The JS binding: wasm-pack builds tagma-core to wasm, then the node:test
   # smoke tests and cucumber-js conformance run against it. Its own job so
   # `just check` stays toolchain-light (no node, no wasm toolchain).

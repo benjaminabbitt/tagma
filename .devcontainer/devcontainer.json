@@ -12,5 +12,8 @@
     "ghcr.io/devcontainers/features/go:1": {},
     "ghcr.io/guiyomh/features/just:0": {}
   },
-  "postCreateCommand": "just setup"
+  // lefthook runs the git hooks lefthook.yml declares (`just hooks-install`);
+  // without it a commit made inside the container would skip them. Its
+  // release binary, installed as taskloom's and ctxloom-rs's Containerfiles do.
+  "postCreateCommand": "curl -fsSL https://github.com/evilmartians/lefthook/releases/download/v2.1.14/lefthook_2.1.14_Linux_x86_64.gz | gunzip | sudo tee /usr/local/bin/lefthook >/dev/null && sudo chmod +x /usr/local/bin/lefthook && just setup && just hooks-install"
 }
