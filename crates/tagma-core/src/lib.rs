@@ -7,6 +7,7 @@ pub mod index;
 pub mod infix;
 pub mod postfix;
 pub mod rules;
+pub mod semver;
 pub mod tag;
 pub mod token;
 pub mod typecmp;

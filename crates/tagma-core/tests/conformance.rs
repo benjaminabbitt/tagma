@@ -28,8 +28,9 @@ pub struct TagmaWorld {
 impl Default for TagmaWorld {
     fn default() -> Self {
         let mut index = Index::default();
-        // SPEC.md §9 (client-loadable type comparison): tagma-core itself
-        // ships no semver/version knowledge. These registrations are the
+        // SPEC.md §9 (client-loadable type comparison): an Index
+        // registers no comparator itself (tagma-core's own
+        // `semver::Semver` included). These registrations are the
         // test fixtures `features/type-comparison.feature` exercises —
         // every scenario gets a fresh Index with both already registered,
         // via ordinary `Given`/`When` steps (a `tagma.type:<target>=<name>`
@@ -85,9 +86,10 @@ fn parse_version(s: &str) -> Option<Vec<u64>> {
 
 /// Test fixture only (SemVer 2.0.0, <https://semver.org/#spec-item-11>):
 /// full precedence, including the pre-release comparison rules of §11 and
-/// build-metadata-is-ignored of §10. Not part of tagma-core's own public
-/// API surface — registered only by this conformance harness, standing in
-/// for a real client's own comparator.
+/// build-metadata-is-ignored of §10. Registered only by this conformance
+/// harness, standing in for a client's own comparator, as the Go port's
+/// fixture does (tagma-core's `semver::Semver` is the strict one a
+/// client may register).
 struct SemverComparator;
 
 impl TypeComparator for SemverComparator {
