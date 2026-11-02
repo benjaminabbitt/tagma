@@ -51,7 +51,7 @@ setup-py:
     bindings/python/.venv/bin/pip install --upgrade pip >/dev/null
     # ruff is the binding's dev-only linter (`just lint-py`); nothing at
     # runtime or build time imports it.
-    bindings/python/.venv/bin/pip install maturin behave 'ruff>=0.4.0'
+    bindings/python/.venv/bin/pip install maturin behave 'ruff==0.17.3'
     echo "setup-py: venv ready"
 
 setup-go:
