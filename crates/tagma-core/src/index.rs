@@ -121,7 +121,7 @@ pub(crate) enum KeyPattern {
 /// generalization of the retired `hide-ns` facet's single hidden-namespace
 /// set to `ns:key` granularity — a tag is hidden iff it matches at least
 /// one of these. `tagma.permit` (§10) reuses it verbatim: a tag is
-/// permitted iff it matches at least one active permit pattern.
+/// permitted iff it matches at least one declared permit pattern.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HidePattern {
     pub(crate) ns: NsPattern,

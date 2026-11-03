@@ -16,10 +16,6 @@ import (
 	"strings"
 )
 
-// permitDefaultTarget is the implicit default permit (SPEC.md §10): as if
-// tagma.permit:"*:*"=true were always on record.
-const permitDefaultTarget = "*:*"
-
 // facet is a tagma facet (SPEC.md §14 "Reserved facets"): what a config tag
 // in the namespace tagma.<facet> configures, and so how its target and value
 // are read and how two tags on one target settle. Its static properties are
@@ -76,12 +72,13 @@ type facetSpec struct {
 	target targetShape
 	// expected is the expected spelling of its malformed-value (§14).
 	expected string
-	// defaultTarget is a boolean facet's implicit default target (§7, §10),
+	// defaultTarget is a boolean facet's implicit default target (§7),
 	// which a =false can deactivate with no =true on record; "" for a facet
 	// with no default.
 	defaultTarget string
 	// conflict settles two or more tags on one target; nil when the
-	// facet's values accumulate instead (enum, range).
+	// facet's values accumulate instead (enum, range) or it has no value to
+	// contradict (permit, a presence).
 	conflict settlement
 }
 
@@ -90,7 +87,7 @@ var facetTable = [...]facetSpec{
 	facetHide:        {"hide", shapePattern, "true|false", hideDefaultTarget, twoValued("true", "false")},
 	facetArity:       {"arity", shapeExact, "scalar|set", "", twoValued("scalar", "set")},
 	facetType:        {"type", shapeExact, "type name", "", noWinner("disabled")},
-	facetPermit:      {"permit", shapePattern, "true|false", permitDefaultTarget, twoValued("false", "true")},
+	facetPermit:      {"permit", shapePattern, "no value", "", nil},
 	facetEnum:        {"enum", shapeExact, "value", "", nil},
 	facetRange:       {"range", shapeExact, "lo..hi", "", nil},
 	facetKeysPerItem: {"keys-per-item", shapeNamespace, "non-negative integer", "", leastLimit},
@@ -130,7 +127,7 @@ func (f facet) conflict(tags []Tag) (resolution string, losers []Tag, ok bool) {
 	return settle(tags)
 }
 
-// twoValued settles a two-valued facet (hide, permit, arity): the tags
+// twoValued settles a two-valued facet (hide, arity): the tags
 // carrying loser lose to winner.
 func twoValued(winner, loser string) settlement {
 	return func(tags []Tag) (string, []Tag, bool) {
@@ -226,7 +223,7 @@ type Code string
 
 // The validate (SPEC.md §13) finding codes.
 const (
-	// CodeNotPermitted: the tag matches no active tagma.permit pattern (§10).
+	// CodeNotPermitted: the tag matches no declared tagma.permit pattern (§10).
 	CodeNotPermitted Code = "not-permitted"
 	// CodeNotInEnum: the tag's value is absent or not in its target's enum (§11).
 	CodeNotInEnum Code = "not-in-enum"
@@ -255,11 +252,11 @@ const (
 	CodeMalformedTarget Code = "malformed-target"
 	// CodeConflict: one exact target carries contradictory values; the tag is the loser.
 	CodeConflict Code = "conflict"
-	// CodeInertFalse: a =false that deactivates nothing.
+	// CodeInertFalse: a hide =false that deactivates nothing.
 	CodeInertFalse Code = "inert-false"
-	// CodeShadowedPermit: an active permit pattern fully covered by another active one.
+	// CodeShadowedPermit: a declared permit pattern fully covered by another declared one.
 	CodeShadowedPermit Code = "shadowed-permit"
-	// CodeRuleOnUnpermitted: a rule on a target no active permit pattern admits.
+	// CodeRuleOnUnpermitted: a rule on a target no declared permit pattern admits.
 	CodeRuleOnUnpermitted Code = "rule-on-unpermitted"
 	// CodeRangeEmpty: range declarations on one target whose intersection is empty.
 	CodeRangeEmpty Code = "range-empty"
@@ -310,8 +307,8 @@ type Rules struct {
 	// config is every distinct tagma-family tag read, sorted by spelling —
 	// what Check judges.
 	config []Tag
-	// permit is the active permit patterns by target string (§10), the
-	// implicit default included unless deactivated; permitTargets is its
+	// permit is the declared permit patterns by target string (§10): the
+	// store's allowlist, empty when none is declared; permitTargets is its
 	// keys, sorted.
 	permit        map[string]hidePattern
 	permitTargets []string
@@ -350,8 +347,8 @@ func patternTargetOK(target string) bool {
 	return target != ""
 }
 
-// boolValue reads a hide/permit boolean value (SPEC.md §7, §10): true or
-// false, case-sensitive; anything else (ok == false) configures nothing.
+// boolValue reads a hide boolean value (SPEC.md §7): true or false,
+// case-sensitive; anything else (ok == false) configures nothing.
 func boolValue(t Tag) (value, ok bool) {
 	if t.Value == nil {
 		return false, false
@@ -498,7 +495,7 @@ func sortedUnique(s []string) []string {
 // Rules.RegisterType).
 func RulesFromTags(tags []Tag) *Rules {
 	config := configTags(tags)
-	permit := activePermits(facetTags(config, facetPermit))
+	permit := declaredPermits(facetTags(config, facetPermit))
 	permitTargets := make([]string, 0, len(permit))
 	for target := range permit {
 		permitTargets = append(permitTargets, target)
@@ -559,32 +556,14 @@ func configFacts(tags []Tag) []configFact {
 	return out
 }
 
-// activePermits is the active permit patterns by target string (SPEC.md
-// §10) the permit tags configure: the implicit default and every =true
-// target, less every target with a =false.
-func activePermits(permits []Tag) map[string]hidePattern {
-	permitTrue := map[string]bool{}
-	permitFalse := map[string]bool{}
-	for _, t := range permits {
-		if !patternTargetOK(t.Key) {
-			continue
-		}
-		if v, ok := boolValue(t); ok {
-			if v {
-				permitTrue[t.Key] = true
-			} else {
-				permitFalse[t.Key] = true
-			}
-		}
-	}
+// declaredPermits is the permit patterns by target string (SPEC.md §10)
+// the permit tags declare: each well-formed target carrying no value (a
+// permit is a presence).
+func declaredPermits(permits []Tag) map[string]hidePattern {
 	permit := map[string]hidePattern{}
-	candidates := []string{permitDefaultTarget}
-	for target := range permitTrue {
-		candidates = append(candidates, target)
-	}
-	for _, target := range candidates {
-		if !permitFalse[target] {
-			permit[target] = parseHideTarget(target)
+	for _, t := range permits {
+		if t.Value == nil && patternTargetOK(t.Key) {
+			permit[t.Key] = parseHideTarget(t.Key)
 		}
 	}
 	return permit
@@ -731,7 +710,7 @@ func sign(c int) int {
 	return 0
 }
 
-// permitted reports whether a tag (ns, key) matches an active permit
+// permitted reports whether a tag (ns, key) matches a declared permit
 // pattern, or is in the exempt tagma family (SPEC.md §10).
 func (r *Rules) permitted(ns *string, key string) bool {
 	if inTagmaFamily(ns) {
@@ -746,7 +725,7 @@ func (r *Rules) permitted(ns *string, key string) bool {
 }
 
 // permitsNamespace reports whether some tag in the named namespace ns is
-// permitted: an active permit pattern's ns side matches it, whatever its
+// permitted: a declared permit pattern's ns side matches it, whatever its
 // key side, or ns is in the exempt tagma family (SPEC.md §10, §15).
 func (r *Rules) permitsNamespace(ns string) bool {
 	if inTagmaFamily(&ns) {
@@ -1021,9 +1000,11 @@ func (r *Rules) soundFacet(tag Tag) (f facet, fault rawFinding, ok bool) {
 // can order (§12).
 func (r *Rules) valueOK(f facet, tag Tag) bool {
 	switch f {
-	case facetHide, facetPermit:
+	case facetHide:
 		_, ok := boolValue(tag)
 		return ok
+	case facetPermit:
+		return tag.Value == nil
 	case facetArity:
 		return tag.Value != nil && (*tag.Value == "scalar" || *tag.Value == "set")
 	case facetKeysPerItem:
@@ -1042,9 +1023,8 @@ func (r *Rules) valueOK(f facet, tag Tag) bool {
 }
 
 // checkTarget is SPEC.md §14 for the sound tags on one target: each tag
-// that loses a conflict (facet.conflict), and each =false that deactivates
-// nothing — on a boolean facet's non-default target with no =true on
-// record.
+// that loses a conflict (facet.conflict), and each hide =false that
+// deactivates nothing — on a non-default target with no =true on record.
 func checkTarget(g group, tags []Tag) []rawFinding {
 	var out []rawFinding
 	name := g.facet.name()
@@ -1077,8 +1057,8 @@ func firstCarrying(tags []Tag, v string) *Tag {
 	return nil
 }
 
-// checkShadowedPermits is SPEC.md §14 shadowed-permit: an active explicit
-// pattern another active pattern covers, named by the broadest such cover.
+// checkShadowedPermits is SPEC.md §14 shadowed-permit: a declared pattern
+// another declared pattern covers, named by the broadest such cover.
 func (r *Rules) checkShadowedPermits(by byTarget) []rawFinding {
 	var out []rawFinding
 	for _, target := range r.permitTargets {
@@ -1086,15 +1066,15 @@ func (r *Rules) checkShadowedPermits(by byTarget) []rawFinding {
 		if !ok {
 			continue
 		}
-		if tag := firstCarrying(by[group{facetPermit, target}], "true"); tag != nil {
-			out = append(out, newFinding(CodeShadowedPermit, *tag, Arg{"by", broadest}))
+		if tags := by[group{facetPermit, target}]; len(tags) > 0 {
+			out = append(out, newFinding(CodeShadowedPermit, tags[0], Arg{"by", broadest}))
 		}
 	}
 	return out
 }
 
-// broadestCover is the first active permit target, in sorted order, that
-// covers the active permit target and is itself covered by no other cover
+// broadestCover is the first declared permit target, in sorted order, that
+// covers the declared permit target and is itself covered by no other cover
 // of it; ok false when nothing covers it.
 func (r *Rules) broadestCover(target string) (string, bool) {
 	var covering []string
@@ -1148,7 +1128,7 @@ func (r *Rules) checkRule(f facet, tag Tag) []rawFinding {
 }
 
 // rulePermitted reports whether a sound f tag on the target key governs
-// tags some active permit pattern admits (SPEC.md §14 rule-on-unpermitted),
+// tags some declared permit pattern admits (SPEC.md §14 rule-on-unpermitted),
 // or is no rule at all: hide and permit patterns are exempt.
 func (r *Rules) rulePermitted(f facet, key string) bool {
 	switch f.spec().target {

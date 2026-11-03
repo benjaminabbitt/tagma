@@ -48,7 +48,8 @@ position is genuinely absent, with no sentinel or default: `urgent` and
   - `hide`: what ordinary queries don't see
   - `arity`: one value or many per key
   - `type`
-  - `permit`: an allowlist of namespaces and keys
+  - `permit`: an allowlist of namespaces and keys; a store permits no tag
+    it does not declare
   - `enum`
   - `range`
   - `keys-per-item`: e.g. at most one `area:` key per item
