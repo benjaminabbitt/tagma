@@ -23,10 +23,6 @@ use crate::typecmp::TypeComparator;
 /// An exact config target `(namespace?, key)` (SPEC.md §8 first-colon split).
 type Target = (Option<String>, String);
 
-/// The implicit default permit (SPEC.md §10): as if `tagma.permit:"*:*"=true`
-/// were always on record.
-const PERMIT_DEFAULT_TARGET: &str = "*:*";
-
 /// A `tagma` facet (SPEC.md §14 "Reserved facets"): what a config tag in
 /// the namespace `tagma.<facet>` configures, and so how its target and
 /// value are read and how two tags on one target settle.
@@ -115,7 +111,8 @@ impl Facet {
     /// The `expected` spelling of a `malformed-value` (SPEC.md §14).
     fn expected(self) -> &'static str {
         match self {
-            Facet::Hide | Facet::Permit => "true|false",
+            Facet::Hide => "true|false",
+            Facet::Permit => "no value",
             Facet::Arity => "scalar|set",
             Facet::Enum => "value",
             Facet::Type => "type name",
@@ -124,23 +121,23 @@ impl Facet {
         }
     }
 
-    /// The implicit default target of a boolean facet (SPEC.md §7, §10),
-    /// which a `=false` can deactivate with no `=true` on record; `None`
-    /// for a facet with no default.
+    /// The implicit default target of a boolean facet (SPEC.md §7), which
+    /// a `=false` can deactivate with no `=true` on record; `None` for a
+    /// facet with no default.
     fn default_target(self) -> Option<&'static str> {
         match self {
             Facet::Hide => Some(HIDE_DEFAULT_TARGET),
-            Facet::Permit => Some(PERMIT_DEFAULT_TARGET),
             _ => None,
         }
     }
 
     /// How the distinct sound tags on one target settle (SPEC.md §14
     /// `conflict`): the resolution and the tags that lose to it, or `None`
-    /// when the facet's values accumulate instead (`enum`, `range`).
+    /// when the facet's values accumulate instead (`enum`, `range`) or it
+    /// has no value to contradict (`permit`, a presence).
     fn conflict<'t>(self, tags: &[&'t Tag]) -> Option<(String, Vec<&'t Tag>)> {
-        // Sound hide/permit/arity values are two-valued, and type names
-        // have no winner, so two distinct tags on one target conflict.
+        // Sound hide/arity values are two-valued, and type names have no
+        // winner, so two distinct tags on one target conflict.
         let two_valued = |winner: &str, loser: &str| {
             let losers = tags
                 .iter()
@@ -153,11 +150,10 @@ impl Facet {
         }
         match self {
             Facet::Hide => two_valued("true", "false"),
-            Facet::Permit => two_valued("false", "true"),
             Facet::Arity => two_valued("scalar", "set"),
             Facet::Type => Some(("disabled".to_string(), tags.to_vec())),
             Facet::KeysPerItem => least_limit(tags),
-            Facet::Enum | Facet::Range => None,
+            Facet::Permit | Facet::Enum | Facet::Range => None,
         }
     }
 }
@@ -177,7 +173,7 @@ pub struct Change {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Code {
     // --- validate (§13) ---
-    /// The tag matches no active `tagma.permit` pattern (§10).
+    /// The tag matches no declared `tagma.permit` pattern (§10).
     NotPermitted,
     /// The tag's value is absent or not in its target's enum (§11).
     NotInEnum,
@@ -205,9 +201,9 @@ pub enum Code {
     Conflict,
     /// A `=false` that deactivates nothing.
     InertFalse,
-    /// An active permit pattern fully covered by another active one.
+    /// A declared permit pattern fully covered by another declared one.
     ShadowedPermit,
-    /// A rule on a target no active permit pattern admits.
+    /// A rule on a target no declared permit pattern admits.
     RuleOnUnpermitted,
     /// Range declarations on one target whose intersection is empty.
     RangeEmpty,
@@ -291,8 +287,8 @@ pub struct Rules {
     /// Every distinct `tagma`-family tag read, sorted by spelling — what
     /// `check` judges.
     config: Vec<Tag>,
-    /// The active permit patterns by target string (§10), the implicit
-    /// default included unless deactivated.
+    /// The declared permit patterns by target string (§10): the store's
+    /// allowlist, empty when none is declared.
     permit: BTreeMap<String, HidePattern>,
     /// §8 arity, resolved.
     arity: BTreeMap<Target, Arity>,
@@ -310,7 +306,8 @@ pub struct Rules {
 }
 
 impl Default for Rules {
-    /// No config at all: every tag permitted, nothing constrained.
+    /// No config at all: nothing permitted but the `tagma` family, nothing
+    /// else constrained.
     fn default() -> Rules {
         Rules::from_tags(std::iter::empty())
     }
@@ -336,8 +333,8 @@ fn pattern_target_ok(target: &str) -> bool {
     }
 }
 
-/// A `hide`/`permit` boolean value (SPEC.md §7, §10): `true` or `false`,
-/// case-sensitive; anything else configures nothing.
+/// A `hide` boolean value (SPEC.md §7): `true` or `false`, case-sensitive;
+/// anything else configures nothing.
 fn bool_value(tag: &Tag) -> Option<bool> {
     match tag.value.as_deref() {
         Some("true") => Some(true),
@@ -441,21 +438,10 @@ impl Rules {
             of(Facet::Type).filter_map(|t| t.value.as_deref().map(|v| (t.key.as_str(), v))),
         );
 
-        let mut permit_true: BTreeSet<&str> = BTreeSet::new();
-        let mut permit_false: BTreeSet<&str> = BTreeSet::new();
-        for t in of(Facet::Permit).filter(|t| pattern_target_ok(&t.key)) {
-            match bool_value(t) {
-                Some(true) => permit_true.insert(t.key.as_str()),
-                Some(false) => permit_false.insert(t.key.as_str()),
-                None => false,
-            };
-        }
-        let mut permit = BTreeMap::new();
-        for target in std::iter::once(PERMIT_DEFAULT_TARGET).chain(permit_true.iter().copied()) {
-            if !permit_false.contains(target) {
-                permit.insert(target.to_string(), parse_hide_target(target));
-            }
-        }
+        let permit = of(Facet::Permit)
+            .filter(|t| t.value.is_none() && pattern_target_ok(&t.key))
+            .map(|t| (t.key.clone(), parse_hide_target(&t.key)))
+            .collect();
 
         let mut enums: BTreeMap<Target, BTreeSet<String>> = BTreeMap::new();
         for t in of(Facet::Enum) {
@@ -560,14 +546,14 @@ impl Rules {
             .is_some_and(|cmp| cmp.compare(v, v) != Some(Ordering::Equal))
     }
 
-    /// `true` iff a tag `(ns, key)` matches an active permit pattern, or is
+    /// `true` iff a tag `(ns, key)` matches a declared permit pattern, or is
     /// in the exempt `tagma` family (SPEC.md §10).
     fn permitted(&self, ns: &Option<String>, key: &str) -> bool {
         in_tagma_family(ns) || self.permit.values().any(|p| p.matches(ns, key))
     }
 
-    /// `true` iff some tag in the named namespace `ns` is permitted: an
-    /// active permit pattern's ns side matches it, whatever its key side,
+    /// `true` iff some tag in the named namespace `ns` is permitted: a
+    /// declared permit pattern's ns side matches it, whatever its key side,
     /// or `ns` is in the exempt `tagma` family (SPEC.md §10, §15).
     fn permits_namespace(&self, ns: &str) -> bool {
         in_tagma_family(&Some(ns.to_string()))
@@ -743,7 +729,8 @@ impl Rules {
     /// comparison can order (§12).
     fn value_ok(&self, facet: Facet, tag: &Tag) -> bool {
         match facet {
-            Facet::Hide | Facet::Permit => bool_value(tag).is_some(),
+            Facet::Hide => bool_value(tag).is_some(),
+            Facet::Permit => tag.value.is_none(),
             Facet::Arity => matches!(tag.value.as_deref(), Some("scalar" | "set")),
             Facet::Enum | Facet::Type => tag.value.is_some(),
             Facet::KeysPerItem => limit_value(tag).is_some(),
@@ -753,8 +740,8 @@ impl Rules {
         }
     }
 
-    /// Shadowed permits: an active explicit pattern another active
-    /// pattern covers, named by the broadest such cover.
+    /// Shadowed permits: a declared pattern another declared pattern
+    /// covers, named by the broadest such cover.
     fn check_shadowed_permits(&self, by: &ByTarget, out: &mut Vec<Raw>) {
         for (target, pattern) in &self.permit {
             let covering: Vec<(&String, &HidePattern)> = self
@@ -767,7 +754,7 @@ impl Rules {
                 .find(|(t, p)| !covering.iter().any(|(u, q)| u != t && pattern_covers(q, p)));
             let tag = by
                 .get(&(Facet::Permit, target.as_str()))
-                .and_then(|ts| ts.iter().find(|t| t.value.as_deref() == Some("true")));
+                .and_then(|ts| ts.first());
             if let (Some((by_target, _)), Some(tag)) = (broadest, tag) {
                 out.push(finding(Code::ShadowedPermit, tag, &[("by", by_target)]));
             }
@@ -805,7 +792,7 @@ impl Rules {
     }
 
     /// `true` iff a sound `facet` tag on the target `key` governs tags some
-    /// active permit pattern admits (SPEC.md §14 `rule-on-unpermitted`), or
+    /// declared permit pattern admits (SPEC.md §14 `rule-on-unpermitted`), or
     /// is no rule at all: `hide` and `permit` patterns are exempt.
     fn rule_permitted(&self, facet: Facet, key: &str) -> bool {
         match facet.target() {
@@ -880,9 +867,9 @@ fn finding(code: Code, tag: &Tag, args: &[(&str, &str)]) -> Raw {
 }
 
 /// SPEC.md §14 for the sound `facet` tags on one target: each tag that
-/// loses a conflict ([`Facet::conflict`]), and each `=false` that
-/// deactivates nothing — on a boolean facet's non-default target with no
-/// `=true` on record.
+/// loses a conflict ([`Facet::conflict`]), and each `hide` `=false` that
+/// deactivates nothing — on a non-default target with no `=true` on
+/// record.
 fn check_target(facet: Facet, target: &str, tags: &[&Tag], out: &mut Vec<Raw>) {
     let name = facet.name();
     if let Some((resolution, losers)) = facet.conflict(tags) {

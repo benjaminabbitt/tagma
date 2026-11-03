@@ -27,6 +27,18 @@ fn index(lines: &[&str]) -> Index {
     idx
 }
 
+/// The config line that permits every tag (`tagma.permit:"*:*"`): a store
+/// declaring no permit permits nothing (SPEC.md §10), so a test of another
+/// facet starts from it to judge that facet alone.
+const OPEN: &str = r#"open tagma.permit:"*:*""#;
+
+/// [`index`] over `lines` in a store that permits every tag ([`OPEN`]).
+fn open_index(lines: &[&str]) -> Index {
+    let mut all = vec![OPEN];
+    all.extend_from_slice(lines);
+    index(&all)
+}
+
 fn add(list: &[&str]) -> Change {
     Change {
         add: tags(list),
@@ -100,15 +112,23 @@ fn with_version(mut idx: Index) -> Index {
 // --- §10 permit ----------------------------------------------------------
 
 #[test]
-fn permit_with_no_declarations_permits_every_tag() {
+fn permit_with_no_declarations_permits_no_tag() {
     let idx = index(&[]);
     let change = add(&["triage:kind=bug", "lang=en", "x.y:z", "bare"]);
-    assert_findings(idx.validate("a", &change), vec![]);
+    assert_findings(
+        idx.validate("a", &change),
+        vec![
+            introduced(Code::NotPermitted, "triage:kind=bug", &[]),
+            introduced(Code::NotPermitted, "lang=en", &[]),
+            introduced(Code::NotPermitted, "x.y:z", &[]),
+            introduced(Code::NotPermitted, "bare", &[]),
+        ],
+    );
 }
 
 #[test]
-fn permit_allowlist_admits_only_tags_matching_an_active_true_pattern() {
-    let idx = index(&[r#"cfg tagma.permit:"*:*"=false tagma.permit:"triage:*"=true"#]);
+fn permit_admits_only_tags_matching_a_declared_pattern() {
+    let idx = index(&[r#"cfg tagma.permit:"triage:*""#]);
     let change = add(&["triage:kind=bug", "triage.sub:x", "lang=en"]);
     assert_findings(
         idx.validate("a", &change),
@@ -117,34 +137,24 @@ fn permit_allowlist_admits_only_tags_matching_an_active_true_pattern() {
 }
 
 #[test]
-fn permit_false_wins_over_true_on_the_same_target() {
-    let idx = index(&[
-        r#"cfg tagma.permit:"*:*"=false tagma.permit:"triage:*"=true"#,
-        r#"cfg2 tagma.permit:"triage:*"=false"#,
-    ]);
+fn permit_star_star_admits_every_tag() {
+    let idx = index(&[r#"cfg tagma.permit:"*:*""#]);
+    let change = add(&["triage:kind=bug", "lang=en", "x.y:z", "bare"]);
+    assert_findings(idx.validate("a", &change), vec![]);
+}
+
+#[test]
+fn permit_declared_on_different_items_form_one_allowlist() {
+    let idx = index(&[r#"cfg tagma.permit:"triage:*""#, "cfg2 tagma.permit:lang"]);
     assert_findings(
-        idx.validate("a", &add(&["triage:kind=bug"])),
-        vec![introduced(Code::NotPermitted, "triage:kind=bug", &[])],
+        idx.validate("a", &add(&["triage:kind=bug", "lang=en", "other"])),
+        vec![introduced(Code::NotPermitted, "other", &[])],
     );
 }
 
 #[test]
-fn permit_false_on_a_narrower_target_never_carves_an_exception_from_a_broader_true() {
-    let idx = index(&[
-        r#"cfg tagma.permit:"*:*"=false tagma.permit:"triage:*"=true tagma.permit:"triage:secret"=false"#,
-    ]);
-    assert_findings(idx.validate("a", &add(&["triage:secret=1"])), vec![]);
-}
-
-#[test]
-fn permit_denylist_is_inexpressible_a_false_on_an_inactive_target_forbids_nothing() {
-    let idx = index(&[r#"cfg tagma.permit:"*:secret"=false"#]);
-    assert_findings(idx.validate("a", &add(&["secret", "x:secret=1"])), vec![]);
-}
-
-#[test]
 fn permit_bare_key_target_pins_the_null_namespace() {
-    let idx = index(&[r#"cfg tagma.permit:"*:*"=false tagma.permit:lang=true"#]);
+    let idx = index(&["cfg tagma.permit:lang"]);
     assert_findings(
         idx.validate("a", &add(&["lang=en", "x:lang=en"])),
         vec![introduced(Code::NotPermitted, "x:lang=en", &[])],
@@ -153,7 +163,7 @@ fn permit_bare_key_target_pins_the_null_namespace() {
 
 #[test]
 fn permit_star_namespace_target_admits_the_key_under_every_namespace() {
-    let idx = index(&[r#"cfg tagma.permit:"*:*"=false tagma.permit:"*:lang"=true"#]);
+    let idx = index(&[r#"cfg tagma.permit:"*:lang""#]);
     assert_findings(
         idx.validate("a", &add(&["lang=en", "x:lang=en", "x:other"])),
         vec![introduced(Code::NotPermitted, "x:other", &[])],
@@ -161,23 +171,32 @@ fn permit_star_namespace_target_admits_the_key_under_every_namespace() {
 }
 
 #[test]
-fn permit_exempts_the_tagma_family_so_an_allowlist_can_still_be_configured() {
-    let idx = index(&[r#"cfg tagma.permit:"*:*"=false"#]);
+fn permit_exempts_the_tagma_family_so_a_store_can_still_be_configured() {
+    let idx = index(&[]);
     let change = add(&[r#"tagma.enum:"triage:kind"=defect"#, "tagma:note"]);
     assert_findings(idx.validate("cfg", &change), vec![]);
 }
 
 #[test]
-fn permit_uninterpretable_value_configures_nothing() {
-    let idx = index(&[r#"cfg tagma.permit:"*:*"=maybe tagma.permit:"*:*"=FALSE"#]);
-    assert_findings(idx.validate("a", &add(&["anything=1"])), vec![]);
+fn permit_carrying_a_value_configures_nothing() {
+    // A permit is a presence: `=true`, `=false` or any other value is no
+    // permit, so `"*:*"=false` closes nothing and `"*:*"=true` opens
+    // nothing.
+    let idx = index(&[
+        r#"cfg tagma.permit:"*:*"=true tagma.permit:"*:*"=false tagma.permit:"x:*"=maybe"#,
+    ]);
+    assert_findings(
+        idx.validate("a", &add(&["x:k=1"])),
+        vec![introduced(Code::NotPermitted, "x:k=1", &[])],
+    );
 }
 
 // --- §11 enum --------------------------------------------------------------
 
 #[test]
 fn enum_admits_exactly_the_declared_values_one_tag_per_value() {
-    let idx = index(&[r#"cfg tagma.enum:"triage:kind"=defect tagma.enum:"triage:kind"=chore"#]);
+    let idx =
+        open_index(&[r#"cfg tagma.enum:"triage:kind"=defect tagma.enum:"triage:kind"=chore"#]);
     assert_findings(idx.validate("a", &add(&["triage:kind=defect"])), vec![]);
     assert_findings(
         idx.validate("a", &add(&["triage:kind=bug"])),
@@ -191,7 +210,7 @@ fn enum_admits_exactly_the_declared_values_one_tag_per_value() {
 
 #[test]
 fn enum_values_declared_on_different_items_form_one_union() {
-    let idx = index(&[
+    let idx = open_index(&[
         r#"cfg1 tagma.enum:"triage:kind"=defect"#,
         r#"cfg2 tagma.enum:"triage:kind"=chore"#,
     ]);
@@ -200,7 +219,7 @@ fn enum_values_declared_on_different_items_form_one_union() {
 
 #[test]
 fn enum_comma_value_is_one_literal_value_not_a_list() {
-    let idx = index(&[r#"cfg tagma.enum:k="a,b""#]);
+    let idx = open_index(&[r#"cfg tagma.enum:k="a,b""#]);
     assert_findings(idx.validate("a", &add(&[r#"k="a,b""#])), vec![]);
     assert_findings(
         idx.validate("a", &add(&["k=a"])),
@@ -210,7 +229,7 @@ fn enum_comma_value_is_one_literal_value_not_a_list() {
 
 #[test]
 fn enum_rejects_a_valueless_tag_on_a_declared_target() {
-    let idx = index(&["cfg tagma.enum:k=a"]);
+    let idx = open_index(&["cfg tagma.enum:k=a"]);
     assert_findings(
         idx.validate("a", &add(&["k"])),
         vec![introduced(Code::NotInEnum, "k", &[("allowed", "a")])],
@@ -219,7 +238,7 @@ fn enum_rejects_a_valueless_tag_on_a_declared_target() {
 
 #[test]
 fn enum_constrains_only_its_exact_namespace_and_key() {
-    let idx = index(&[r#"cfg tagma.enum:"triage:kind"=defect"#]);
+    let idx = open_index(&[r#"cfg tagma.enum:"triage:kind"=defect"#]);
     let change = add(&["kind=other", "triage:other=x", "triage.sub:kind=x"]);
     assert_findings(idx.validate("a", &change), vec![]);
 }
@@ -228,7 +247,7 @@ fn enum_constrains_only_its_exact_namespace_and_key() {
 
 #[test]
 fn range_bounds_are_inclusive() {
-    let idx = index(&["cfg tagma.range:k=1..5"]);
+    let idx = open_index(&["cfg tagma.range:k=1..5"]);
     assert_findings(idx.validate("a", &add(&["k=1", "k=5", "k=2.5"])), vec![]);
     assert_findings(
         idx.validate("a", &add(&["k=0", "k=6"])),
@@ -241,7 +260,7 @@ fn range_bounds_are_inclusive() {
 
 #[test]
 fn range_with_an_absent_bound_is_open_on_that_side() {
-    let idx = index(&["cfg tagma.range:lo=5..", r#"cfg tagma.range:hi="..5""#]);
+    let idx = open_index(&["cfg tagma.range:lo=5..", r#"cfg tagma.range:hi="..5""#]);
     assert_findings(idx.validate("a", &add(&["lo=1000", "hi=-1000"])), vec![]);
     assert_findings(
         idx.validate("a", &add(&["lo=4", "hi=6"])),
@@ -254,7 +273,7 @@ fn range_with_an_absent_bound_is_open_on_that_side() {
 
 #[test]
 fn range_accepts_signed_numeral_bounds() {
-    let idx = index(&["cfg tagma.range:k=-5..-1"]);
+    let idx = open_index(&["cfg tagma.range:k=-5..-1"]);
     assert_findings(idx.validate("a", &add(&["k=-3"])), vec![]);
     assert_findings(
         idx.validate("a", &add(&["k=+1"])),
@@ -264,7 +283,7 @@ fn range_accepts_signed_numeral_bounds() {
 
 #[test]
 fn range_declarations_on_one_target_intersect() {
-    let idx = index(&["cfg tagma.range:k=1..10", "cfg2 tagma.range:k=5..20"]);
+    let idx = open_index(&["cfg tagma.range:k=1..10", "cfg2 tagma.range:k=5..20"]);
     assert_findings(idx.validate("a", &add(&["k=7"])), vec![]);
     assert_findings(
         idx.validate("a", &add(&["k=3", "k=12"])),
@@ -277,7 +296,7 @@ fn range_declarations_on_one_target_intersect() {
 
 #[test]
 fn range_reports_one_finding_per_violated_declaration() {
-    let idx = index(&["cfg tagma.range:k=1..10", "cfg2 tagma.range:k=5..20"]);
+    let idx = open_index(&["cfg tagma.range:k=1..10", "cfg2 tagma.range:k=5..20"]);
     assert_findings(
         idx.validate("a", &add(&["k=0"])),
         vec![
@@ -289,7 +308,7 @@ fn range_reports_one_finding_per_violated_declaration() {
 
 #[test]
 fn range_uninterpretable_or_absent_value_is_not_comparable() {
-    let idx = index(&["cfg tagma.range:k=1..5"]);
+    let idx = open_index(&["cfg tagma.range:k=1..5"]);
     assert_findings(
         idx.validate("a", &add(&["k=tbd", "k"])),
         vec![
@@ -303,7 +322,9 @@ fn range_uninterpretable_or_absent_value_is_not_comparable() {
 fn range_on_a_typed_target_compares_with_the_declared_comparator() {
     // §9 precedence: version order puts 1.9 inside 1.2..1.10; §6's float
     // reading (1.9 > 1.1) would put it outside.
-    let idx = with_version(index(&["cfg tagma.type:v=version tagma.range:v=1.2..1.10"]));
+    let idx = with_version(open_index(&[
+        "cfg tagma.type:v=version tagma.range:v=1.2..1.10",
+    ]));
     assert_findings(idx.validate("a", &add(&["v=1.9"])), vec![]);
     assert_findings(
         idx.validate("a", &add(&["v=1.11"])),
@@ -319,7 +340,7 @@ fn range_on_a_typed_target_compares_with_the_declared_comparator() {
 
 #[test]
 fn validate_reports_a_type_mismatch_when_the_comparator_cannot_order_the_value() {
-    let idx = with_version(index(&["cfg tagma.type:v=version"]));
+    let idx = with_version(open_index(&["cfg tagma.type:v=version"]));
     assert_findings(idx.validate("a", &add(&["v=1.2", "v"])), vec![]);
     assert_findings(
         idx.validate("a", &add(&["v=abc"])),
@@ -333,7 +354,7 @@ fn validate_reports_a_type_mismatch_when_the_comparator_cannot_order_the_value()
 
 #[test]
 fn validate_reports_no_type_mismatch_for_an_unregistered_or_conflicting_type() {
-    let idx = with_version(index(&[
+    let idx = with_version(open_index(&[
         "cfg tagma.type:w=nope",
         "cfg tagma.type:c=version tagma.type:c=other",
     ]));
@@ -342,7 +363,7 @@ fn validate_reports_no_type_mismatch_for_an_unregistered_or_conflicting_type() {
 
 #[test]
 fn validate_reports_every_value_of_a_scalar_key_written_before_the_declaration() {
-    let idx = index(&["a k=1 k=2", "cfg tagma.arity:k=scalar"]);
+    let idx = open_index(&["a k=1 k=2", "cfg tagma.arity:k=scalar"]);
     assert_findings(
         idx.validate("a", &Change::default()),
         vec![
@@ -356,14 +377,14 @@ fn validate_reports_every_value_of_a_scalar_key_written_before_the_declaration()
 
 #[test]
 fn validate_a_removal_that_leaves_the_set_valid_reports_nothing() {
-    let idx = index(&["a k=1 k=2", "cfg tagma.arity:k=scalar"]);
+    let idx = open_index(&["a k=1 k=2", "cfg tagma.arity:k=scalar"]);
     assert_findings(idx.validate("a", &remove(&["k=1"])), vec![]);
 }
 
 #[test]
 fn validate_judges_the_set_after_scalar_collapse_not_the_old_value() {
     // k=bad is collapsed out by the add, so it is not reported.
-    let idx = index(&["cfg tagma.arity:k=scalar tagma.enum:k=good", "a k=bad"]);
+    let idx = open_index(&["cfg tagma.arity:k=scalar tagma.enum:k=good", "a k=bad"]);
     assert_findings(idx.validate("a", &add(&["k=good"])), vec![]);
 }
 
@@ -371,7 +392,7 @@ fn validate_judges_the_set_after_scalar_collapse_not_the_old_value() {
 fn validate_scalar_collapse_displaces_only_the_same_namespace_and_key() {
     // Adding k=1 under a scalar k displaces other k values only: not j
     // (another key, same namespace), not x:k (same key, another namespace).
-    let idx = index(&[
+    let idx = open_index(&[
         r#"cfg tagma.arity:k=scalar tagma.enum:j=a tagma.enum:"x:k"=a"#,
         "item j=bad x:k=bad",
     ]);
@@ -386,7 +407,7 @@ fn validate_scalar_collapse_displaces_only_the_same_namespace_and_key() {
 
 #[test]
 fn validate_collapses_a_scalar_within_one_change_last_value_wins() {
-    let idx = index(&["cfg tagma.arity:k=scalar tagma.enum:k=good"]);
+    let idx = open_index(&["cfg tagma.arity:k=scalar tagma.enum:k=good"]);
     assert_findings(idx.validate("a", &add(&["k=bad", "k=good"])), vec![]);
     assert_findings(
         idx.validate("a", &add(&["k=good", "k=bad"])),
@@ -396,7 +417,7 @@ fn validate_collapses_a_scalar_within_one_change_last_value_wins() {
 
 #[test]
 fn validate_applies_removes_before_adds() {
-    let idx = index(&["cfg tagma.enum:k=a", "item k=z"]);
+    let idx = open_index(&["cfg tagma.enum:k=a", "item k=z"]);
     let change = Change {
         add: tags(&["k=z"]),
         remove: tags(&["k=z"]),
@@ -409,7 +430,7 @@ fn validate_applies_removes_before_adds() {
 
 #[test]
 fn validate_reports_preexisting_violations_the_change_does_not_touch() {
-    let idx = index(&["cfg tagma.enum:k=a", "item k=z"]);
+    let idx = open_index(&["cfg tagma.enum:k=a", "item k=z"]);
     assert_findings(
         idx.validate("item", &add(&["other=1"])),
         vec![existing(Code::NotInEnum, "k=z", &[("allowed", "a")])],
@@ -420,7 +441,7 @@ fn validate_reports_preexisting_violations_the_change_does_not_touch() {
 fn validate_a_change_that_fixes_one_violation_and_introduces_another() {
     // k=z's finding is fixed (gone, not reported); k=y's is new; j=bad's
     // held before the change and still does.
-    let idx = index(&["cfg tagma.enum:k=a tagma.enum:j=a", "item k=z j=bad"]);
+    let idx = open_index(&["cfg tagma.enum:k=a tagma.enum:j=a", "item k=z j=bad"]);
     let change = Change {
         add: tags(&["k=y"]),
         remove: tags(&["k=z"]),
@@ -436,7 +457,7 @@ fn validate_a_change_that_fixes_one_violation_and_introduces_another() {
 
 #[test]
 fn validate_re_adding_a_tag_the_item_already_carries_keeps_its_finding_existing() {
-    let idx = index(&["cfg tagma.enum:k=a", "item k=z"]);
+    let idx = open_index(&["cfg tagma.enum:k=a", "item k=z"]);
     assert_findings(
         idx.validate("item", &add(&["k=z"])),
         vec![existing(Code::NotInEnum, "k=z", &[("allowed", "a")])],
@@ -446,7 +467,7 @@ fn validate_re_adding_a_tag_the_item_already_carries_keeps_its_finding_existing(
 #[test]
 fn validate_an_arity_finding_that_held_before_with_the_same_args_is_existing() {
     // Removing k=3 leaves k=1 and k=2 over a scalar, exactly as before.
-    let idx = index(&["item k=1 k=2 k=3", "cfg tagma.arity:k=scalar"]);
+    let idx = open_index(&["item k=1 k=2 k=3", "cfg tagma.arity:k=scalar"]);
     assert_findings(
         idx.validate("item", &remove(&["k=3"])),
         vec![
@@ -464,13 +485,13 @@ fn origins_have_stable_spellings() {
 
 #[test]
 fn validate_removing_a_tag_the_item_does_not_carry_is_a_no_op() {
-    let idx = index(&["item k=1"]);
+    let idx = open_index(&["item k=1"]);
     assert_findings(idx.validate("item", &remove(&["k=2", "absent"])), vec![]);
 }
 
 #[test]
 fn validate_an_unknown_item_starts_from_an_empty_set() {
-    let idx = index(&["cfg tagma.enum:k=a"]);
+    let idx = open_index(&["cfg tagma.enum:k=a"]);
     assert_findings(
         idx.validate("nobody", &add(&["k=b"])),
         vec![introduced(Code::NotInEnum, "k=b", &[("allowed", "a")])],
@@ -480,14 +501,14 @@ fn validate_an_unknown_item_starts_from_an_empty_set() {
 #[test]
 fn validate_reads_config_from_before_the_change() {
     // The enum declared inside the change governs later calls, not this one.
-    let idx = index(&[]);
+    let idx = open_index(&[]);
     let change = add(&["tagma.enum:k=a", "k=b"]);
     assert_findings(idx.validate("a", &change), vec![]);
 }
 
 #[test]
 fn validate_is_pure_and_leaves_the_store_unchanged() {
-    let idx = index(&["cfg tagma.arity:k=scalar", "a k=1"]);
+    let idx = open_index(&["cfg tagma.arity:k=scalar", "a k=1"]);
     let _ = idx.validate("a", &add(&["k=2", "new"]));
     assert_eq!(idx.query("k=1"), Ok(vec!["a".to_string()]));
     assert_eq!(idx.query("k=2"), Ok(vec![]));
@@ -496,7 +517,7 @@ fn validate_is_pure_and_leaves_the_store_unchanged() {
 
 #[test]
 fn validate_reports_every_rule_a_tag_breaks_independently() {
-    let idx = index(&[r#"cfg tagma.permit:"*:*"=false tagma.enum:k=a tagma.range:k=1..5"#]);
+    let idx = index(&["cfg tagma.permit:j tagma.enum:k=a tagma.range:k=1..5"]);
     assert_findings(
         idx.validate("a", &add(&["k=9"])),
         vec![
@@ -509,7 +530,7 @@ fn validate_reports_every_rule_a_tag_breaks_independently() {
 
 #[test]
 fn validate_findings_come_sorted_by_tag_then_code() {
-    let idx = index(&[r#"cfg tagma.permit:"*:*"=false tagma.enum:k=a tagma.enum:j=a"#]);
+    let idx = index(&["cfg tagma.permit:x tagma.enum:k=a tagma.enum:j=a"]);
     let got = idx.validate("a", &add(&["k=9", "j=9"]));
     let order: Vec<(String, &str)> = got
         .iter()
@@ -529,7 +550,7 @@ fn validate_findings_come_sorted_by_tag_then_code() {
 #[test]
 fn rules_from_tags_validates_like_the_index_it_was_read_from() {
     let lines = [
-        r#"cfg tagma.permit:"*:*"=false tagma.permit:"triage:*"=true"#,
+        r#"cfg tagma.permit:"triage:*""#,
         r#"cfg tagma.enum:"triage:kind"=defect tagma.arity:"triage:kind"=scalar"#,
     ];
     let config: Vec<Tag> = lines
@@ -556,8 +577,9 @@ fn check_an_unconfigured_store_has_no_findings() {
 
 #[test]
 fn check_reports_unknown_facets_in_the_reserved_family() {
-    let idx =
-        index(&[r#"cfg tagma.priority_fn:"triage:kind"=x tagma.hide.extra:k=true tagma:note"#]);
+    let idx = open_index(&[
+        r#"cfg tagma.priority_fn:"triage:kind"=x tagma.hide.extra:k=true tagma:note"#,
+    ]);
     assert_findings(
         idx.check(),
         vec![
@@ -578,18 +600,24 @@ fn check_reports_unknown_facets_in_the_reserved_family() {
 
 #[test]
 fn check_reports_values_that_configure_nothing() {
-    let idx = index(&[
-        "cfg tagma.permit:k=maybe tagma.hide:k=yes tagma.arity:k=many tagma.enum:k",
+    let idx = open_index(&[
+        "cfg tagma.permit:k=maybe tagma.permit:j=true tagma.hide:k=yes tagma.arity:k=many tagma.enum:k",
         r#"cfg tagma.type:k tagma.range:a=abc tagma.range:b=".." tagma.range:c=1..x"#,
     ]);
     let bool_ = ("expected", "true|false");
+    let presence = ("expected", "no value");
     assert_findings(
         idx.check(),
         vec![
             existing(
                 Code::MalformedValue,
                 "tagma.permit:k=maybe",
-                &[("facet", "permit"), bool_],
+                &[("facet", "permit"), presence],
+            ),
+            existing(
+                Code::MalformedValue,
+                "tagma.permit:j=true",
+                &[("facet", "permit"), presence],
             ),
             existing(
                 Code::MalformedValue,
@@ -632,7 +660,7 @@ fn check_reports_values_that_configure_nothing() {
 
 #[test]
 fn check_reports_malformed_targets() {
-    let idx = index(&[r#"cfg tagma.enum:"*:k"=a tagma.arity:"ns:"=scalar tagma.permit:":k"=true"#]);
+    let idx = open_index(&[r#"cfg tagma.enum:"*:k"=a tagma.arity:"ns:"=scalar tagma.permit:":k""#]);
     assert_findings(
         idx.check(),
         vec![
@@ -648,7 +676,7 @@ fn check_reports_malformed_targets() {
             ),
             existing(
                 Code::MalformedTarget,
-                r#"tagma.permit:":k"=true"#,
+                r#"tagma.permit:":k""#,
                 &[("facet", "permit")],
             ),
         ],
@@ -656,24 +684,8 @@ fn check_reports_malformed_targets() {
 }
 
 #[test]
-fn check_reports_a_permit_conflict_on_the_losing_true() {
-    let idx = index(&[
-        r#"cfg tagma.permit:"*:*"=false tagma.permit:"x:*"=true"#,
-        r#"cfg2 tagma.permit:"x:*"=false"#,
-    ]);
-    assert_findings(
-        idx.check(),
-        vec![existing(
-            Code::Conflict,
-            r#"tagma.permit:"x:*"=true"#,
-            &[("facet", "permit"), ("resolution", "false")],
-        )],
-    );
-}
-
-#[test]
 fn check_reports_hide_arity_and_type_conflicts_with_their_resolution() {
-    let idx = with_version(index(&[
+    let idx = with_version(open_index(&[
         "cfg tagma.hide:k=true tagma.hide:k=false",
         "cfg tagma.arity:k=scalar tagma.arity:k=set",
         "cfg tagma.type:k=version tagma.type:k=other",
@@ -706,18 +718,18 @@ fn check_reports_hide_arity_and_type_conflicts_with_their_resolution() {
 }
 
 #[test]
-fn check_reports_a_false_that_deactivates_nothing() {
-    let idx = index(&[
-        r#"cfg tagma.permit:"*:secret"=false tagma.permit:"*:*"=false"#,
+fn check_reports_a_hide_false_that_deactivates_nothing_and_a_permit_false_as_malformed() {
+    let idx = open_index(&[
+        r#"cfg tagma.permit:"*:secret"=false"#,
         r#"cfg tagma.hide:x=false tagma.hide:"tagma:*"=false"#,
     ]);
     assert_findings(
         idx.check(),
         vec![
             existing(
-                Code::InertFalse,
+                Code::MalformedValue,
                 r#"tagma.permit:"*:secret"=false"#,
-                &[("facet", "permit")],
+                &[("facet", "permit"), ("expected", "no value")],
             ),
             existing(Code::InertFalse, "tagma.hide:x=false", &[("facet", "hide")]),
         ],
@@ -725,41 +737,54 @@ fn check_reports_a_false_that_deactivates_nothing() {
 }
 
 #[test]
-fn check_reports_every_explicit_permit_as_shadowed_while_the_default_is_active() {
-    let idx = index(&[r#"cfg tagma.permit:"triage:kind"=true"#]);
+fn check_reports_no_shadowed_permit_where_no_declared_pattern_covers_it() {
+    let idx = index(&[r#"cfg tagma.permit:"triage:kind" tagma.permit:lang"#]);
+    assert_findings(idx.check(), vec![]);
+}
+
+#[test]
+fn check_reports_every_rule_as_unpermitted_where_no_permit_is_declared() {
+    let idx = index(&[r#"cfg tagma.enum:"triage:kind"=defect tagma.keys-per-item:area=1"#]);
     assert_findings(
         idx.check(),
-        vec![existing(
-            Code::ShadowedPermit,
-            r#"tagma.permit:"triage:kind"=true"#,
-            &[("by", "*:*")],
-        )],
+        vec![
+            existing(
+                Code::RuleOnUnpermitted,
+                r#"tagma.enum:"triage:kind"=defect"#,
+                &[("facet", "enum")],
+            ),
+            existing(
+                Code::RuleOnUnpermitted,
+                "tagma.keys-per-item:area=1",
+                &[("facet", "keys-per-item")],
+            ),
+        ],
     );
 }
 
 #[test]
-fn check_reports_a_permit_covered_by_a_broader_active_permit() {
+fn check_reports_a_permit_covered_by_a_broader_declared_permit() {
     let idx = index(&[
-        r#"cfg tagma.permit:"*:*"=false tagma.permit:"triage:*"=true"#,
-        r#"cfg tagma.permit:"triage:kind"=true tagma.permit:"triage.sub:x"=true"#,
-        r#"cfg tagma.permit:"*:lang"=true tagma.permit:lang=true"#,
+        r#"cfg tagma.permit:"triage:*""#,
+        r#"cfg tagma.permit:"triage:kind" tagma.permit:"triage.sub:x""#,
+        r#"cfg tagma.permit:"*:lang" tagma.permit:lang"#,
     ]);
     assert_findings(
         idx.check(),
         vec![
             existing(
                 Code::ShadowedPermit,
-                r#"tagma.permit:"triage:kind"=true"#,
+                r#"tagma.permit:"triage:kind""#,
                 &[("by", "triage:*")],
             ),
             existing(
                 Code::ShadowedPermit,
-                r#"tagma.permit:"triage.sub:x"=true"#,
+                r#"tagma.permit:"triage.sub:x""#,
                 &[("by", "triage:*")],
             ),
             existing(
                 Code::ShadowedPermit,
-                "tagma.permit:lang=true",
+                "tagma.permit:lang",
                 &[("by", "*:lang")],
             ),
         ],
@@ -769,7 +794,7 @@ fn check_reports_a_permit_covered_by_a_broader_active_permit() {
 #[test]
 fn check_reports_a_rule_on_a_target_no_permit_admits() {
     let idx = index(&[
-        r#"cfg tagma.permit:"*:*"=false tagma.permit:"triage:*"=true"#,
+        r#"cfg tagma.permit:"triage:*""#,
         r#"cfg tagma.enum:"other:k"=a tagma.range:"triage:n"=1..5"#,
     ]);
     assert_findings(
@@ -784,7 +809,7 @@ fn check_reports_a_rule_on_a_target_no_permit_admits() {
 
 #[test]
 fn check_reports_ranges_whose_intersection_is_empty() {
-    let idx = index(&["cfg tagma.range:k=1..3 tagma.range:k=5..9 tagma.range:j=9..1"]);
+    let idx = open_index(&["cfg tagma.range:k=1..3 tagma.range:k=5..9 tagma.range:j=9..1"]);
     assert_findings(
         idx.check(),
         vec![
@@ -797,7 +822,7 @@ fn check_reports_ranges_whose_intersection_is_empty() {
 
 #[test]
 fn check_reports_enum_values_a_range_on_the_same_target_never_admits() {
-    let idx = index(&["cfg tagma.range:k=1..5 tagma.enum:k=3 tagma.enum:k=7 tagma.enum:k=x"]);
+    let idx = open_index(&["cfg tagma.range:k=1..5 tagma.enum:k=3 tagma.enum:k=7 tagma.enum:k=x"]);
     assert_findings(
         idx.check(),
         vec![
@@ -817,7 +842,7 @@ fn check_reports_enum_values_a_range_on_the_same_target_never_admits() {
 
 #[test]
 fn check_reports_no_empty_range_for_overlapping_ranges_and_a_reversed_one_only_against_itself() {
-    let idx = index(&["cfg tagma.range:k=1..5 tagma.range:k=3..9 tagma.range:k=9..2"]);
+    let idx = open_index(&["cfg tagma.range:k=1..5 tagma.range:k=3..9 tagma.range:k=9..2"]);
     assert_findings(
         idx.check(),
         vec![existing(
@@ -830,7 +855,7 @@ fn check_reports_no_empty_range_for_overlapping_ranges_and_a_reversed_one_only_a
 
 #[test]
 fn check_reports_an_enum_value_the_declared_type_cannot_order() {
-    let idx = with_version(index(&[
+    let idx = with_version(open_index(&[
         "cfg tagma.type:v=version tagma.enum:v=1.2 tagma.enum:v=abc",
     ]));
     assert_findings(
@@ -845,13 +870,12 @@ fn check_reports_an_enum_value_the_declared_type_cannot_order() {
 
 #[test]
 fn check_reports_a_null_namespace_permit_covered_by_the_null_namespace_star() {
-    let idx =
-        index(&[r#"cfg tagma.permit:"*:*"=false tagma.permit:"*"=true tagma.permit:lang=true"#]);
+    let idx = index(&[r#"cfg tagma.permit:"*" tagma.permit:lang"#]);
     assert_findings(
         idx.check(),
         vec![existing(
             Code::ShadowedPermit,
-            "tagma.permit:lang=true",
+            "tagma.permit:lang",
             &[("by", "*")],
         )],
     );
@@ -859,7 +883,7 @@ fn check_reports_a_null_namespace_permit_covered_by_the_null_namespace_star() {
 
 #[test]
 fn check_reports_a_type_name_with_no_registered_comparator() {
-    let idx = with_version(index(&["cfg tagma.type:k=nope tagma.type:v=version"]));
+    let idx = with_version(open_index(&["cfg tagma.type:k=nope tagma.type:v=version"]));
     assert_findings(
         idx.check(),
         vec![existing(
@@ -872,7 +896,7 @@ fn check_reports_a_type_name_with_no_registered_comparator() {
 
 #[test]
 fn rules_from_tags_checks_like_the_index_it_was_read_from() {
-    let line = r#"cfg tagma.permit:"triage:kind"=true tagma.enum:"*:k"=a tagma.bogus:x=1 tagma.keys-per-item:area=1 tagma.keys-per-item:area=2"#;
+    let line = r#"cfg tagma.permit:"triage:kind" tagma.permit:"triage:*" tagma.enum:"*:k"=a tagma.bogus:x=1 tagma.keys-per-item:area=1 tagma.keys-per-item:area=2"#;
     let idx = index(&[line]);
     let config: Vec<Tag> = line.split_whitespace().skip(1).map(tag).collect();
     assert_eq!(Rules::from_tags(&config).check(), idx.check());
@@ -935,7 +959,7 @@ fn too_many(t: &str, args: &[(String, String)], origin: Origin) -> Finding {
 
 #[test]
 fn keys_per_item_limits_the_distinct_keys_under_its_exact_namespace() {
-    let idx = index(&["cfg tagma.keys-per-item:area=1"]);
+    let idx = open_index(&["cfg tagma.keys-per-item:area=1"]);
     // area.sub is another namespace: an exact target, not a subtree.
     let change = add(&["area:cli", "area:core", "area.sub:x", "repo:a"]);
     let args = over("area", "1", &["cli", "core"]);
@@ -952,7 +976,7 @@ fn keys_per_item_limits_the_distinct_keys_under_its_exact_namespace() {
 
 #[test]
 fn keys_per_item_counts_keys_not_values_and_reports_every_tag_on_them() {
-    let idx = index(&["cfg tagma.keys-per-item:area=1"]);
+    let idx = open_index(&["cfg tagma.keys-per-item:area=1"]);
     assert_findings(
         idx.validate("a", &add(&["area:cli=1", "area:cli=2", "area:cli"])),
         vec![],
@@ -970,7 +994,7 @@ fn keys_per_item_counts_keys_not_values_and_reports_every_tag_on_them() {
 
 #[test]
 fn keys_per_item_zero_admits_no_key_under_the_namespace() {
-    let idx = index(&["cfg tagma.keys-per-item:legacy=0"]);
+    let idx = open_index(&["cfg tagma.keys-per-item:legacy=0"]);
     assert_findings(
         idx.validate("a", &add(&["legacy:x", "k"])),
         vec![too_many(
@@ -985,7 +1009,7 @@ fn keys_per_item_zero_admits_no_key_under_the_namespace() {
 fn keys_per_item_smallest_limit_wins_and_is_reported_canonically() {
     // Declared on different items, with leading zeros: the smallest wins,
     // spelled without them.
-    let idx = index(&[
+    let idx = open_index(&[
         "cfg1 tagma.keys-per-item:area=3",
         "cfg2 tagma.keys-per-item:area=002",
     ]);
@@ -1003,13 +1027,13 @@ fn keys_per_item_smallest_limit_wins_and_is_reported_canonically() {
 
 #[test]
 fn keys_per_item_a_limit_past_any_machine_integer_still_compares_exactly() {
-    let idx = index(&["cfg tagma.keys-per-item:area=000123456789012345678901234567890"]);
+    let idx = open_index(&["cfg tagma.keys-per-item:area=000123456789012345678901234567890"]);
     assert_findings(idx.validate("x", &add(&["area:a", "area:b"])), vec![]);
 }
 
 #[test]
 fn keys_per_item_origin_is_existing_for_a_tag_that_already_exceeded_the_same_limit() {
-    let idx = index(&[
+    let idx = open_index(&[
         "cfg tagma.keys-per-item:area=1",
         "item area:a area:b area:c",
     ]);
@@ -1044,7 +1068,7 @@ fn keys_per_item_origin_is_existing_for_a_tag_that_already_exceeded_the_same_lim
 fn keys_per_item_a_tag_first_over_the_limit_is_introduced() {
     // The item was within its limit: the change puts both tags over it,
     // the one it already carried included.
-    let idx = index(&["cfg tagma.keys-per-item:area=1", "item area:a"]);
+    let idx = open_index(&["cfg tagma.keys-per-item:area=1", "item area:a"]);
     let args = over("area", "1", &["a", "b"]);
     assert_findings(
         idx.validate("item", &add(&["area:b"])),
@@ -1057,7 +1081,7 @@ fn keys_per_item_a_tag_first_over_the_limit_is_introduced() {
 
 #[test]
 fn keys_per_item_swapping_the_one_key_is_clean() {
-    let idx = index(&["cfg tagma.keys-per-item:area=1", "item area:cli"]);
+    let idx = open_index(&["cfg tagma.keys-per-item:area=1", "item area:cli"]);
     let change = Change {
         add: tags(&["area:core"]),
         remove: tags(&["area:cli"]),
@@ -1067,7 +1091,7 @@ fn keys_per_item_swapping_the_one_key_is_clean() {
 
 #[test]
 fn keys_per_item_uninterpretable_values_and_targets_configure_nothing() {
-    let idx = index(&[
+    let idx = open_index(&[
         r#"cfg tagma.keys-per-item:area=one tagma.keys-per-item:area=-1 tagma.keys-per-item:area=1.5"#,
         r#"cfg tagma.keys-per-item:area tagma.keys-per-item:area="+1" tagma.keys-per-item:area=" 1""#,
         r#"cfg tagma.keys-per-item:"*"=0 tagma.keys-per-item:"area:cli"=0"#,
@@ -1077,7 +1101,7 @@ fn keys_per_item_uninterpretable_values_and_targets_configure_nothing() {
 
 #[test]
 fn check_reports_keys_per_item_malformed_values_and_targets() {
-    let idx = index(&[
+    let idx = open_index(&[
         r#"cfg tagma.keys-per-item:area=one tagma.keys-per-item:area=-1 tagma.keys-per-item:area"#,
         r#"cfg tagma.keys-per-item:"*"=0 tagma.keys-per-item:"area:cli"=0 tagma.keys-per-item:"*"=x"#,
     ]);
@@ -1108,7 +1132,7 @@ fn check_reports_keys_per_item_malformed_values_and_targets() {
 
 #[test]
 fn check_reports_a_keys_per_item_conflict_on_every_larger_limit() {
-    let idx = index(&[
+    let idx = open_index(&[
         "cfg tagma.keys-per-item:area=1 tagma.keys-per-item:area=3",
         "cfg2 tagma.keys-per-item:area=01 tagma.keys-per-item:area=2",
         "cfg3 tagma.keys-per-item:repo=1 tagma.keys-per-item:repo=001",
@@ -1133,7 +1157,7 @@ fn check_reports_a_keys_per_item_conflict_on_every_larger_limit() {
 #[test]
 fn check_reports_keys_per_item_on_a_namespace_no_permit_admits() {
     let idx = index(&[
-        r#"cfg tagma.permit:"*:*"=false tagma.permit:"triage:*"=true tagma.permit:"repo:main"=true"#,
+        r#"cfg tagma.permit:"triage:*" tagma.permit:"repo:main""#,
         "cfg tagma.keys-per-item:area=1 tagma.keys-per-item:triage.sub=1 tagma.keys-per-item:repo=1",
     ]);
     // triage.sub is in the triage subtree, and repo admits one key.
@@ -1149,13 +1173,13 @@ fn check_reports_keys_per_item_on_a_namespace_no_permit_admits() {
 
 #[test]
 fn check_accepts_a_sound_keys_per_item_declaration() {
-    let idx = index(&["cfg tagma.keys-per-item:area=1 tagma.keys-per-item:tagma.enum=4"]);
+    let idx = open_index(&["cfg tagma.keys-per-item:area=1 tagma.keys-per-item:tagma.enum=4"]);
     assert_findings(idx.check(), vec![]);
 }
 
 #[test]
 fn rules_from_tags_validates_keys_per_item_like_the_index() {
-    let line = "cfg tagma.keys-per-item:area=2 tagma.keys-per-item:area=1";
+    let line = r#"cfg tagma.permit:"area:*" tagma.keys-per-item:area=2 tagma.keys-per-item:area=1"#;
     let idx = index(&[line]);
     let config: Vec<Tag> = line.split_whitespace().skip(1).map(tag).collect();
     let change = add(&["area:a", "area:b"]);

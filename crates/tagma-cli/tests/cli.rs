@@ -184,8 +184,10 @@ fn infix_query_is_postfix_query_of_compile() {
 
 // --- validate and check (SPEC.md §13/§14) --------------------------------
 
+/// `k` and `j` each admit `a`, in a store permitting every tag (SPEC.md
+/// §10: one declaring no permit permits nothing).
 const RULES_FIXTURE: &str = "\
-cfg tagma.enum:k=a tagma.enum:j=a
+cfg tagma.permit:\"*:*\" tagma.enum:k=a tagma.enum:j=a
 item k=z j=bad
 ";
 
@@ -234,7 +236,7 @@ fn validate_flags_take_whitespace_separated_tag_lists_and_repeat() {
 fn validate_a_finding_with_no_args_prints_an_empty_args_array() {
     tagma()
         .args(["validate", "x", "--add", "lang=en"])
-        .write_stdin("cfg tagma.permit:\"*:*\"=false\n")
+        .write_stdin("cfg tagma.permit:other\n")
         .assert()
         .success()
         .stdout(
@@ -288,11 +290,11 @@ fn validate_bad_invocations_exit_2() {
 fn check_prints_config_findings_and_escapes_the_tag_spelling() {
     tagma()
         .arg("check")
-        .write_stdin("cfg tagma.permit:\"*:secret\"=false tagma.range:k=5..9 tagma.range:k=1..3\n")
+        .write_stdin("cfg tagma.permit:\"*:secret\"=false tagma.permit:k tagma.range:k=5..9 tagma.range:k=1..3\n")
         .assert()
         .success()
         .stdout(concat!(
-            r#"{"code":"inert-false","tag":"tagma.permit:\"*:secret\"=false","args":[["facet","permit"]],"origin":"existing"}"#,
+            r#"{"code":"malformed-value","tag":"tagma.permit:\"*:secret\"=false","args":[["facet","permit"],["expected","no value"]],"origin":"existing"}"#,
             "\n",
             r#"{"code":"range-empty","tag":"tagma.range:k=1..3","args":[["range","5..9"]],"origin":"existing"}"#,
             "\n",
@@ -374,14 +376,14 @@ const KEYS_PER_ITEM_FINDINGS: &str = concat!(
 fn validate_reports_a_namespace_over_its_keys_per_item_limit() {
     tagma()
         .args(["validate", "item", "--add", "area:c"])
-        .write_stdin("cfg tagma.keys-per-item:area=1\nitem area:a area:b\n")
+        .write_stdin("cfg tagma.permit:\"area:*\" tagma.keys-per-item:area=1\nitem area:a area:b\n")
         .assert()
         .success()
         .stdout(KEYS_PER_ITEM_FINDINGS);
     tagma()
         .args(["rules", "validate", "--current", "area:a area:b"])
         .args(["--add", "area:c"])
-        .write_stdin("tagma.keys-per-item:area=1\n")
+        .write_stdin("tagma.permit:\"area:*\" tagma.keys-per-item:area=1\n")
         .assert()
         .success()
         .stdout(KEYS_PER_ITEM_FINDINGS);
@@ -395,13 +397,17 @@ fn check_reports_a_larger_keys_per_item_limit_as_the_conflicts_loser() {
     );
     tagma()
         .args(["check"])
-        .write_stdin("cfg tagma.keys-per-item:area=2 tagma.keys-per-item:area=1\n")
+        .write_stdin(
+            "cfg tagma.permit:\"area:*\" tagma.keys-per-item:area=2 tagma.keys-per-item:area=1\n",
+        )
         .assert()
         .success()
         .stdout(conflict);
     tagma()
         .args(["rules", "check"])
-        .write_stdin("tagma.keys-per-item:area=2 tagma.keys-per-item:area=1\n")
+        .write_stdin(
+            "tagma.permit:\"area:*\" tagma.keys-per-item:area=2 tagma.keys-per-item:area=1\n",
+        )
         .assert()
         .success()
         .stdout(conflict);
@@ -411,7 +417,7 @@ fn check_reports_a_larger_keys_per_item_limit_as_the_conflicts_loser() {
 
 /// Config tags as `rules` reads them: whitespace-separated, several lines,
 /// no ids; non-config tags are ignored.
-const RULES_CONFIG: &str = "tagma.enum:k=a\n\n  tagma.enum:j=a unrelated=1\n";
+const RULES_CONFIG: &str = "tagma.permit:\"*:*\" tagma.enum:k=a\n\n  tagma.enum:j=a unrelated=1\n";
 
 #[test]
 fn rules_validate_judges_the_current_set_like_validate_judges_an_item() {
@@ -455,7 +461,7 @@ fn rules_validate_with_no_current_set_starts_from_nothing() {
 fn rules_check_reports_the_stdin_config() {
     tagma()
         .args(["rules", "check"])
-        .write_stdin("tagma.arity:k=scalar\ntagma.arity:k=set\n")
+        .write_stdin("tagma.permit:k tagma.arity:k=scalar\ntagma.arity:k=set\n")
         .assert()
         .success()
         .stdout(concat!(

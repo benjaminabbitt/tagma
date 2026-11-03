@@ -844,11 +844,15 @@ pattern grammar — as `tagma.hide`. It never refuses a write (writes stay
 infallible, §4/§8); it is enforced only by a caller that asks first, via
 §13's `validate`.
 
-**Config tag form.** `tagma.permit:<target>=<bool>` declares whether the
-pattern encoded in `<target>` — the tag's own key — is a permitted pattern;
-`<bool>` is the literal token `true` or `false` (case-sensitive; any other
-value, or no value, configures nothing — §14 reports it as
-`malformed-value`).
+*(owner ruling F6, 2026-11-02: "An undeclared tag is REFUSED when
+written. A namespace or tag has to be permitted by an explicit command
+first." A permit is a presence, not a boolean, and every store is an
+allowlist.)*
+
+**Config tag form.** `tagma.permit:<target>` — a tag with **no value** —
+declares that the pattern encoded in `<target>`, the tag's own key, is
+permitted. A permit tag carrying any value (`=true`, `=false`, anything
+else) configures nothing; §14 reports it as `malformed-value`.
 
 **Target encoding and pattern grammar — §7's, verbatim.** `<target>` is
 `<ns-pattern>:<key-pattern>` (quoted whenever it contains a `:`), or a bare
@@ -860,52 +864,39 @@ here: `"triage:*"` (the `triage` subtree, every key), `"triage:cwe"`,
 tag), `"*:*"` (every tag). §7's documented-not-solved limitations (a
 literal `:` in a key-pattern, a literal `*` pattern) carry over unchanged.
 
-**Resolution — mirrors §7 exactly, with the restrictive value flipped.**
-
-1. *Per exact target:* a target is **active** iff it has a `=true` tag on
-   record and no `=false` tag. On a target with both, **`false` wins** —
-   the restrictive reading, as `hide`'s `true` and `arity`'s `scalar` win
-   in §7/§8. Reconciliation is per exact `<target>` string only.
-2. *Default:* tagma behaves as if an implicit `tagma.permit:"*:*"=true` is
-   always present. With no permit declarations at all, every tag is
-   permitted. An explicit `tagma.permit:"*:*"=false` deactivates it,
-   store-wide — this is how a store switches to an allowlist.
-3. *Across targets:* **a tag is permitted iff it matches at least one
-   active permit pattern.** Two *different* targets are never reconciled
-   by specificity, exactly as §7 refuses to: a `false` only ever
-   deactivates its own exact target — it is never a negative pattern, and
-   never carves an exception out of a broader active `true`.
+**Resolution — an allowlist, always.** A tag is **permitted iff it matches
+at least one declared permit pattern.** There is no implicit permit: a
+store that declares none permits no tag (but the `tagma` family, below),
+and one that means to admit every tag declares `tagma.permit:"*:*"`. The
+permits on record are one allowlist wherever they are declared — on one
+item or many, in any order — and with no value to contradict, two permits
+never conflict.
 
 Consequences, stated so nobody has to derive them:
 
-- **Allowlist** — `"*:*"=false` plus one `=true` per admitted pattern.
-  This is the mode the facet exists for.
-- **Denylist is not expressible.** `"*:*"` active plus `"*:secret"=false`
-  does not forbid `secret`: the `false` deactivates only the target
-  `"*:secret"`, which was never active, so it configures nothing (§14:
-  `inert-false`). Forbidding a pattern inside an otherwise-open store is
-  out of scope for this slice — it would need specificity, which §7
-  rejected.
-- **While the default is active, every explicit `=true` is redundant**
-  (§14: `shadowed-permit`, naming `"*:*"`). A store that declares permits
-  but forgot `"*:*"=false` is the expected mistake; `check` names it.
+- **Narrowing means removing a permit** (§1: untagging is deletion), never
+  declaring a negative one. A pattern is either on record or not.
+- **Denylist is not expressible.** Forbidding a pattern inside a broader
+  permitted one would need specificity, which §7 rejected.
+- **A permit another covers is redundant** (§14: `shadowed-permit`), as
+  every other permit is once `"*:*"` is declared.
 
 | config on record | `triage:kind=bug` | `triage.sub:x` | `lang=en` | `secret` |
 |---|---|---|---|---|
-| *(none)* | permitted | permitted | permitted | permitted |
-| `"*:*"=false`, `"triage:*"=true` | permitted | permitted (subtree) | **not** | **not** |
-| `"*:*"=false`, `"triage:kind"=true`, `lang=true` | permitted | **not** | permitted | **not** |
-| `"*:*"=false`, `"triage:*"=true`, `"triage:*"=false` | **not** (false wins on the one target) | **not** | **not** | **not** |
-| `"*:secret"=false` | permitted | permitted | permitted | permitted (inert `false`) |
+| *(none)* | **not** | **not** | **not** | **not** |
+| `"*:*"` | permitted | permitted | permitted | permitted |
+| `"triage:*"` | permitted | permitted (subtree) | **not** | **not** |
+| `"triage:kind"`, `lang` | permitted | **not** | permitted | **not** |
+| `"*:*"=false`, `"triage:*"=true` | **not** (a valued permit configures nothing) | **not** | **not** | **not** |
 
 **The `tagma` family is exempt.** A tag whose namespace is `tagma` or a
 dot-descendant of it (every config tag, §7–§12) is always permitted —
-otherwise `"*:*"=false` would forbid the very tags that configure the
-store. Config tags are vetted by §14's `check`, not by `permit`.
+otherwise a store could not declare its first permit, nor any other rule.
+Config tags are vetted by §14's `check`, not by `permit`.
 
 **Config is stored as tags and derived at read time**, store-wide and
 unconditional, exactly as §7: permit tags live in the ordinary tag store
-on any item, and the active set is re-derived (or a cache invalidated)
+on any item, and the allowlist is re-derived (or a cache invalidated)
 whenever one is added. They are hidden by §7's default like every
 `tagma.*` tag.
 
@@ -944,7 +935,7 @@ constrains the value to be one of a set; absence is not a member). An
 undeclared target admits any value.
 
 **Restrictive-wins, applied to sets — why the reading is union** *(owner
-ruling, 2026-10-30: union for enum, intersection for range)*. `hide`, `arity` and `permit` reconcile two
+ruling, 2026-10-30: union for enum, intersection for range)*. `hide` and `arity` reconcile two
 *contradictory* tags on one target (`true`/`false`, `scalar`/`set`); the
 more restrictive tag wins. Enum tags on one target never contradict each
 other: each one asserts a single fact, "*this* value is admitted," and two
@@ -1087,7 +1078,7 @@ rule):
 
 | code | when | `tag` | args |
 |---|---|---|---|
-| `not-permitted` | the tag matches no active permit pattern (§10); never for a `tagma`-family tag | the tag | — |
+| `not-permitted` | the tag matches no declared permit pattern (§10); never for a `tagma`-family tag | the tag | — |
 | `not-in-enum` | the target has an enum (§11) and the tag's value is absent or not in it | the tag | `allowed` — one arg per admitted value, sorted |
 | `out-of-range` | the value is comparable but outside one `tagma.range` declaration (§12) | the tag | `range` — the violated declaration's value, e.g. `1..5` |
 | `not-comparable` | the target has a range and the value is absent or cannot be compared to its bounds | the tag | `range` |
@@ -1138,12 +1129,12 @@ about — for a conflict, the tag that **lost**.
 | code | when | args |
 |---|---|---|
 | `unknown-facet` | namespace in the `tagma` family that is not a facet above | `facet` — the namespace with its leading `tagma.` removed (empty for `tagma` itself) |
-| `malformed-value` | `hide`/`permit` value not `true`/`false`; `arity` not `scalar`/`set`; `enum`, `type` or `range` with no value; a `range` that does not parse or has an uninterpretable bound (§12); a `keys-per-item` value that is not a non-negative integer (§15) | `facet`, `expected` — `true\|false`, `scalar\|set`, `value` (enum), `type name` (type), `lo..hi` (range), `non-negative integer` (keys-per-item) |
+| `malformed-value` | `hide` value not `true`/`false`; a `permit` with any value (§10: a presence); `arity` not `scalar`/`set`; `enum`, `type` or `range` with no value; a `range` that does not parse or has an uninterpretable bound (§12); a `keys-per-item` value that is not a non-negative integer (§15) | `facet`, `expected` — `true\|false` (hide), `no value` (permit), `scalar\|set`, `value` (enum), `type name` (type), `lo..hi` (range), `non-negative integer` (keys-per-item) |
 | `malformed-target` | a target with an empty namespace or key part (`":k"`, `"ns:"`); a `*` in an `arity`/`type`/`enum`/`range` target (exact targets only); a `keys-per-item` target that is not one exact namespace (`*`, or containing `:`, §15) | `facet` |
-| `conflict` | one exact target carries contradictory values: `hide` `true`+`false`, `permit` `true`+`false`, `arity` `scalar`+`set`, `type` two names, `keys-per-item` two different limits (every limit larger than the smallest loses) | `facet`, `resolution` — what won: `true` (hide), `false` (permit), `scalar` (arity), `disabled` (type, §9), the smallest limit, canonical (keys-per-item) |
-| `inert-false` | a `hide`/`permit` `=false` on a target with no `=true` on record (and not the facet's default target: `"tagma:*"` for hide, `"*:*"` for permit) — it deactivates nothing | `facet` |
-| `shadowed-permit` | an active `permit` pattern whose every match is already matched by another active pattern (§10), the implicit `"*:*"` included | `by` — the covering target |
-| `rule-on-unpermitted` | an `enum`/`range`/`type`/`arity` declaration on a target `(ns, key)` that no active permit pattern admits, or a `keys-per-item` on a namespace no active permit pattern admits any key of (§15) — it can never constrain a valid tag | `facet` |
+| `conflict` | one exact target carries contradictory values: `hide` `true`+`false`, `arity` `scalar`+`set`, `type` two names, `keys-per-item` two different limits (every limit larger than the smallest loses) | `facet`, `resolution` — what won: `true` (hide), `scalar` (arity), `disabled` (type, §9), the smallest limit, canonical (keys-per-item) |
+| `inert-false` | a `hide` `=false` on a target with no `=true` on record (and not its default target, `"tagma:*"`) — it deactivates nothing | `facet` |
+| `shadowed-permit` | a declared `permit` pattern whose every match is already matched by another declared pattern (§10) | `by` — the covering target |
+| `rule-on-unpermitted` | an `enum`/`range`/`type`/`arity` declaration on a target `(ns, key)` that no declared permit pattern admits, or a `keys-per-item` on a namespace no declared permit pattern admits any key of (§15) — it can never constrain a valid tag; in a store declaring no permit, every such declaration | `facet` |
 | `range-empty` | two `range` declarations on one target (or one with `lo > hi`) whose intersection admits nothing (§12) | `range` — the other declaration (itself when `lo > hi`) |
 | `dead-enum-value` | an `enum` value that a `range` or `type` declaration on the same target never admits | `reason` — `out-of-range`, `not-comparable` or `type-mismatch` |
 | `type-unregistered` | a non-conflicting `type` declaration whose name has no registered comparator — §9 falls back to the numeric grammar | `type` |
@@ -1165,8 +1156,7 @@ Where a finding could name more than one thing, it names one:
 
 - `shadowed-permit`'s `by` is the **broadest** covering pattern — one no
   other covering pattern covers — the first by target spelling if several
-  are. An explicit `"*:*"=true` is never shadowed by the implicit default:
-  they are the same target.
+  are.
 - `range-empty`: a declaration with `lo > hi` is reported once, against
   itself, and is left out of the pairwise comparison (it would otherwise
   be empty against every other declaration too). For the rest, pairwise is
@@ -1239,7 +1229,7 @@ of one limit (`1`, `01`) do not.
 
 **Interaction with other facets.** Independent of `permit`, `enum`,
 `range`, `type` and `arity`: every tag counts toward its namespace's keys,
-permitted or not. A limit on a namespace no active permit pattern admits
+permitted or not. A limit on a namespace no declared permit pattern admits
 any key of can never constrain a valid tag (§14: `rule-on-unpermitted`).
 The `tagma` family is not exempt — a limit on a `tagma.<x>` namespace
 counts its config tags' keys, as any other.
