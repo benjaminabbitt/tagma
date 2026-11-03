@@ -76,7 +76,9 @@ static void handle_safety(void) {
 static void rules(void) {
     TagmaIndex idx = tagma_index_new();
     assert(idx != 0);
-    assert(tagma_index_add(idx, "cfg tagma.enum:k=a tagma.enum:j=a") == 0);
+    /* A store declaring no permit permits nothing (SPEC.md section 10):
+     * this one permits every tag, so only the enums judge. */
+    assert(tagma_index_add(idx, "cfg tagma.permit:\"*:*\" tagma.enum:k=a tagma.enum:j=a") == 0);
     assert(tagma_index_add(idx, "item k=z j=bad") == 0);
 
     char *found = tagma_validate(idx, "item", "k=y", "k=z");
@@ -123,7 +125,7 @@ static void rules(void) {
  * TagmaRules handle, freed with tagma_rules_free, never accepted as a
  * TagmaIndex or vice versa. */
 static void standalone_rules(void) {
-    TagmaRules rules = tagma_rules_from_tags("tagma.enum:k=a tagma.enum:j=a");
+    TagmaRules rules = tagma_rules_from_tags("tagma.permit:\"*:*\" tagma.enum:k=a tagma.enum:j=a");
     assert(rules != 0);
 
     char *found = tagma_rules_validate(rules, "k=z j=bad", "k=y", "k=z");
@@ -170,7 +172,7 @@ static void keys_per_item(void) {
         "[\"limit\",\"1\"],[\"keys\",\"a\"],[\"keys\",\"b\"]],\"origin\":\"existing\"}";
     TagmaIndex idx = tagma_index_new();
     assert(idx != 0);
-    assert(tagma_index_add(idx, "cfg tagma.keys-per-item:area=1") == 0);
+    assert(tagma_index_add(idx, "cfg tagma.permit:\"area:*\" tagma.keys-per-item:area=1") == 0);
     assert(tagma_index_add(idx, "item area:a area:a=2") == 0);
     char *found = tagma_validate(idx, "item", "area:b", "area:a=2");
     assert(found != NULL);
@@ -182,7 +184,7 @@ static void keys_per_item(void) {
     tagma_str_free(found);
     assert(tagma_index_free(idx) == 0);
 
-    TagmaRules rules = tagma_rules_from_tags("tagma.keys-per-item:area=1");
+    TagmaRules rules = tagma_rules_from_tags("tagma.permit:\"area:*\" tagma.keys-per-item:area=1");
     assert(rules != 0);
     char *over = tagma_rules_validate(rules, "area:a area:b area:c", "", "area:c");
     assert(over != NULL);

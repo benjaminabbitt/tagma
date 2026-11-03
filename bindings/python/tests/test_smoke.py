@@ -89,7 +89,9 @@ def test_index_add_invalid_raises():
 
 def _rules_index():
     idx = tagma.Index()
-    idx.add("cfg tagma.enum:k=a tagma.enum:j=a")
+    # A store declaring no permit permits nothing (SPEC.md §10): this one
+    # permits every tag, so only the enums judge.
+    idx.add('cfg tagma.permit:"*:*" tagma.enum:k=a tagma.enum:j=a')
     idx.add("item k=z j=bad")
     return idx
 
@@ -113,7 +115,7 @@ def test_validate_change_defaults_to_empty():
 
 def test_validate_finding_without_args_has_an_empty_list():
     idx = tagma.Index()
-    idx.add('cfg tagma.permit:"*:*"=false')
+    idx.add("cfg tagma.permit:other")
     assert idx.validate("x", ["lang=en"]) == [
         {"code": "not-permitted", "tag": "lang=en", "args": [], "origin": "introduced"}
     ]
@@ -133,7 +135,7 @@ def test_validate_invalid_tag_raises_naming_its_list():
 def test_check_returns_config_findings_sorted_by_tag():
     idx = tagma.Index()
     assert idx.check() == []
-    idx.add('cfg tagma.permit:"*:secret"=false tagma.arity:k=scalar tagma.arity:k=set')
+    idx.add("cfg tagma.permit:k tagma.hide:x=false tagma.arity:k=scalar tagma.arity:k=set")
     assert idx.check() == [
         {
             "code": "conflict",
@@ -143,8 +145,8 @@ def test_check_returns_config_findings_sorted_by_tag():
         },
         {
             "code": "inert-false",
-            "tag": 'tagma.permit:"*:secret"=false',
-            "args": [("facet", "permit")],
+            "tag": "tagma.hide:x=false",
+            "args": [("facet", "hide")],
             "origin": "existing",
         },
     ]
@@ -152,14 +154,14 @@ def test_check_returns_config_findings_sorted_by_tag():
 
 def test_rules_from_tags_mirrors_the_index_it_comes_from():
     # Non-config tags among the input are ignored.
-    rules = tagma.Rules.from_tags(["tagma.enum:k=a", "tagma.enum:j=a", "k=z"])
+    rules = tagma.Rules.from_tags(['tagma.permit:"*:*"', "tagma.enum:k=a", "tagma.enum:j=a", "k=z"])
     via_rules = rules.validate(["k=z", "j=bad"], ["k=y"], ["k=z"])
     assert via_rules == _rules_index().validate("item", ["k=y"], ["k=z"])
     assert len(via_rules) == 2
     assert rules.validate([], add=["k=a"]) == []
     assert [f["tag"] for f in rules.validate(["k=z"])] == ["k=z"]
     assert rules.check() == []
-    conflicted = tagma.Rules.from_tags(["tagma.arity:k=scalar", "tagma.arity:k=set"])
+    conflicted = tagma.Rules.from_tags(["tagma.permit:k", "tagma.arity:k=scalar", "tagma.arity:k=set"])
     assert conflicted.check() == [
         {
             "code": "conflict",
@@ -178,12 +180,14 @@ def test_keys_per_item_through_the_index_and_rules():
         {"code": "too-many-keys", "tag": "area:c", "args": keys, "origin": "introduced"},
     ]
     idx = tagma.Index()
-    idx.add("cfg tagma.keys-per-item:area=1")
+    idx.add('cfg tagma.permit:"area:*" tagma.keys-per-item:area=1')
     idx.add("item area:a area:b")
     assert idx.validate("item", ["area:c"]) == expected
-    rules = tagma.Rules.from_tags(["tagma.keys-per-item:area=1"])
+    rules = tagma.Rules.from_tags(['tagma.permit:"area:*"', "tagma.keys-per-item:area=1"])
     assert rules.validate(["area:a", "area:b"], ["area:c"]) == expected
-    conflicted = tagma.Rules.from_tags(["tagma.keys-per-item:area=2", "tagma.keys-per-item:area=1"])
+    conflicted = tagma.Rules.from_tags(
+        ['tagma.permit:"area:*"', "tagma.keys-per-item:area=2", "tagma.keys-per-item:area=1"]
+    )
     assert conflicted.check() == [
         {
             "code": "conflict",

@@ -1032,6 +1032,11 @@ mod tests {
 
     // --- validate and check (SPEC.md §13/§14) ------------------------------
 
+    /// The config the enum tests judge by: `k` and `j` each admit `a`, in a
+    /// store permitting every tag (SPEC.md §10: one declaring no permit
+    /// permits nothing).
+    const OPEN_ENUMS: &str = r#"cfg tagma.permit:"*:*" tagma.enum:k=a tagma.enum:j=a"#;
+
     /// An index over `lines`, for the rules tests.
     unsafe fn rules_index(lines: &[&str]) -> TagmaIndex {
         let handle = tagma_index_new();
@@ -1050,7 +1055,7 @@ mod tests {
     #[test]
     fn validate_returns_one_json_finding_per_line_with_its_origin() {
         unsafe {
-            let handle = rules_index(&["cfg tagma.enum:k=a tagma.enum:j=a", "item k=z j=bad"]);
+            let handle = rules_index(&[OPEN_ENUMS, "item k=z j=bad"]);
             assert_eq!(
                 from_c(validate(handle, "item", "k=y", "k=z")),
                 concat!(
@@ -1067,7 +1072,7 @@ mod tests {
     #[test]
     fn validate_takes_whitespace_separated_tag_lists_and_is_pure() {
         unsafe {
-            let handle = rules_index(&["cfg tagma.enum:k=a tagma.enum:j=a", "item k=z j=bad"]);
+            let handle = rules_index(&[OPEN_ENUMS, "item k=z j=bad"]);
             assert_eq!(
                 from_c(validate(handle, "item", r#"k=a j="a""#, "k=z j=bad")),
                 ""
@@ -1082,7 +1087,7 @@ mod tests {
     #[test]
     fn validate_a_finding_with_no_args_has_an_empty_args_array() {
         unsafe {
-            let handle = rules_index(&[r#"cfg tagma.permit:"*:*"=false"#]);
+            let handle = rules_index(&["cfg tagma.permit:other"]);
             assert_eq!(
                 from_c(validate(handle, "x", "lang=en", "")),
                 r#"{"code":"not-permitted","tag":"lang=en","args":[],"origin":"introduced"}"#
@@ -1163,12 +1168,12 @@ mod tests {
     fn check_reports_the_config_one_json_finding_per_line() {
         unsafe {
             let handle = rules_index(&[
-                r#"cfg tagma.permit:"*:secret"=false tagma.range:k=1..3 tagma.range:k=5..9"#,
+                "cfg tagma.permit:k tagma.hide:x=false tagma.range:k=1..3 tagma.range:k=5..9",
             ]);
             assert_eq!(
                 from_c(tagma_check(handle)),
                 concat!(
-                    r#"{"code":"inert-false","tag":"tagma.permit:\"*:secret\"=false","args":[["facet","permit"]],"origin":"existing"}"#,
+                    r#"{"code":"inert-false","tag":"tagma.hide:x=false","args":[["facet","hide"]],"origin":"existing"}"#,
                     "\n",
                     r#"{"code":"range-empty","tag":"tagma.range:k=1..3","args":[["range","5..9"]],"origin":"existing"}"#,
                     "\n",
@@ -1207,9 +1212,10 @@ mod tests {
     fn rules_validate_matches_the_index_it_mirrors() {
         unsafe {
             // Non-config tags among `tags` are ignored.
-            let rules = rules_from("tagma.enum:k=a tagma.enum:j=a k=z unrelated");
+            let rules =
+                rules_from(r#"tagma.permit:"*:*" tagma.enum:k=a tagma.enum:j=a k=z unrelated"#);
             assert!(tagma_last_error().is_null(), "success clears the error");
-            let idx = rules_index(&["cfg tagma.enum:k=a tagma.enum:j=a", "item k=z j=bad"]);
+            let idx = rules_index(&[OPEN_ENUMS, "item k=z j=bad"]);
             let via_rules = from_c(rules_validate(rules, "k=z j=bad", "k=y", "k=z"));
             assert!(tagma_last_error().is_null(), "success clears the error");
             let via_index = from_c(validate(idx, "item", "k=y", "k=z"));
@@ -1224,7 +1230,7 @@ mod tests {
     #[test]
     fn rules_check_matches_the_index_it_mirrors() {
         unsafe {
-            let config = r#"tagma.permit:"*:secret"=false tagma.arity:k=scalar tagma.arity:k=set"#;
+            let config = "tagma.permit:k tagma.hide:x=false tagma.arity:k=scalar tagma.arity:k=set";
             let rules = rules_from(config);
             let idx = rules_index(&[&format!("cfg {config}")]);
             let via_rules = from_c(tagma_rules_check(rules));
@@ -1253,14 +1259,19 @@ mod tests {
                 finding("area:c", "introduced"),
             ]
             .join("\n");
-            let idx = rules_index(&["cfg tagma.keys-per-item:area=1", "item area:a area:b"]);
+            let idx = rules_index(&[
+                r#"cfg tagma.permit:"area:*" tagma.keys-per-item:area=1"#,
+                "item area:a area:b",
+            ]);
             assert_eq!(from_c(validate(idx, "item", "area:c", "")), expected);
-            let rules = rules_from("tagma.keys-per-item:area=1");
+            let rules = rules_from(r#"tagma.permit:"area:*" tagma.keys-per-item:area=1"#);
             assert_eq!(
                 from_c(rules_validate(rules, "area:a area:b", "area:c", "")),
                 expected
             );
-            let conflict = rules_from("tagma.keys-per-item:area=2 tagma.keys-per-item:area=1");
+            let conflict = rules_from(
+                r#"tagma.permit:"area:*" tagma.keys-per-item:area=2 tagma.keys-per-item:area=1"#,
+            );
             assert_eq!(
                 from_c(tagma_rules_check(conflict)),
                 r#"{"code":"conflict","tag":"tagma.keys-per-item:area=2","args":[["facet","keys-per-item"],["resolution","1"]],"origin":"existing"}"#

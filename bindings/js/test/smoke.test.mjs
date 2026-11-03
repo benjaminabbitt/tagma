@@ -71,7 +71,9 @@ test("infix is a gateway: query(q) === queryPostfix(compile(q))", () => {
 
 test("validate: findings with their origin, args as pairs", () => {
   const idx = new Index();
-  idx.add("cfg tagma.enum:k=a tagma.enum:j=a");
+  // A store declaring no permit permits nothing (SPEC.md §10): this one
+  // permits every tag, so only the enums judge.
+  idx.add('cfg tagma.permit:"*:*" tagma.enum:k=a tagma.enum:j=a');
   idx.add("item k=z j=bad");
   assert.deepEqual(idx.validate("item", ["k=y"], ["k=z"]), [
     { code: "not-in-enum", tag: "j=bad", args: [["allowed", "a"]], origin: "existing" },
@@ -84,7 +86,7 @@ test("validate: findings with their origin, args as pairs", () => {
 
 test("validate: a finding with no args has an empty args array", () => {
   const idx = new Index();
-  idx.add('cfg tagma.permit:"*:*"=false');
+  idx.add("cfg tagma.permit:other");
   assert.deepEqual(idx.validate("x", ["lang=en"], []), [
     { code: "not-permitted", tag: "lang=en", args: [], origin: "introduced" },
   ]);
@@ -99,7 +101,7 @@ test("validate: an invalid tag throws, naming its list", () => {
 test("check: config findings, all existing, sorted by tag", () => {
   const idx = new Index();
   assert.deepEqual(idx.check(), []);
-  idx.add('cfg tagma.permit:"*:secret"=false tagma.arity:k=scalar tagma.arity:k=set');
+  idx.add("cfg tagma.permit:k tagma.hide:x=false tagma.arity:k=scalar tagma.arity:k=set");
   assert.deepEqual(idx.check(), [
     {
       code: "conflict",
@@ -109,8 +111,8 @@ test("check: config findings, all existing, sorted by tag", () => {
     },
     {
       code: "inert-false",
-      tag: 'tagma.permit:"*:secret"=false',
-      args: [["facet", "permit"]],
+      tag: "tagma.hide:x=false",
+      args: [["facet", "hide"]],
       origin: "existing",
     },
   ]);
@@ -118,16 +120,18 @@ test("check: config findings, all existing, sorted by tag", () => {
 
 test("Rules.fromTags: validate and check mirror the index they come from", () => {
   // Non-config tags among the input are ignored.
-  const rules = Rules.fromTags(["tagma.enum:k=a", "tagma.enum:j=a", "k=z"]);
+  const rules = Rules.fromTags(['tagma.permit:"*:*"', "tagma.enum:k=a", "tagma.enum:j=a", "k=z"]);
   const idx = new Index();
-  idx.add("cfg tagma.enum:k=a tagma.enum:j=a");
+  // A store declaring no permit permits nothing (SPEC.md §10): this one
+  // permits every tag, so only the enums judge.
+  idx.add('cfg tagma.permit:"*:*" tagma.enum:k=a tagma.enum:j=a');
   idx.add("item k=z j=bad");
   const viaRules = rules.validate(["k=z", "j=bad"], ["k=y"], ["k=z"]);
   assert.deepEqual(viaRules, idx.validate("item", ["k=y"], ["k=z"]));
   assert.equal(viaRules.length, 2);
   assert.deepEqual(rules.validate([], ["k=a"], []), []);
   assert.deepEqual(rules.check(), []);
-  const conflicted = Rules.fromTags(["tagma.arity:k=scalar", "tagma.arity:k=set"]);
+  const conflicted = Rules.fromTags(["tagma.permit:k", "tagma.arity:k=scalar", "tagma.arity:k=set"]);
   assert.deepEqual(conflicted.check(), [
     {
       code: "conflict",
@@ -146,12 +150,16 @@ test("keys-per-item: a namespace over its limit, through the index and Rules", (
     { code: "too-many-keys", tag: "area:c", args: keys, origin: "introduced" },
   ];
   const idx = new Index();
-  idx.add("cfg tagma.keys-per-item:area=1");
+  idx.add('cfg tagma.permit:"area:*" tagma.keys-per-item:area=1');
   idx.add("item area:a area:b");
   assert.deepEqual(idx.validate("item", ["area:c"], []), expected);
-  const rules = Rules.fromTags(["tagma.keys-per-item:area=1"]);
+  const rules = Rules.fromTags(['tagma.permit:"area:*"', "tagma.keys-per-item:area=1"]);
   assert.deepEqual(rules.validate(["area:a", "area:b"], ["area:c"], []), expected);
-  const conflicted = Rules.fromTags(["tagma.keys-per-item:area=2", "tagma.keys-per-item:area=1"]);
+  const conflicted = Rules.fromTags([
+    'tagma.permit:"area:*"',
+    "tagma.keys-per-item:area=2",
+    "tagma.keys-per-item:area=1",
+  ]);
   assert.deepEqual(conflicted.check(), [
     {
       code: "conflict",
