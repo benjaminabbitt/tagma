@@ -566,7 +566,7 @@ impl Rules {
 
     /// The tag set `current` becomes under `change` (SPEC.md §13): removes
     /// first, then adds with §8's scalar collapse, as a write would.
-    fn apply(&self, current: &[Tag], change: &Change) -> Vec<Tag> {
+    pub fn apply(&self, current: &[Tag], change: &Change) -> Vec<Tag> {
         let mut tags: Vec<Tag> = current
             .iter()
             .filter(|t| !change.remove.contains(t))

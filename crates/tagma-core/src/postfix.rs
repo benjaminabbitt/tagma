@@ -26,7 +26,35 @@ use std::collections::BTreeSet;
 
 use crate::atom::Atom;
 use crate::index::{atom_reference, Index};
+use crate::tag::Tag;
 use crate::token::split_unquoted;
+
+/// Reduces a postfix query to the concrete tags a write applies: a literal
+/// is itself, `and` unions, `or` and `not` give nothing, and operands left
+/// at the end of input union; the result is in tag order, without repeats.
+///
+/// # Errors
+///
+/// Returns a `String` for a malformed query, or for an atom no write can
+/// apply (a `*`/`+` quantifier, or an operator other than `=`).
+pub fn to_write_tags(postfix: &str) -> Result<Vec<Tag>, String> {
+    todo!("to_write_tags({postfix:?})")
+}
+
+/// One `(namespace, key)` reference: `None` namespace is the null
+/// namespace, `None` key is every key of that namespace.
+pub type Reference = (Option<String>, Option<String>);
+
+/// The `(namespace, key)` references of every atom in a postfix query, as
+/// the index reads them per atom: a namespace quantifier references
+/// nothing, and a key quantifier references its whole namespace (`None`).
+///
+/// # Errors
+///
+/// Returns a `String` for a malformed query, as [`eval`] would.
+pub fn references(postfix: &str) -> Result<BTreeSet<Reference>, String> {
+    todo!("references({postfix:?})")
+}
 
 /// A stack entry: a sorted, deduplicated `Vec<u32>` of interned item ids,
 /// tagged as itself (`Pos`) or as the complement of that set over the

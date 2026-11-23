@@ -5,7 +5,9 @@ use std::fmt;
 use crate::token::{emit_component, find_unquoted, parse_component};
 
 /// A parsed tag: `(namespace?, key, value?)` (SPEC.md §1-2).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Ordered by `(namespace, key, value)`, each absent component before any
+/// present one: the canonical order a tag set is written in.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Tag {
     /// Optional namespace.
     pub namespace: Option<String>,

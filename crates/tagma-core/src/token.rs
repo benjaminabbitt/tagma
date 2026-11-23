@@ -200,7 +200,7 @@ pub(crate) fn find_unquoted(s: &str, targets: &[char]) -> Result<Option<(usize, 
 /// # Errors
 ///
 /// Returns a `String` if an opened quote is never closed.
-pub(crate) fn split_unquoted(s: &str, sep: char) -> Result<Vec<&str>, String> {
+pub fn split_unquoted(s: &str, sep: char) -> Result<Vec<&str>, String> {
     let mut parts = Vec::new();
     let mut start = 0;
     let mut i = 0;

@@ -1189,3 +1189,292 @@ fn rules_from_tags_validates_keys_per_item_like_the_index() {
     );
     assert!(!idx.validate("x", &change).is_empty());
 }
+
+// --- Rules::apply: the set validate judges (SPEC.md §13) ---------------------
+//
+// `Rules::apply(current, &change)` made public, so a writer writes exactly
+// the set `validate` judged: removes first, then adds with §8's scalar
+// collapse. Written before it is public, for the owner's review.
+
+/// A standalone rule set read from config tag spellings.
+fn rules(config: &[&str]) -> Rules {
+    Rules::from_tags(&tags(config))
+}
+
+/// A tag list's spellings, sorted: a set compared as a multiset, so a
+/// duplicate still shows (the list's order is not pinned here).
+fn sorted(list: &[Tag]) -> Vec<String> {
+    let mut spelled: Vec<String> = list.iter().map(Tag::to_string).collect();
+    spelled.sort();
+    spelled
+}
+
+fn change(add_list: &[&str], remove_list: &[&str]) -> Change {
+    Change {
+        add: tags(add_list),
+        remove: tags(remove_list),
+    }
+}
+
+#[test]
+fn apply_with_no_change_is_the_current_set() {
+    let current = tags(&["a", "k=1", "x:y=z"]);
+    assert_eq!(
+        sorted(&rules(&[]).apply(&current, &Change::default())),
+        sorted(&current)
+    );
+}
+
+#[test]
+fn apply_adds_and_removes() {
+    let current = tags(&["a", "b", "k=1"]);
+    assert_eq!(
+        sorted(&rules(&[]).apply(&current, &change(&["c"], &["b"]))),
+        ["a", "c", "k=1"]
+    );
+}
+
+#[test]
+fn apply_removes_before_it_adds() {
+    // A tag both removed and added is present afterwards: the remove runs
+    // first, against the current set, and the add then restores it.
+    let current = tags(&["a", "k=1"]);
+    assert_eq!(
+        sorted(&rules(&[]).apply(&current, &change(&["a"], &["a"]))),
+        ["a", "k=1"]
+    );
+    // A remove never reaches a tag the same change adds.
+    assert_eq!(
+        sorted(&rules(&[]).apply(&[], &change(&["n"], &["n"]))),
+        ["n"]
+    );
+}
+
+#[test]
+fn apply_set_is_remove_current_then_add() {
+    // git-tagma's `set`: Change { remove: current, add: reduced }.
+    let current = tags(&["a", "k=1", "x:y"]);
+    let set = Change {
+        add: tags(&["b", "k=2"]),
+        remove: current.clone(),
+    };
+    assert_eq!(sorted(&rules(&[]).apply(&current, &set)), ["b", "k=2"]);
+}
+
+#[test]
+fn apply_removing_an_absent_tag_is_a_no_op() {
+    let current = tags(&["a", "k=1"]);
+    assert_eq!(
+        sorted(&rules(&[]).apply(&current, &remove(&["b", "k=2", "ns:a", "a=1"]))),
+        ["a", "k=1"]
+    );
+}
+
+#[test]
+fn apply_removes_exactly_the_namespace_key_and_value() {
+    let current = tags(&["k", "k=1", "x:k=1"]);
+    assert_eq!(
+        sorted(&rules(&[]).apply(&current, &remove(&["k=1"]))),
+        ["k", "x:k=1"]
+    );
+}
+
+#[test]
+fn apply_collapses_a_scalar_key_last_value_wins() {
+    let scalar = rules(&["tagma.arity:k=scalar"]);
+    assert_eq!(
+        sorted(&scalar.apply(&tags(&["k=1", "a"]), &add(&["k=2"]))),
+        ["a", "k=2"]
+    );
+    // Within one change, too.
+    assert_eq!(
+        sorted(&scalar.apply(&[], &add(&["k=1", "k=2", "k=3"]))),
+        ["k=3"]
+    );
+    // A value-less tag on a scalar key is one more value.
+    assert_eq!(
+        sorted(&scalar.apply(&tags(&["k"]), &add(&["k=1"]))),
+        ["k=1"]
+    );
+}
+
+#[test]
+fn apply_rewriting_an_identical_scalar_value_is_a_no_op() {
+    let scalar = rules(&["tagma.arity:k=scalar"]);
+    assert_eq!(
+        sorted(&scalar.apply(&tags(&["k=1"]), &add(&["k=1"]))),
+        ["k=1"]
+    );
+}
+
+#[test]
+fn apply_scalar_collapse_displaces_only_the_same_namespace_and_key() {
+    let scalar = rules(&["tagma.arity:k=scalar"]);
+    assert_eq!(
+        sorted(&scalar.apply(&tags(&["j=1", "x:k=1", "k=0"]), &add(&["k=1"]))),
+        ["j=1", "k=1", "x:k=1"]
+    );
+    let named = rules(&[r#"tagma.arity:"x:k"=scalar"#]);
+    assert_eq!(
+        sorted(&named.apply(&tags(&["k=1", "x:k=1"]), &add(&["k=2", "x:k=2"]))),
+        ["k=1", "k=2", "x:k=2"]
+    );
+}
+
+#[test]
+fn apply_without_a_scalar_declaration_keeps_every_value() {
+    assert_eq!(
+        sorted(&rules(&[]).apply(&tags(&["k=1"]), &add(&["k=2"]))),
+        ["k=1", "k=2"]
+    );
+    assert_eq!(
+        sorted(&rules(&["tagma.arity:k=set"]).apply(&tags(&["k=1"]), &add(&["k=2"]))),
+        ["k=1", "k=2"]
+    );
+}
+
+#[test]
+fn apply_is_pure() {
+    let scalar = rules(&["tagma.arity:k=scalar"]);
+    let current = tags(&["k=1", "a"]);
+    let c = change(&["k=2"], &["a"]);
+    let first = scalar.apply(&current, &c);
+    assert_eq!(scalar.apply(&current, &c), first);
+    assert_eq!(current, tags(&["k=1", "a"]));
+}
+
+/// The changes, over the configs of the validate tests above, that
+/// `apply_agrees_with_what_validate_judged` runs: `(config, current,
+/// change)`.
+fn validate_cases() -> Vec<(Vec<&'static str>, Vec<&'static str>, Change)> {
+    let open = r#"tagma.permit:"*:*""#;
+    vec![
+        (
+            vec![
+                r#"tagma.permit:"triage:*""#,
+                r#"tagma.enum:"triage:kind"=defect"#,
+                r#"tagma.arity:"triage:kind"=scalar"#,
+            ],
+            vec!["triage:kind=defect"],
+            add(&["triage:kind=bug", "lang=en"]),
+        ),
+        (
+            vec![open, "tagma.arity:k=scalar", "tagma.enum:k=good"],
+            vec!["k=bad"],
+            add(&["k=good"]),
+        ),
+        (
+            vec![open, "tagma.arity:k=scalar", "tagma.enum:k=good"],
+            vec![],
+            add(&["k=good", "k=bad"]),
+        ),
+        (
+            vec![open, "tagma.arity:k=scalar", "tagma.enum:k=good"],
+            vec![],
+            add(&["k=bad", "k=good"]),
+        ),
+        (
+            vec![
+                open,
+                "tagma.arity:k=scalar",
+                "tagma.enum:j=a",
+                r#"tagma.enum:"x:k"=a"#,
+            ],
+            vec!["j=bad", "x:k=bad"],
+            add(&["k=1"]),
+        ),
+        (
+            vec![open, "tagma.arity:k=scalar"],
+            vec!["k=1", "k=2"],
+            remove(&["k=1"]),
+        ),
+        (
+            vec![open, "tagma.arity:k=scalar"],
+            vec!["k=1", "k=2"],
+            Change::default(),
+        ),
+        (
+            vec![open, "tagma.enum:k=a"],
+            vec!["k=z"],
+            change(&["k=z"], &["k=z"]),
+        ),
+        (
+            vec![open, "tagma.enum:k=a"],
+            vec!["k=z"],
+            change(&["k=a"], &["k=z"]),
+        ),
+        (
+            vec![open, "tagma.range:k=1..5"],
+            vec!["k=3"],
+            add(&["k=0", "k=6", "k=5"]),
+        ),
+        (
+            vec![r#"tagma.permit:"area:*""#, "tagma.keys-per-item:area=1"],
+            vec!["area:a"],
+            add(&["area:b", "area:c=1"]),
+        ),
+        (
+            vec![],
+            vec!["lang=en"],
+            change(&["triage:kind=bug", "bare"], &["lang=en"]),
+        ),
+    ]
+}
+
+#[test]
+fn apply_agrees_with_what_validate_judged() {
+    // Every finding validate reports is about a tag in apply's result, and
+    // judging apply's result as the item's current set (an empty change)
+    // gives the same findings, origins aside: validate judged exactly the
+    // set apply returns.
+    let key = |f: &Finding| (f.code, f.tag.to_string(), f.args.clone());
+    for (config, current, change) in validate_cases() {
+        let rules = rules(&config);
+        let current = tags(&current);
+        let applied = rules.apply(&current, &change);
+        let judged = rules.validate(&current, &change);
+        for f in &judged {
+            assert!(
+                applied.contains(&f.tag),
+                "{config:?} {current:?} {change:?}: finding {f:?} is about a tag apply did not keep: {applied:?}"
+            );
+        }
+        let mut via_validate: Vec<_> = judged.iter().map(key).collect();
+        let mut via_apply: Vec<_> = rules
+            .validate(&applied, &Change::default())
+            .iter()
+            .map(key)
+            .collect();
+        via_validate.sort();
+        via_apply.sort();
+        assert_eq!(
+            via_apply, via_validate,
+            "{config:?} {current:?} {change:?}: apply gave {applied:?}"
+        );
+    }
+}
+
+#[test]
+fn apply_agrees_with_the_index_write_path() {
+    // The index's own write (add_item, with §8 collapse) and apply, under
+    // the same config, keep the same tags for an add-only change: each tag
+    // the item was ever given is matched iff apply kept it.
+    let rules = rules(&["tagma.arity:k=scalar"]);
+    let current = tags(&["k=1", "a"]);
+    let change = add(&["k=2", "b", "k=3"]);
+    let applied = rules.apply(&current, &change);
+    let mut idx = index(&["cfg tagma.arity:k=scalar"]);
+    idx.add_item("item", current.clone());
+    idx.add_item("item", change.add.clone());
+    for t in current.iter().chain(&change.add) {
+        let matched = idx
+            .query_postfix(&t.to_string())
+            .expect("a tag's spelling is a query");
+        assert_eq!(
+            matched == ["item"],
+            applied.contains(t),
+            "{t}: index matched {matched:?}, apply gave {applied:?}"
+        );
+    }
+    assert_eq!(sorted(&applied), ["a", "b", "k=3"]);
+}
