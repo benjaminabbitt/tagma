@@ -123,7 +123,33 @@ pub type Reference = (Option<String>, Option<String>);
 ///
 /// Returns a `String` for a malformed query, as [`eval`] would.
 pub fn references(postfix: &str) -> Result<BTreeSet<Reference>, String> {
-    todo!("references({postfix:?})")
+    let mut references = BTreeSet::new();
+    // The operator shape `eval` runs, over a stack of unit frames: only the
+    // arity matters here, and `pop` reports `eval`'s exact underflow error.
+    let mut stack: Vec<()> = Vec::new();
+    for (_, tok) in parse_tokens(postfix)? {
+        match tok {
+            PfTok::And => {
+                pop(&mut stack, "and")?;
+                pop(&mut stack, "and")?;
+                stack.push(());
+            }
+            PfTok::Or => {
+                pop(&mut stack, "or")?;
+                pop(&mut stack, "or")?;
+                stack.push(());
+            }
+            PfTok::Not => {
+                pop(&mut stack, "not")?;
+                stack.push(());
+            }
+            PfTok::Atom(atom) => {
+                references.extend(atom_reference(&atom));
+                stack.push(());
+            }
+        }
+    }
+    Ok(references)
 }
 
 /// A stack entry: a sorted, deduplicated `Vec<u32>` of interned item ids,
