@@ -24,6 +24,15 @@ A **tag** is a triple `(namespace?, key, value?)`:
   simultaneously. A value-matching atom matches if *some* tag on the item
   satisfies it.
 - Untagging is deletion. There is no "disable" sentinel value.
+- **Canonical order.** Tags are totally ordered by namespace, then key,
+  then value. At each position an absent component sorts before any present
+  one, and present components compare by their decoded (unquoted, §2)
+  content, code point by code point. So `urgent` < `urgent=` <
+  `urgent=high`, and every null-namespace tag sorts before every namespaced
+  one: `lang=en`, `lang=fr`, `urgent`, `area:cli`, `triage:level=3`. The
+  order agrees with equality: two spellings of one tag (quoted and bare)
+  are one tag and compare equal. It orders a tag set for writing and
+  display; it is not a query comparison (§4).
 
 ## 2. Grammar (W3C-flavored EBNF)
 
@@ -1237,3 +1246,37 @@ counts its config tags' keys, as any other.
 **Config is stored as tags and derived at read time**, store-wide and
 unconditional, as §7–§12: limit tags live on any item, and are hidden by
 §7's default like every `tagma.*` tag.
+
+## 16. Write reduction — a query as the tags a write applies
+
+*(proposed 2026-11-22, for the owner's review: for a client that takes one
+expression both to query and to write, as git-tagma's `add`, `rm`, `set`
+and `co -b` do. tagma-core only for now; ARCHITECTURE.md lists the surfaces
+it has not reached.)*
+
+A **write reduction** turns a postfix query (§2's wire form; an infix query
+is compiled to it first, §5) into the concrete tags a write applies. It
+evaluates the same stack as §5, over tag sets instead of items:
+
+- an atom that names one tag (`key`, `key=value`, `ns:key`,
+  `ns:key=value`, with no quantifier) pushes the set holding that tag;
+- `and` pops two sets and pushes their union;
+- `or` pops two sets and pushes the empty set, and `not` pops one and pushes
+  the empty set: neither says which tags to write;
+- operands left on the stack at the end of input are unioned (§5's
+  implicit `and`).
+
+Operators match in any case, and a quoted component is literal (§2):
+`k="*"` names the value `*`, and `"and"` is a key.
+
+**The result** is the union's tags in canonical order (§1), each once.
+
+**Errors.** A reduction refuses the whole query, and writes nothing, for:
+
+- a malformed query, as §5 refuses one (empty input, a stack underflow,
+  an unterminated quote, an invalid atom);
+- any atom no write can apply, **anywhere in the query**, even inside a
+  subtree that `or` or `not` discards: a quantifier (`*` or `+`) in any
+  position, or any operator other than `=` (`!=`, `>`, `>=`, `<`, `<=`,
+  `~`). A write expression holding such an atom is a query typed where a
+  tag list was meant, and refusing it beats writing part of it.
