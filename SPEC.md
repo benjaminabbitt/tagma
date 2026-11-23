@@ -1249,10 +1249,9 @@ unconditional, as §7–§12: limit tags live on any item, and are hidden by
 
 ## 16. Write reduction — a query as the tags a write applies
 
-*(proposed 2026-11-22, for the owner's review: for a client that takes one
-expression both to query and to write, as git-tagma's `add`, `rm`, `set`
-and `co -b` do. tagma-core only for now; ARCHITECTURE.md lists the surfaces
-it has not reached.)*
+*(For a client that takes one expression both to query and to write, as
+git-tagma's `add`, `rm`, `set` and `co -b` do. tagma-core only for now;
+ARCHITECTURE.md lists the surfaces it has not reached.)*
 
 A **write reduction** turns a postfix query (§2's wire form; an infix query
 is compiled to it first, §5) into the concrete tags a write applies. It
