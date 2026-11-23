@@ -140,6 +140,14 @@ port mirrors the `rules` module independently:
 | WASM / JS | `Index.validate(id, add, remove)`, `Index.check()` | `Rules.fromTags(tags)`, `Rules.validate(current, add, remove)`, `Rules.check()` | `Finding` object, `args` as `[name, value]` pairs |
 | Go port | `(*Index).Validate(id, Change)`, `(*Index).Check()` | `RulesFromTags(tags)`, `RegisterType`, `(*Rules).Validate(current, Change)`, `(*Rules).Check()` | `Finding{Code, Tag, Args []Arg, Origin}` |
 
+**Core-only for now (an exception to the same-capabilities rule).** These
+tagma-core calls are on no other surface yet: `Tag`'s `Ord`/`Hash`
+(canonical order), `postfix::to_write_tags`, `postfix::references`,
+`Rules::apply` and `token::split_unquoted`. Their one consumer, git-tagma,
+is Rust, and PLAN.md admits a binding only for a named consumer. Each
+surface's parity is a Deferred task, revived when a consumer on that
+surface needs them.
+
 Outside Rust and Go a finding's tag is its canonical spelling (SPEC.md
 §2), and tags cross as strings: a whitespace-separated list split as an
 ingest line is (CLI, C ABI), or one tag per list element (Python, JS). The
