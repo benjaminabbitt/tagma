@@ -24,7 +24,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::atom::Atom;
+use crate::atom::{Atom, Op, Pos};
 use crate::index::{atom_reference, Index};
 use crate::tag::Tag;
 use crate::token::split_unquoted;
@@ -38,7 +38,77 @@ use crate::token::split_unquoted;
 /// Returns a `String` for a malformed query, or for an atom no write can
 /// apply (a `*`/`+` quantifier, or an operator other than `=`).
 pub fn to_write_tags(postfix: &str) -> Result<Vec<Tag>, String> {
-    todo!("to_write_tags({postfix:?})")
+    let toks = parse_tokens(postfix)?;
+
+    // Every atom converts before any reduction (SPEC.md §16): an
+    // unwritable atom refuses the whole query, even where an `or`/`not`
+    // would discard it.
+    let mut written: Vec<Option<Tag>> = Vec::with_capacity(toks.len());
+    for (text, tok) in &toks {
+        written.push(match tok {
+            PfTok::Atom(atom) => Some(write_tag(text, atom)?),
+            PfTok::And | PfTok::Or | PfTok::Not => None,
+        });
+    }
+
+    let mut stack: Vec<BTreeSet<Tag>> = Vec::new();
+    for ((_, tok), tag) in toks.iter().zip(written) {
+        match tok {
+            PfTok::And => {
+                let rhs = pop(&mut stack, "and")?;
+                let mut lhs = pop(&mut stack, "and")?;
+                lhs.extend(rhs);
+                stack.push(lhs);
+            }
+            PfTok::Or => {
+                pop(&mut stack, "or")?;
+                pop(&mut stack, "or")?;
+                stack.push(BTreeSet::new());
+            }
+            PfTok::Not => {
+                pop(&mut stack, "not")?;
+                stack.push(BTreeSet::new());
+            }
+            PfTok::Atom(_) => stack.push(tag.into_iter().collect()),
+        }
+    }
+
+    // SPEC.md §5: operands left at the end of input fold with `and`, which
+    // on the write side is union.
+    Ok(stack
+        .into_iter()
+        .flatten()
+        .collect::<BTreeSet<Tag>>()
+        .into_iter()
+        .collect())
+}
+
+/// The one tag a write-side atom names (SPEC.md §16): every position a
+/// concrete token and the operator, if any, `=`. `text` is the atom as
+/// written, for the error.
+fn write_tag(text: &str, atom: &Atom) -> Result<Tag, String> {
+    let tok = |pos: &Pos| match pos {
+        Pos::Tok(t) => Ok(t.clone()),
+        Pos::Any | Pos::Present => Err(format!(
+            "postfix: cannot write '{text}': a quantifier names no single tag"
+        )),
+    };
+    let namespace = atom.ns.as_ref().map(tok).transpose()?;
+    let key = tok(&atom.key)?;
+    let value = match &atom.value {
+        None => None,
+        Some((Op::Eq, pos)) => Some(tok(pos)?),
+        Some(_) => {
+            return Err(format!(
+                "postfix: cannot write '{text}': only '=' names a single tag"
+            ))
+        }
+    };
+    Ok(Tag {
+        namespace,
+        key,
+        value,
+    })
 }
 
 /// One `(namespace, key)` reference: `None` namespace is the null
@@ -235,23 +305,10 @@ enum PfTok {
 ///
 /// Returns a `String` describing the evaluation failure.
 pub fn eval(postfix: &str, index: &Index) -> Result<Vec<String>, String> {
-    if postfix.is_empty() {
-        return Err("postfix: empty query".to_string());
-    }
-
-    let mut toks: Vec<PfTok> = Vec::new();
-    for tok in split_unquoted(postfix, '/').map_err(|e| format!("postfix: {e}"))? {
-        // Case-insensitive operator match (SPEC.md §2): a quoted token
-        // (e.g. `"and"`) still carries its quotes here, so it never
-        // lowercases to exactly "and"/"or"/"not" and always falls through
-        // to Atom::parse — quoting escapes operator-hood.
-        toks.push(match tok.to_ascii_lowercase().as_str() {
-            "and" => PfTok::And,
-            "or" => PfTok::Or,
-            "not" => PfTok::Not,
-            _ => PfTok::Atom(Atom::parse(tok)?),
-        });
-    }
+    let toks: Vec<PfTok> = parse_tokens(postfix)?
+        .into_iter()
+        .map(|(_, tok)| tok)
+        .collect();
 
     let mut references: BTreeSet<(Option<String>, Option<String>)> = BTreeSet::new();
     for t in &toks {
@@ -307,7 +364,40 @@ pub fn eval(postfix: &str, index: &Index) -> Result<Vec<String>, String> {
     Ok(index.strings_for(&ids))
 }
 
-fn pop(stack: &mut Vec<Frame>, op: &str) -> Result<Frame, String> {
+/// Splits a postfix query on unquoted `/` and parses every token, each
+/// paired with its text: an operator (any case; a quoted reserved word
+/// keeps its quotes here, so it stays an atom), or an atom. Shared by
+/// [`eval`] and [`to_write_tags`].
+///
+/// # Errors
+///
+/// Returns a `String` for an empty query, an unterminated quote, or an
+/// invalid atom.
+fn parse_tokens(postfix: &str) -> Result<Vec<(&str, PfTok)>, String> {
+    if postfix.is_empty() {
+        return Err("postfix: empty query".to_string());
+    }
+
+    let mut toks = Vec::new();
+    for tok in split_unquoted(postfix, '/').map_err(|e| format!("postfix: {e}"))? {
+        // Case-insensitive operator match (SPEC.md §2): a quoted token
+        // (e.g. `"and"`) still carries its quotes here, so it never
+        // lowercases to exactly "and"/"or"/"not" and always falls through
+        // to Atom::parse — quoting escapes operator-hood.
+        toks.push((
+            tok,
+            match tok.to_ascii_lowercase().as_str() {
+                "and" => PfTok::And,
+                "or" => PfTok::Or,
+                "not" => PfTok::Not,
+                _ => PfTok::Atom(Atom::parse(tok)?),
+            },
+        ));
+    }
+    Ok(toks)
+}
+
+fn pop<T>(stack: &mut Vec<T>, op: &str) -> Result<T, String> {
     stack
         .pop()
         .ok_or_else(|| format!("postfix: stack underflow at '{op}'"))
