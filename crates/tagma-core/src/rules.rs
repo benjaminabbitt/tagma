@@ -565,7 +565,12 @@ impl Rules {
     }
 
     /// The tag set `current` becomes under `change` (SPEC.md §13): removes
-    /// first, then adds with §8's scalar collapse, as a write would.
+    /// first, then adds with §8's scalar collapse, as a write would. It is
+    /// the set [`Rules::validate`] judges, so a caller that writes it writes
+    /// exactly what was validated. It is not canonicalized: a tag added
+    /// under a set-arity key the item already carries appears twice, and the
+    /// order is the order of application. A caller that persists it sorts
+    /// and deduplicates it (`Tag` is `Ord`).
     pub fn apply(&self, current: &[Tag], change: &Change) -> Vec<Tag> {
         let mut tags: Vec<Tag> = current
             .iter()
